@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 
+from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import MAX_TOOL_OUTPUT, safe_tool_env
 
 
@@ -47,7 +48,8 @@ def discover_tools(servers: dict) -> dict:
     discovered = {}
     for alias, config in servers.items():
         try:
-            discovered.update(asyncio.run(asyncio.wait_for(_discover_one(alias, config), 20)))
+            discovered.update(asyncio.run(asyncio.wait_for(
+                _discover_one(alias, config), RUNTIME["timeouts"]["mcp_discovery_seconds"])))
         except TimeoutError as exc:
             raise RuntimeError(f"MCP server {alias} timed out during discovery") from exc
         except Exception as exc:
@@ -73,7 +75,8 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
 
 def call_tool(config: dict, native_name: str, arguments: dict) -> str:
     try:
-        return asyncio.run(asyncio.wait_for(_call_one(config, native_name, arguments), 30))
+        return asyncio.run(asyncio.wait_for(
+            _call_one(config, native_name, arguments), RUNTIME["timeouts"]["mcp_tool_seconds"]))
     except TimeoutError as exc:
         raise RuntimeError("MCP tool call timed out") from exc
     except Exception as exc:

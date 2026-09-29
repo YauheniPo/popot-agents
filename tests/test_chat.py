@@ -1,15 +1,20 @@
+import io
 import json
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 from http.client import HTTPConnection
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from popot_agents.orchestrator.main import AgentRunError, DockerAgentRunner, create_server
+from popot_agents.orchestrator.main import AgentRunError, ChatServer, DockerAgentRunner, create_server
+from popot_agents.orchestrator.session_store import SessionStore
 from popot_agents.worker.session_worker import Conversation
 
 
@@ -44,10 +49,140 @@ class FakeRunner:
     def __call__(self, task):
         return {"answer": task}
 
-    def start_chat(self, chat_id):
+    def start_chat(self, chat_id, role_config=None):
         chat = FakeChat(f"worker-{chat_id}")
         self.chats.append(chat)
         return chat
+
+
+class TaskSessionTests(unittest.TestCase):
+    def test_role_ttl_controls_idle_worker_and_zero_never_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeRunner()
+            roles = {
+                "short": {"agent": "test_agent", "instructions": "x", "tools": [],
+                          "ttl_seconds": 30},
+                "forever": {"agent": "test_agent", "instructions": "x", "tools": [],
+                            "ttl_seconds": 0},
+            }
+            with patch("popot_agents.orchestrator.main.ChatServer") as server_class:
+                create_server({"test_agent": runner}, roles=roles)
+            handler_class = server_class.call_args.args[1]
+            server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
+                                     last_prune=time.monotonic())
+
+            def post(role):
+                body = json.dumps({"role": role, "message": "hello"}).encode()
+                handler = handler_class.__new__(handler_class)
+                handler.client_address = ("192.0.2.7", 1234)
+                handler.command = "POST"
+                handler.path = "/messages"
+                handler.request_version = "HTTP/1.1"
+                handler.requestline = "POST /messages HTTP/1.1"
+                handler.server = server
+                handler.headers = Message()
+                handler.headers["Content-Type"] = "application/json"
+                handler.headers["Content-Length"] = str(len(body))
+                handler.rfile = io.BytesIO(body)
+                handler.wfile = io.BytesIO()
+                with redirect_stderr(io.StringIO()):
+                    handler.do_POST()
+                return json.loads(handler.wfile.getvalue().split(b"\r\n\r\n", 1)[1])
+
+            short = post("short")
+            forever = post("forever")
+            self.assertIsNone(server.store.expires_at(server.store.get(forever["sessionId"])))
+            forever_path = Path(directory) / f"{forever['sessionId']}.json"
+            saved = json.loads(forever_path.read_text())
+            saved["createdAt"] = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+            forever_path.write_text(json.dumps(saved))
+            self.assertIsNotNone(server.store.get(forever["sessionId"]))
+            self.assertNotIn(forever["sessionId"], server.store.prune_expired())
+
+            handler = handler_class.__new__(handler_class)
+            handler.client_address = ("192.0.2.7", 1234)
+            handler.command = "GET"
+            handler.path = f"/chats/{forever['sessionId']}"
+            handler.request_version = "HTTP/1.1"
+            handler.requestline = f"GET {handler.path} HTTP/1.1"
+            handler.server = server
+            handler.headers = Message()
+            handler.wfile = io.BytesIO()
+            with redirect_stderr(io.StringIO()):
+                handler.do_GET()
+            chat_info = json.loads(handler.wfile.getvalue().split(b"\r\n\r\n", 1)[1])
+            self.assertIsNone(chat_info["expiresAt"])
+
+            for record in server.live.values():
+                record.last_used = time.monotonic() - 40
+            server.last_prune = 0
+            ChatServer.service_actions(server)
+            self.assertNotIn(short["sessionId"], server.live)
+            self.assertIn(forever["sessionId"], server.live)
+            self.assertFalse(runner.chats[1].closed)
+
+    def test_task_stays_live_for_five_minutes_and_continues_by_session_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeRunner()
+            with patch("popot_agents.orchestrator.main.ChatServer") as server_class:
+                create_server({"test_agent": runner})
+            handler_class = server_class.call_args.args[1]
+            self.assertEqual(server_class.call_args.args[3], 300)
+            server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
+                                     last_prune=time.monotonic())
+
+            def post(path, payload):
+                body = json.dumps(payload).encode()
+                handler = handler_class.__new__(handler_class)
+                handler.client_address = ("192.0.2.7", 1234)
+                handler.command = "POST"
+                handler.path = path
+                handler.request_version = "HTTP/1.1"
+                handler.requestline = f"POST {path} HTTP/1.1"
+                handler.server = server
+                handler.headers = Message()
+                handler.headers["Content-Type"] = "application/json"
+                handler.headers["Content-Length"] = str(len(body))
+                handler.rfile = io.BytesIO(body)
+                handler.wfile = io.BytesIO()
+                with redirect_stderr(io.StringIO()):
+                    handler.do_POST()
+                raw = handler.wfile.getvalue()
+                return int(raw.split(b" ", 2)[1]), json.loads(raw.split(b"\r\n\r\n", 1)[1])
+
+            status, first = post("/tasks", {"agent": "test_agent", "task": "remember 137"})
+            self.assertEqual(status, 200)
+            self.assertEqual(first["answer"], "turn 1")
+            session_id = first["sessionId"]
+            self.assertEqual(first["container"], f"worker-{session_id}")
+            self.assertEqual(runner.chats[0].messages, ["remember 137"])
+            self.assertEqual(server.store.get(session_id)["messages"][0]["content"], "remember 137")
+
+            status, followup = post("/messages", {"sessionId": session_id,
+                                                  "message": "what number?"})
+            self.assertEqual(status, 200)
+            self.assertEqual(followup["answer"], "turn 2")
+            self.assertEqual(followup["container"], first["container"])
+            self.assertEqual(len(runner.chats), 1)
+
+            server.live[session_id].last_used = time.monotonic() - 299
+            ChatServer.service_actions(server)
+            self.assertFalse(runner.chats[0].closed)
+            server.live[session_id].last_used = time.monotonic() - 301
+            ChatServer.service_actions(server)
+            self.assertTrue(runner.chats[0].closed)
+
+            status, later = post("/messages", {"sessionId": session_id,
+                                               "message": "continue later"})
+            self.assertEqual(status, 200)
+            self.assertEqual(later["answer"], "turn 3")
+            self.assertEqual(len(runner.chats), 2)
+            self.assertEqual(runner.chats[1].restored, [
+                {"role": "user", "content": "remember 137"},
+                {"role": "assistant", "content": "turn 1"},
+                {"role": "user", "content": "what number?"},
+                {"role": "assistant", "content": "turn 2"},
+            ])
 
 
 class ChatApiTests(unittest.TestCase):
@@ -257,6 +392,40 @@ class ChatApiTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    @patch("popot_agents.worker.session_worker.socketserver.UnixStreamServer")
+    @patch("popot_agents.worker.session_worker.run_http", return_value="done")
+    def test_session_server_emits_turn_events_to_container_stderr(self, run_http, server_class):
+        from popot_agents.worker.session_worker import serve
+
+        output = io.StringIO()
+        with patch.dict("os.environ", {"HARNESS_SESSION_MODE": "http", "HARNESS_ROLE_JSON": "{}"}), \
+                redirect_stderr(output):
+            serve()
+            handler_class = server_class.call_args.args[1]
+            handler = handler_class.__new__(handler_class)
+            handler.rfile = io.BytesIO(b'{"action":"message","message":"hello"}\n')
+            handler.wfile = io.BytesIO()
+            handler.handle()
+
+        self.assertEqual(json.loads(handler.wfile.getvalue()), {"answer": "done"})
+        events = [json.loads(line) for line in output.getvalue().splitlines()
+                  if line.startswith("{")]
+        self.assertEqual([event["event"] for event in events],
+                         ["worker_ready", "turn_started", "turn_completed"])
+        run_http.assert_called_once()
+
+    def test_logs_turn_lifecycle_without_user_message(self):
+        output = io.StringIO()
+        with redirect_stderr(output):
+            answer = Conversation(lambda messages: "Готово").ask("private prompt")
+        self.assertEqual(answer, "Готово")
+        events = [json.loads(line) for line in output.getvalue().splitlines()
+                  if line.startswith("{")]
+        self.assertEqual([event["event"] for event in events],
+                         ["turn_started", "turn_completed"])
+        self.assertEqual(events[0]["turn"], 1)
+        self.assertNotIn("private prompt", output.getvalue())
+
     def test_preserves_full_history_and_commits_only_successful_turns(self):
         received = []
 
@@ -308,7 +477,10 @@ class DockerChatTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, "", ""),
         ]
         runner = DockerAgentRunner(network="bridge")
-        chat = runner.start_chat("abc123")
+        output = io.StringIO()
+        with redirect_stderr(output):
+            chat = runner.start_chat("abc123")
+        self.assertIn("chat worker popot-chat-abc123 ready", output.getvalue())
         chat.restore([{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}])
         self.assertEqual(chat.send("hi"), {"answer": "hello"})
         chat.close()

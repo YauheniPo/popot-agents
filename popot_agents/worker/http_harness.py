@@ -3,10 +3,36 @@
 import json
 import os
 import sys
+import time
 from urllib import error, request
+from urllib.parse import urlsplit
 
+from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.tools import TOOL_SCHEMAS, execute_tool
 from . import mcp_client
+
+
+def _trace(event: str, **fields) -> None:
+    print(json.dumps({"event": event, **fields}, ensure_ascii=False),
+          file=sys.stderr, flush=True)
+
+
+def _trace_arguments(name: str, arguments: dict) -> dict:
+    if name == "calculate":
+        return {"expression": arguments.get("expression")}
+    if name == "utc_time":
+        return {}
+    if name == "read_file":
+        return {"path": arguments.get("path")}
+    if name == "write_file":
+        return {"path": arguments.get("path"),
+                "content_chars": len(arguments.get("content", ""))}
+    if name in {"git_clone", "download_file"}:
+        return {"url_host": urlsplit(arguments.get("url", "")).hostname,
+                **{key: arguments.get(key) for key in ("directory", "path") if key in arguments}}
+    if name == "bash":
+        return {"command_chars": len(arguments.get("command", ""))}
+    return {"argument_keys": sorted(arguments)}
 
 
 def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) -> str:
@@ -25,39 +51,67 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
     headers = {"Content-Type": "application/json"}
+    model_parameters = {key: value for key, value in RUNTIME["model"].items()
+                        if key in {"temperature", "max_tokens"} and value is not None}
+    model_parameters.update(validate_model_parameters(
+        json.loads(os.getenv("HARNESS_MODEL_PARAMETERS_JSON", "{}"))))
     key_env = os.environ.get("HARNESS_API_KEY_ENV")
     if key_env:
         key = os.environ.get(key_env)
         if not key:
             raise ValueError(f"required environment variable is missing: {key_env}")
         headers["Authorization"] = f"Bearer {key}"
-    for _ in range(role_config.get("max_tool_rounds", 5)):
+    for round_number in range(1, role_config.get("max_tool_rounds",
+                                             RUNTIME["model"]["default_max_tool_rounds"]) + 1):
         body = {"model": model, "messages": messages}
+        body.update(model_parameters)
         if schemas:
             body["tools"] = schemas
         call = request.Request(
             f"{base_url}/chat/completions", data=json.dumps(body).encode("utf-8"),
             headers=headers, method="POST",
         )
+        started_at = time.monotonic()
+        _trace("model_request", round=round_number, message_count=len(messages),
+               available_tools=[schema["function"]["name"] for schema in schemas])
+        print(f"LLM request started round={round_number}",
+              file=sys.stderr, flush=True)
         try:
-            with request.urlopen(call, timeout=45) as response:
+            with request.urlopen(call, timeout=RUNTIME["timeouts"]["model_request_seconds"]) as response:
                 result = json.load(response)
         except error.HTTPError as exc:
+            print(f"LLM response HTTP {exc.code} after {time.monotonic() - started_at:.1f}s",
+                  file=sys.stderr, flush=True)
             raise RuntimeError(f"model endpoint returned HTTP {exc.code}") from exc
         except error.URLError as exc:
+            print(f"LLM request failed after {time.monotonic() - started_at:.1f}s",
+                  file=sys.stderr, flush=True)
             raise RuntimeError("model endpoint is unreachable") from exc
+        print(f"LLM response received after {time.monotonic() - started_at:.1f}s",
+              file=sys.stderr, flush=True)
         try:
             message = result["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError("model endpoint returned no answer") from exc
         calls = message.get("tool_calls") or []
+        _trace("model_response", round=round_number, tool_calls=len(calls))
         if calls:
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                _trace("assistant_message", round=round_number, content=content)
             messages.append(message)
             for tool_call in calls:
+                name = None
                 try:
                     function = tool_call["function"]
                     name = function["name"]
                     arguments = json.loads(function["arguments"])
+                    if not isinstance(arguments, dict):
+                        raise ValueError("tool arguments must be an object")
+                    _trace("tool_call", round=round_number, name=name,
+                           call_id=tool_call["id"],
+                           arguments=_trace_arguments(name, arguments))
+                    tool_started_at = time.monotonic()
                     if name in mcp_tools:
                         selected = mcp_tools[name]
                         output = mcp_client.call_tool(
@@ -66,12 +120,24 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
                         output = execute_tool(name, arguments, allowed)
                     call_id = tool_call["id"]
                 except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
+                    _trace("tool_error", round=round_number, name=name,
+                           error_type=type(exc).__name__)
                     raise RuntimeError(f"invalid tool call: {exc}") from exc
+                except Exception as exc:
+                    _trace("tool_error", round=round_number, name=name,
+                           error_type=type(exc).__name__)
+                    raise
+                result_fields = ({"output": output} if name in {"calculate", "utc_time"}
+                                 else {"output_chars": len(output)})
+                _trace("tool_result", round=round_number, name=name, call_id=call_id,
+                       elapsed_seconds=round(time.monotonic() - tool_started_at, 1),
+                       **result_fields)
                 messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
             continue
         answer = message.get("content")
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError("model endpoint returned an empty answer")
+        _trace("assistant_answer", round=round_number, content=answer.strip())
         return answer.strip()
     raise RuntimeError("model exceeded the tool-call limit")
 

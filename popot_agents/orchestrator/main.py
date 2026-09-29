@@ -1,4 +1,4 @@
-"""HTTP orchestrator for one-off tasks and resumable Docker chat workers."""
+"""HTTP orchestrator for tasks and resumable Docker chat workers."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -15,13 +16,33 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from popot_agents.tools import TOOL_SCHEMAS
+from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from .session_store import SessionStore
 
 
-MAX_REQUEST_BYTES = 64 * 1024
-MAX_TASK_LENGTH = 10_000
+MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
+MAX_TASK_LENGTH = RUNTIME["limits"]["message_chars"]
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CHAT_WORKER_MODULE = "popot_agents.worker.session_worker"
+LOG_SECRET_FIELDS = {"api_key", "apikey", "authorization", "cookie", "password",
+                     "secret", "token", "access_token", "refresh_token"}
+
+
+def _is_secret_field(key) -> bool:
+    if not isinstance(key, str):
+        return False
+    name = key.lower()
+    return name in LOG_SECRET_FIELDS or name.endswith(
+        ("_api_key", "_password", "_secret", "_token"))
+
+
+def _log_body(value):
+    if isinstance(value, dict):
+        return {key: "[REDACTED]" if _is_secret_field(key) else _log_body(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_log_body(item) for item in value]
+    return value
 
 
 class AgentRunError(Exception):
@@ -36,7 +57,7 @@ class DockerAgentRunner:
     def __init__(
         self,
         image: str = "popot-agent-worker:local",
-        timeout_seconds: int = 60,
+        timeout_seconds: int = RUNTIME["worker"]["default_timeout_seconds"],
         network: str = "none",
         env_names: list[str] | None = None,
         command: list[str] | None = None,
@@ -44,6 +65,8 @@ class DockerAgentRunner:
         model_env: str | None = None,
         env_aliases: dict[str, str] | None = None,
         session_mode: str = "cli",
+        model_parameters: dict | None = None,
+        resources: dict | None = None,
     ) -> None:
         if network not in {"none", "bridge"}:
             raise ValueError("network must be 'none' or 'bridge'")
@@ -57,6 +80,21 @@ class DockerAgentRunner:
         for target, source in (env_aliases or {}).items():
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target) or source not in (env_names or []):
                 raise ValueError("environment aliases must use forwarded variable names")
+        model_parameters = validate_model_parameters(
+            {} if model_parameters is None else model_parameters, "model_parameters")
+        resource_fields = {"memory", "cpus", "pids_limit", "tmpfs_mb", "workspace_tmpfs_mb"}
+        if resources is not None and (not isinstance(resources, dict)
+                                      or set(resources) - resource_fields):
+            raise ValueError("resources has unknown fields")
+        for key, value in (resources or {}).items():
+            if key == "memory":
+                valid = isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*[kmg]", value)
+            elif key == "cpus":
+                valid = type(value) in (int, float) and value > 0
+            else:
+                valid = type(value) is int and value > 0
+            if not valid:
+                raise ValueError(f"resources.{key} is invalid")
         self.image = image
         self.timeout_seconds = timeout_seconds
         self.network = network
@@ -66,6 +104,8 @@ class DockerAgentRunner:
         self.model_env = model_env
         self.env_aliases = env_aliases or {}
         self.session_mode = session_mode
+        self.model_parameters = model_parameters
+        self.resources = resources or {}
 
     @staticmethod
     def workspace_path(container_name: str, role_config: dict | None,
@@ -106,15 +146,16 @@ class DockerAgentRunner:
         workspace = self.workspace_path(container_name, role_config, create=True)
         host_workspace = self.workspace_host_path(container_name, role_config)
         configured_tools = set((role_config or {}).get("tools", []))
+        resources = {**RUNTIME["worker"], **self.resources}
         isolate_tools = bool(configured_tools & {"bash", "git_clone"}
                              or (role_config or {}).get("mcpServers"))
         command = [
             "docker", "run", "--rm", "--detach" if detached else "--interactive", "--init",
             "--name", container_name,
             "--network", self.network, "--read-only", "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges", "--pids-limit", "64",
-            "--memory", "1g", "--cpus", "1",
-            "--tmpfs", "/tmp:rw,uid=10001,gid=10001,size=16m",
+            "--security-opt", "no-new-privileges", "--pids-limit", str(resources["pids_limit"]),
+            "--memory", resources["memory"], "--cpus", str(resources["cpus"]),
+            "--tmpfs", f"/tmp:rw,uid=10001,gid=10001,size={resources['tmpfs_mb']}m",
             "--env", "HOME=/workspace",
             "--env", "XDG_CACHE_HOME=/workspace/.cache",
             "--env", "XDG_CONFIG_HOME=/workspace/.config",
@@ -122,7 +163,7 @@ class DockerAgentRunner:
         if workspace:
             command.extend(["--mount", f"type=bind,src={host_workspace},dst=/workspace"])
         else:
-            command.extend(["--tmpfs", "/workspace:rw,uid=10001,gid=10001,size=256m"])
+            command.extend(["--tmpfs", f"/workspace:rw,uid=10001,gid=10001,size={resources['workspace_tmpfs_mb']}m"])
         if isolate_tools:
             command.extend(["--user", "0:10001", "--cap-add", "SETUID",
                             "--cap-add", "SETGID", "--tmpfs",
@@ -136,6 +177,8 @@ class DockerAgentRunner:
             environment["HARNESS_ENV_ALIASES_JSON"] = json.dumps(self.env_aliases)
         if self.model_env:
             environment["HARNESS_MODEL"] = os.environ[self.model_env]
+        if self.model_parameters:
+            environment["HARNESS_MODEL_PARAMETERS_JSON"] = json.dumps(self.model_parameters)
         environment["HARNESS_SESSION_MODE"] = self.session_mode
         if isolate_tools:
             environment["HARNESS_SOCKET_PATH"] = "/run/chat.sock"
@@ -149,25 +192,34 @@ class DockerAgentRunner:
         container_name = f"popot-agent-{uuid.uuid4().hex[:12]}"
         command = self._docker_command(container_name, detached=False, role_config=role_config)
         command.append(self.image)
+        timeout_seconds = (role_config or {}).get("timeout_seconds", self.timeout_seconds)
+        model_env = self.model_env or "none"
+        started_at = time.monotonic()
+        print(f"worker {container_name} started model_env={model_env} timeout={timeout_seconds}s",
+              file=sys.stderr, flush=True)
         try:
             completed = subprocess.run(
                 command,
                 input=json.dumps({"task": task}),
                 text=True,
                 capture_output=True,
-                timeout=(role_config or {}).get("timeout_seconds", self.timeout_seconds),
+                timeout=timeout_seconds,
                 check=False,
             )
         except subprocess.TimeoutExpired:
+            print(f"worker {container_name} timed out after {time.monotonic() - started_at:.1f}s",
+                  file=sys.stderr, flush=True)
             try:
                 subprocess.run(
                     ["docker", "rm", "-f", container_name],
-                    capture_output=True, timeout=5, check=False,
+                    capture_output=True, timeout=RUNTIME["timeouts"]["docker_remove_seconds"], check=False,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 pass
             raise
         if completed.returncode != 0:
+            print(f"worker {container_name} failed exit={completed.returncode} "
+                  f"after {time.monotonic() - started_at:.1f}s", file=sys.stderr, flush=True)
             detail = completed.stderr.strip().splitlines()
             raise AgentRunError(detail[-1] if detail else "agent container failed")
         try:
@@ -176,6 +228,8 @@ class DockerAgentRunner:
             raise AgentRunError("agent container returned invalid JSON") from exc
         if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
             raise AgentRunError("agent container returned no answer")
+        print(f"worker {container_name} completed after {time.monotonic() - started_at:.1f}s",
+              file=sys.stderr, flush=True)
         response = {"answer": result["answer"]}
         workspace = self.workspace_host_path(container_name, role_config)
         if workspace:
@@ -188,12 +242,12 @@ class DockerAgentRunner:
         command.extend(["--label", f"popot.chat_id={chat_id}", self.image,
                         "python", "-u", "-m", CHAT_WORKER_MODULE, "serve"])
         started = subprocess.run(command, text=True, capture_output=True,
-                                 timeout=15, check=False)
+                                 timeout=RUNTIME["timeouts"]["docker_start_seconds"], check=False)
         if started.returncode != 0:
             existing = subprocess.run(
                 ["docker", "inspect", "--format",
                  '{{ index .Config.Labels "popot.chat_id" }}', container_name],
-                text=True, capture_output=True, timeout=5, check=False,
+                text=True, capture_output=True, timeout=RUNTIME["timeouts"]["docker_inspect_seconds"], check=False,
             )
             if existing.returncode != 0 or existing.stdout.strip() != chat_id:
                 detail = started.stderr.strip().splitlines()
@@ -201,18 +255,19 @@ class DockerAgentRunner:
         chat = DockerChat(container_name,
                           (role_config or {}).get("timeout_seconds", self.timeout_seconds),
                           self.workspace_host_path(container_name, role_config))
-        for _ in range(20):
+        for _ in range(RUNTIME["worker"]["startup_probe_attempts"]):
             ready = subprocess.run(
                 ["docker", "exec", container_name, "python", "-m", CHAT_WORKER_MODULE, "ping"],
-                text=True, capture_output=True, timeout=3, check=False,
+                text=True, capture_output=True, timeout=RUNTIME["timeouts"]["docker_probe_seconds"], check=False,
             )
             if ready.returncode == 0:
                 try:
                     if json.loads(ready.stdout).get("status") == "ok":
+                        print(f"chat worker {container_name} ready", file=sys.stderr, flush=True)
                         return chat
                 except json.JSONDecodeError:
                     pass
-            time.sleep(0.1)
+            time.sleep(RUNTIME["worker"]["startup_probe_interval_seconds"])
         chat.close()
         raise AgentRunError("chat worker did not become ready")
 
@@ -232,7 +287,7 @@ class DockerChat:
             completed = subprocess.run(
                 ["docker", "exec", self.container_name,
                  "python", "-m", CHAT_WORKER_MODULE, "ping"],
-                text=True, capture_output=True, timeout=3, check=False,
+                text=True, capture_output=True, timeout=RUNTIME["timeouts"]["docker_probe_seconds"], check=False,
             )
             return completed.returncode == 0 and json.loads(completed.stdout).get("status") == "ok"
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
@@ -243,7 +298,7 @@ class DockerChat:
             ["docker", "exec", "--interactive", self.container_name,
              "python", "-m", CHAT_WORKER_MODULE, "restore"],
             input=json.dumps({"messages": messages}, ensure_ascii=False),
-            text=True, capture_output=True, timeout=10, check=False,
+            text=True, capture_output=True, timeout=RUNTIME["timeouts"]["docker_restore_seconds"], check=False,
         )
         if completed.returncode != 0:
             raise AgentRunError("chat worker could not restore history")
@@ -278,7 +333,8 @@ class DockerChat:
             self.closed = True
             try:
                 subprocess.run(["docker", "rm", "-f", self.container_name],
-                               text=True, capture_output=True, timeout=5, check=False)
+                               text=True, capture_output=True,
+                               timeout=RUNTIME["timeouts"]["docker_remove_seconds"], check=False)
             except (OSError, subprocess.TimeoutExpired):
                 pass
 
@@ -305,7 +361,8 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
         if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
             raise ValueError(f"invalid role name: {name}")
         required = {"agent", "instructions", "tools"}
-        optional = {"permissions", "mcpServers", "timeout_seconds", "max_tool_rounds"}
+        optional = {"permissions", "mcpServers", "timeout_seconds", "max_tool_rounds",
+                    "ttl_seconds"}
         if not isinstance(config, dict) or not required.issubset(config) \
                 or set(config) - required - optional:
             raise ValueError(f"role {name} must define agent, instructions and tools")
@@ -342,10 +399,13 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
             raise ValueError(f"role {name} needs a persistent workspace")
         if permissions.get("internet") and agents[agent].network != "bridge":
             raise ValueError(f"role {name} needs a networked agent profile")
-        timeout = config.get("timeout_seconds", 60)
+        timeout = config.get("timeout_seconds", RUNTIME["worker"]["default_timeout_seconds"])
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 300:
             raise ValueError(f"role {name} has invalid timeout_seconds")
-        rounds = config.get("max_tool_rounds", 5)
+        ttl = config.get("ttl_seconds", RUNTIME["sessions"]["default_idle_seconds"])
+        if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 0:
+            raise ValueError(f"role {name} has invalid ttl_seconds")
+        rounds = config.get("max_tool_rounds", RUNTIME["model"]["default_max_tool_rounds"])
         if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 20:
             raise ValueError(f"role {name} has invalid max_tool_rounds")
         mcp_servers = config.get("mcpServers", {})
@@ -411,7 +471,7 @@ class ChatServer(HTTPServer):
 
     def service_actions(self) -> None:
         now = time.monotonic()
-        if now - self.last_prune >= 60:
+        if now - self.last_prune >= RUNTIME["sessions"]["prune_interval_seconds"]:
             self.last_prune = now
             try:
                 expired = self.store.prune_expired()
@@ -422,7 +482,8 @@ class ChatServer(HTTPServer):
                 if record is not None:
                     record.worker.close()
         for session_id, record in list(self.live.items()):
-            if now - record.last_used > self.idle_seconds:
+            ttl = (record.role_config or {}).get("ttl_seconds", self.idle_seconds)
+            if ttl > 0 and now - record.last_used > ttl:
                 record.worker.close()
                 self.live.pop(session_id, None)
 
@@ -438,12 +499,22 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     session_dir: str | Path | None = None,
-    idle_seconds: int = 1800,
+    idle_seconds: int = RUNTIME["sessions"]["default_idle_seconds"],
     roles: Mapping[str, dict] | None = None,
     store=None,
 ) -> ChatServer:
     roles = roles or {}
     class Handler(BaseHTTPRequestHandler):
+        def _log_request(self, body) -> None:
+            self._request_id = uuid.uuid4().hex[:12]
+            print(json.dumps({
+                "event": "request", "request_id": self._request_id,
+                "client_ip": self.client_address[0],
+                "client_port": self.client_address[1],
+                "user_agent": self.headers.get("User-Agent"),
+                "method": self.command, "path": self.path, "body": _log_body(body),
+            }, ensure_ascii=False), file=sys.stderr, flush=True)
+
         def _workspace(self, saved: dict, live: ChatRecord | None = None) -> str | None:
             if live is not None:
                 return getattr(live.worker, "workspace_path", None)
@@ -463,8 +534,15 @@ def create_server(
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            print(json.dumps({
+                "event": "response", "request_id": self._request_id,
+                "client_ip": self.client_address[0],
+                "method": self.command, "path": self.path,
+                "status": status, "body": _log_body(payload),
+            }, ensure_ascii=False), file=sys.stderr, flush=True)
 
         def do_GET(self) -> None:
+            self._log_request(None)
             try:
                 self._get()
             except OSError:
@@ -480,7 +558,8 @@ def create_server(
                         "agent": saved["agent"],
                         "role": saved.get("role"),
                         "createdAt": saved.get("createdAt", saved["updatedAt"]),
-                        "expiresAt": self.server.store.expires_at(saved).isoformat(),
+                        "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
+                                      else None),
                         "updatedAt": saved["updatedAt"],
                         "turns": len(saved["messages"]) // 2,
                         "status": "running" if saved["sessionId"] in self.server.live else "stopped",
@@ -502,7 +581,8 @@ def create_server(
                         "sessionId": session_id, "agent": saved["agent"],
                         "role": saved.get("role"),
                         "createdAt": saved.get("createdAt", saved["updatedAt"]),
-                        "expiresAt": self.server.store.expires_at(saved).isoformat(),
+                        "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
+                                      else None),
                         "status": "running" if live else "stopped",
                         "container": live.worker.container_name if live else None,
                         "workspace": self._workspace(saved, live),
@@ -513,6 +593,7 @@ def create_server(
 
         def _read_payload(self) -> dict | None:
             if self.headers.get_content_type() != "application/json":
+                self._log_request(None)
                 self._reply(415, {"error": "Content-Type must be application/json"})
                 return None
             try:
@@ -520,13 +601,19 @@ def create_server(
             except ValueError:
                 length = 0
             if not 0 < length <= MAX_REQUEST_BYTES:
+                self._log_request(None)
                 self._reply(413, {"error": "invalid request size"})
                 return None
             try:
                 payload = json.loads(self.rfile.read(length))
+            except OSError:
+                self._log_request({"read_error": True})
+                raise
             except (UnicodeDecodeError, json.JSONDecodeError):
+                self._log_request({"invalid_json": True})
                 self._reply(400, {"error": "invalid JSON"})
                 return None
+            self._log_request(payload)
             if not isinstance(payload, dict):
                 self._reply(400, {"error": "JSON object is required"})
                 return None
@@ -535,7 +622,7 @@ def create_server(
         def _task(self, payload: dict) -> None:
             task = payload.get("task")
             if not isinstance(task, str) or not task.strip() or len(task) > MAX_TASK_LENGTH:
-                self._reply(400, {"error": "task must be a nonempty string up to 10000 characters"})
+                self._reply(400, {"error": f"task must be a nonempty string up to {MAX_TASK_LENGTH} characters"})
                 return
             role = payload.get("role")
             if role is not None and (not isinstance(role, str) or role not in roles):
@@ -552,6 +639,9 @@ def create_server(
             if not isinstance(agent, str) or agent not in agents:
                 self._reply(404, {"error": "unknown agent"})
                 return
+            if hasattr(agents[agent], "start_chat"):
+                self._message({"agent": agent, "role": role, "message": task.strip()})
+                return
             result = agents[agent](task.strip(), role_config) if role_config else agents[agent](task.strip())
             if role_config:
                 result = {**result, "role": role, "agent": agent}
@@ -560,7 +650,7 @@ def create_server(
         def _message(self, payload: dict) -> None:
             message = payload.get("message")
             if not isinstance(message, str) or not message.strip() or len(message) > MAX_TASK_LENGTH:
-                self._reply(400, {"error": "message must be a nonempty string up to 10000 characters"})
+                self._reply(400, {"error": f"message must be a nonempty string up to {MAX_TASK_LENGTH} characters"})
                 return
             session_id = payload.get("sessionId")
             if session_id is None:
@@ -646,12 +736,13 @@ def create_server(
                 raise
             self._reply(200, {
                 "sessionId": session_id, "container": record.worker.container_name,
-                "answer": result["answer"], "role": record.role,
+                "answer": result["answer"], "role": record.role, "agent": record.agent,
                 "workspace": getattr(record.worker, "workspace_path", None),
             })
 
         def do_POST(self) -> None:
             if self.path not in {"/tasks", "/messages"}:
+                self._log_request(None)
                 self._reply(404, {"error": "not found"})
                 return
             payload = self._read_payload()
@@ -674,6 +765,7 @@ def create_server(
                 self._reply(500, {"error": "session storage failed"})
 
         def do_DELETE(self) -> None:
+            self._log_request(None)
             try:
                 self._delete()
             except OSError:
@@ -712,7 +804,7 @@ def main() -> None:
     server = create_server(
         agents, host, port,
         session_dir=os.getenv("AGENT_SESSION_DIR", str(PROJECT_ROOT / ".sessions")),
-        idle_seconds=int(os.getenv("AGENT_CHAT_IDLE_SECONDS", "1800")),
+        idle_seconds=int(os.getenv("AGENT_CHAT_IDLE_SECONDS", str(RUNTIME["sessions"]["default_idle_seconds"]))),
         roles=roles,
         store=store,
     )

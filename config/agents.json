@@ -1,6 +1,7 @@
 {
   "openrouter": {
     "image": "popot-agent-worker:local",
+    "timeout_seconds": 180,
     "session_mode": "http",
     "network": "bridge",
     "command": ["python", "-m", "popot_agents.worker.http_harness"],

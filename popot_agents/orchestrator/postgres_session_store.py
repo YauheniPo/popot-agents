@@ -9,6 +9,7 @@ from pathlib import Path
 import psycopg
 from psycopg.types.json import Jsonb
 
+from popot_agents.runtime_config import RUNTIME
 from .session_store import SESSION_RETENTION, SessionStore
 
 
@@ -36,7 +37,7 @@ class PostgresSessionStore:
     @contextmanager
     def _connect():
         try:
-            with psycopg.connect(connect_timeout=5) as connection:
+            with psycopg.connect(connect_timeout=RUNTIME["timeouts"]["postgres_connect_seconds"]) as connection:
                 yield connection
         except psycopg.Error as exc:
             raise OSError("session database unavailable") from exc
@@ -62,8 +63,9 @@ class PostgresSessionStore:
             row = connection.execute("""
                 SELECT session_id, agent, role, role_config, messages, created_at, updated_at
                 FROM agent_sessions
-                WHERE session_id = %s AND created_at > now() - interval '7 days'
-            """, (session_id,)).fetchone()
+                WHERE session_id = %s AND (created_at > now() - %s::interval
+                    OR role_config->>'ttl_seconds' = '0')
+            """, (session_id, SESSION_RETENTION)).fetchone()
         return self._saved(row) if row else None
 
     def list_chats(self) -> list[dict]:
@@ -71,9 +73,10 @@ class PostgresSessionStore:
             rows = connection.execute("""
                 SELECT session_id, agent, role, role_config, messages, created_at, updated_at
                 FROM agent_sessions
-                WHERE created_at > now() - interval '7 days'
+                WHERE created_at > now() - %s::interval
+                    OR role_config->>'ttl_seconds' = '0'
                 ORDER BY updated_at DESC
-            """).fetchall()
+            """, (SESSION_RETENTION,)).fetchall()
         return [self._saved(row) for row in rows]
 
     def save(self, session_id: str, agent: str, messages: list[dict[str, str]],
@@ -98,9 +101,10 @@ class PostgresSessionStore:
         with self._connect() as connection:
             rows = connection.execute("""
                 DELETE FROM agent_sessions
-                WHERE created_at <= now() - interval '7 days'
+                WHERE created_at <= now() - %s::interval
+                    AND (role_config->>'ttl_seconds' IS DISTINCT FROM '0')
                 RETURNING session_id
-            """).fetchall()
+            """, (SESSION_RETENTION,)).fetchall()
         return {row[0] for row in rows}
 
     def delete(self, session_id: str) -> None:
@@ -127,7 +131,8 @@ class PostgresSessionStore:
                         created_at = created_at.replace(tzinfo=timezone.utc)
                     if updated_at.tzinfo is None:
                         updated_at = updated_at.replace(tzinfo=timezone.utc)
-                    if created_at + SESSION_RETENTION <= datetime.now(timezone.utc):
+                    if created_at + SESSION_RETENTION <= datetime.now(timezone.utc) \
+                            and (saved.get("roleConfig") or {}).get("ttl_seconds") != 0:
                         continue
                     agent, messages = saved["agent"], saved["messages"]
                     if not isinstance(agent, str) or not isinstance(messages, list):

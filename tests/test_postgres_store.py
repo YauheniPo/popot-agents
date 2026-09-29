@@ -47,6 +47,20 @@ class PostgresSessionStoreTests(unittest.TestCase):
         self.assertIn(self.session_id, self.store.prune_expired())
         self.assertIsNone(self.store.get(self.session_id))
 
+    def test_zero_ttl_keeps_session_past_seven_days(self):
+        import psycopg
+
+        role = {"agent": "test_agent", "instructions": "x", "tools": [], "ttl_seconds": 0}
+        self.store.save(self.session_id, "test_agent", [], "analyst", role)
+        with psycopg.connect(connect_timeout=5) as connection:
+            connection.execute(
+                "UPDATE agent_sessions SET created_at = %s WHERE session_id = %s",
+                (datetime.now(timezone.utc) - timedelta(days=8), self.session_id),
+            )
+        self.assertIsNotNone(self.store.get(self.session_id))
+        self.assertIsNone(self.store.expires_at(self.store.get(self.session_id)))
+        self.assertNotIn(self.session_id, self.store.prune_expired())
+
     def test_imports_legacy_json_session_without_replacing_existing_data(self):
         with tempfile.TemporaryDirectory() as directory:
             created_at = datetime.now(timezone.utc).isoformat()

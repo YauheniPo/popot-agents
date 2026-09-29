@@ -1,12 +1,16 @@
 import json
+import io
 import os
 import subprocess
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from popot_agents.worker.agent_worker import run_harness
@@ -82,6 +86,78 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertIn("configuration", data["error"])
 
+class RequestLoggingTests(unittest.TestCase):
+    @patch("popot_agents.orchestrator.main.ChatServer")
+    def test_logs_health_request_and_response(self, server_class):
+        create_server({})
+        handler_class = server_class.call_args.args[1]
+        handler = handler_class.__new__(handler_class)
+        handler.client_address = ("192.0.2.8", 2345)
+        handler.command = "GET"
+        handler.path = "/healthz"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "GET /healthz HTTP/1.1"
+        handler.server = SimpleNamespace()
+        handler.headers = Message()
+        handler.wfile = io.BytesIO()
+
+        output = io.StringIO()
+        with redirect_stderr(output):
+            handler.do_GET()
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()
+                  if line.startswith("{")]
+        self.assertEqual([event["event"] for event in events], ["request", "response"])
+        self.assertIsNone(events[0]["body"])
+        self.assertEqual(events[1]["body"], {"status": "ok"})
+        self.assertEqual(events[0]["request_id"], events[1]["request_id"])
+
+    @patch("popot_agents.orchestrator.main.ChatServer")
+    def test_logs_full_task_exchange_with_client_and_redacts_credentials(self, server_class):
+        create_server({"test_agent": lambda task: {"answer": "готово: " + task}})
+        handler_class = server_class.call_args.args[1]
+        handler = handler_class.__new__(handler_class)
+        handler.client_address = ("192.0.2.7", 1234)
+        handler.command = "POST"
+        handler.path = "/tasks"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "POST /tasks HTTP/1.1"
+        handler.server = SimpleNamespace()
+        handler.headers = Message()
+        body = json.dumps({"agent": "test_agent", "task": "проверить каталог",
+                           "api_key": "private-value",
+                           "OPENROUTER_API_KEY": "provider-secret"}, ensure_ascii=False).encode()
+        handler.headers["Content-Type"] = "application/json"
+        handler.headers["Content-Length"] = str(len(body))
+        handler.headers["User-Agent"] = "test-client/1.0"
+        handler.headers["Authorization"] = "Bearer private-header"
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = io.BytesIO()
+
+        output = io.StringIO()
+        with redirect_stderr(output):
+            handler.do_POST()
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()
+                  if line.startswith("{")]
+        self.assertEqual([event["event"] for event in events], ["request", "response"])
+        self.assertEqual(events[0]["client_ip"], "192.0.2.7")
+        self.assertEqual(events[0]["user_agent"], "test-client/1.0")
+        self.assertEqual(events[0]["method"], "POST")
+        self.assertEqual(events[0]["path"], "/tasks")
+        self.assertEqual(events[0]["body"], {"agent": "test_agent", "task": "проверить каталог",
+                                             "api_key": "[REDACTED]",
+                                             "OPENROUTER_API_KEY": "[REDACTED]"})
+        self.assertEqual(events[1]["status"], 200)
+        self.assertEqual(events[1]["client_ip"], "192.0.2.7")
+        self.assertEqual(events[1]["method"], "POST")
+        self.assertEqual(events[1]["path"], "/tasks")
+        self.assertEqual(events[1]["body"], {"answer": "готово: проверить каталог"})
+        self.assertEqual(events[0]["request_id"], events[1]["request_id"])
+        self.assertNotIn("private-value", output.getvalue())
+        self.assertNotIn("provider-secret", output.getvalue())
+        self.assertNotIn("private-header", output.getvalue())
+
 
 class DockerRunnerTests(unittest.TestCase):
     @patch("popot_agents.orchestrator.main.subprocess.run")
@@ -120,6 +196,26 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertIn("--name", launch)
         self.assertEqual(cleanup[:3], ["docker", "rm", "-f"])
         self.assertEqual(cleanup[3], launch[launch.index("--name") + 1])
+
+    @patch("popot_agents.orchestrator.main.subprocess.run")
+    def test_timeout_logs_worker_progress_without_task_or_key(self, run):
+        run.side_effect = [
+            subprocess.TimeoutExpired(["docker", "run"], 20),
+            subprocess.CompletedProcess(["docker", "rm"], 0),
+        ]
+        runner = DockerAgentRunner(image="popot-agent-worker:local", timeout_seconds=20,
+                                   env_names=["OPENROUTER_API_KEY"], model_env="OPENROUTER_MODEL")
+        output = io.StringIO()
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "private-value",
+                                  "OPENROUTER_MODEL": "openrouter/free"}), redirect_stderr(output):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                runner("private prompt")
+        logs = output.getvalue()
+        self.assertIn("OPENROUTER_MODEL", logs)
+        self.assertIn("timed out", logs)
+        self.assertNotIn("openrouter/free", logs)
+        self.assertNotIn("private-value", logs)
+        self.assertNotIn("private prompt", logs)
 
     @patch("popot_agents.orchestrator.main.subprocess.run")
     def test_operator_can_enable_network_and_forward_named_credential(self, run):
@@ -249,6 +345,98 @@ class HarnessWorkerTests(unittest.TestCase):
 
 
 class HttpHarnessTests(unittest.TestCase):
+    @patch("popot_agents.worker.http_harness.request.urlopen")
+    def test_logs_visible_model_steps_and_tool_calls(self, urlopen):
+        from popot_agents.worker.http_harness import run_http
+
+        tool_message = {"choices": [{"message": {
+            "content": "Проверю выражение.",
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {
+                "name": "calculate", "arguments": '{"expression":"2+3"}'}}],
+        }}]}
+        answer_message = {"choices": [{"message": {"content": "Ответ: 5"}}]}
+        urlopen.side_effect = [io.BytesIO(json.dumps(tool_message).encode()),
+                               io.BytesIO(json.dumps(answer_message).encode())]
+        output = io.StringIO()
+        with patch.dict(os.environ, {"HARNESS_BASE_URL": "https://example.test/v1",
+                                  "HARNESS_MODEL": "example-model"}), redirect_stderr(output):
+            self.assertEqual(run_http("посчитай", {"tools": ["calculate"]}), "Ответ: 5")
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()
+                  if line.startswith("{")]
+        self.assertEqual([event["event"] for event in events], [
+            "model_request", "model_response", "assistant_message", "tool_call",
+            "tool_result", "model_request", "model_response", "assistant_answer"])
+        self.assertEqual(events[0]["available_tools"], ["calculate"])
+        self.assertEqual(events[1]["tool_calls"], 1)
+        self.assertEqual(events[2]["content"], "Проверю выражение.")
+        self.assertEqual(events[3]["name"], "calculate")
+        self.assertEqual(events[3]["arguments"], {"expression": "2+3"})
+        self.assertEqual(events[4]["output"], "5")
+        self.assertEqual(events[6]["tool_calls"], 0)
+        self.assertEqual(events[7]["content"], "Ответ: 5")
+
+    @patch("popot_agents.worker.http_harness.request.urlopen")
+    @patch("popot_agents.worker.http_harness.execute_tool", return_value="private-output")
+    def test_tool_trace_omits_shell_command_and_output(self, execute, urlopen):
+        from popot_agents.worker.http_harness import run_http
+
+        first = {"choices": [{"message": {"content": None, "tool_calls": [{
+            "id": "call-1", "type": "function", "function": {
+                "name": "bash", "arguments": '{"command":"echo private-command"}'}}]}}]}
+        second = {"choices": [{"message": {"content": "done"}}]}
+        urlopen.side_effect = [io.BytesIO(json.dumps(first).encode()),
+                               io.BytesIO(json.dumps(second).encode())]
+        output = io.StringIO()
+        with patch.dict(os.environ, {"HARNESS_BASE_URL": "https://example.test/v1",
+                                  "HARNESS_MODEL": "example-model"}), redirect_stderr(output):
+            self.assertEqual(run_http("work", {"tools": ["bash"]}), "done")
+        events = [json.loads(line) for line in output.getvalue().splitlines()
+                  if line.startswith("{")]
+        call = next(event for event in events if event["event"] == "tool_call")
+        result = next(event for event in events if event["event"] == "tool_result")
+        self.assertEqual(call["name"], "bash")
+        self.assertIn("command_chars", call["arguments"])
+        self.assertIn("output_chars", result)
+        self.assertNotIn("private-command", output.getvalue())
+        self.assertNotIn("private-output", output.getvalue())
+
+    @patch("popot_agents.worker.http_harness.request.urlopen")
+    def test_tool_trace_omits_unexpected_secret_argument(self, urlopen):
+        from popot_agents.worker.http_harness import run_http
+
+        message = {"choices": [{"message": {"content": None, "tool_calls": [{
+            "id": "call-1", "type": "function", "function": {
+                "name": "calculate",
+                "arguments": '{"expression":"2+3","token":"private-token"}'}}]}}]}
+        urlopen.return_value = io.BytesIO(json.dumps(message).encode())
+        output = io.StringIO()
+        with patch.dict(os.environ, {"HARNESS_BASE_URL": "https://example.test/v1",
+                                  "HARNESS_MODEL": "example-model"}), redirect_stderr(output):
+            with self.assertRaisesRegex(RuntimeError, "invalid tool call"):
+                run_http("calculate", {"tools": ["calculate"]})
+        self.assertNotIn("private-token", output.getvalue())
+
+    @patch("popot_agents.worker.http_harness.request.urlopen")
+    def test_logs_provider_progress_without_prompt_or_key(self, urlopen):
+        from popot_agents.worker.http_harness import run_http
+
+        urlopen.return_value = io.BytesIO(b'{"choices":[{"message":{"content":"ok"}}]}')
+        output = io.StringIO()
+        with patch.dict(os.environ, {
+            "HARNESS_BASE_URL": "https://example.test/v1",
+            "HARNESS_MODEL": "openrouter/free", "HARNESS_API_KEY_ENV": "EXAMPLE_KEY",
+            "EXAMPLE_KEY": "private-value",
+        }), redirect_stderr(output):
+            self.assertEqual(run_http("private prompt"), "ok")
+        logs = output.getvalue()
+        self.assertIn("LLM request started", logs)
+        self.assertIn("round=1", logs)
+        self.assertIn("LLM response received", logs)
+        self.assertNotIn("openrouter/free", logs)
+        self.assertNotIn("private-value", logs)
+        self.assertNotIn("private prompt", logs)
+
     def test_openai_compatible_request_and_answer(self):
         from popot_agents.worker.http_harness import run_http
 

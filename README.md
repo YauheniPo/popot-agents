@@ -1,8 +1,8 @@
 # Popot Agents
 
-`POST /messages` creates one Docker worker for a new chat and returns its
-`sessionId`. Pass that ID on later messages to reuse the worker and the full
-conversation. The API is synchronous and handles one request at a time. Docker
+`POST /tasks` and `POST /messages` create a Docker worker and return its
+`sessionId`. Pass that ID to `/messages` to continue the conversation in the
+same worker. The API is synchronous and handles one request at a time. Docker
 Compose builds the orchestrator and worker images. The orchestrator container
 receives HTTP requests and starts separate worker containers through Docker.
 The worker image includes Git, Curl, and the MCP Python packages used by the
@@ -14,15 +14,98 @@ backend role.
 popot_agents/
   orchestrator/   HTTP API, Docker worker lifecycle, session storage
   worker/         CLI and HTTP harnesses, chat process, MCP and file helpers
+  mcp_server.py    MCP tools for Claude and Codex, backed by the API
+  runtime_config.py Shared runtime settings loader and validation
   tools.py        Role tool definitions and execution shared by both images
-config/           Agent profiles and role definitions
-docker/           Dockerfiles for the orchestrator and worker
+config/           Runtime settings, agent profiles, and role definitions
+docker/           Dockerfiles for the orchestrator, worker, and MCP server
 tests/            API, worker, roles, sessions, and container tests
 compose.yaml      Local deployment
 ```
 
 Run local tests with `python -m unittest discover -s tests -p 'test_*.py'`.
 Run the API without Compose with `python -m popot_agents.orchestrator.main`.
+
+## Runtime settings
+
+Edit [config/runtime.json](config/runtime.json) for shared non-secret settings.
+`sessions` sets the default worker idle time, session retention, and cleanup
+interval. `worker` sets Docker resources and startup probing. `timeouts` covers
+model, MCP, tool, Docker, and database calls. `limits` sets request, history,
+tool output, and file sizes. `logging` sets how much of an MCP request body is
+recorded. `model` sets the default tool-round limit and optional
+`temperature`/`max_tokens`; `null` omits either model parameter from requests.
+The same file is copied into the orchestrator, worker, and MCP images. Its
+values are validated at startup, so an invalid setting prevents that service
+from starting. Changes require
+`docker compose up --build -d worker-image orchestrator mcp-server` to
+rebuild the stack; existing chat containers keep their old settings until they
+are restarted. For direct Python runs, `POPOT_RUNTIME_CONFIG` can select another
+JSON file before process startup.
+
+Agent-specific `resources` and `model_parameters` can override the runtime
+defaults in [config/agents.json](config/agents.json). For example, an HTTP
+profile may add `"resources": {"memory": "2g", "cpus": 2}` and
+`"model_parameters": {"temperature": 0.3, "max_tokens": 1024}`. Role-specific
+`ttl_seconds`, `timeout_seconds`, and `max_tool_rounds` remain in
+[config/roles.json](config/roles.json). Roles without `ttl_seconds` inherit
+`sessions.default_idle_seconds`; all bundled roles currently inherit 300 seconds.
+Provider credentials and deployment
+ports remain in `.env`; existing `AGENT_CHAT_IDLE_SECONDS` and
+`MCP_UPSTREAM_TIMEOUT_SECONDS` process environment variables override their
+runtime settings when provided. Docker isolation flags and credential redaction
+remain enforced by the application.
+
+## Connect Claude or Codex through MCP
+
+After setting `.env` as described in "Start and try", start the MCP service
+with the rest of the stack:
+
+```bash
+docker compose up --build -d mcp-server
+```
+
+The Streamable HTTP endpoint is `http://127.0.0.1:8001/mcp`. Check the service
+and call the read-only `list_chats` tool:
+
+```bash
+docker compose ps db orchestrator mcp-server
+curl --fail-with-body -sS http://127.0.0.1:8001/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_chats","arguments":{}}}'
+```
+
+The MCP response should contain a `chats` list from the orchestrator. Then add
+the server to your client:
+
+```bash
+codex mcp add popot-agents --url http://127.0.0.1:8001/mcp
+claude mcp add --transport http popot-agents http://127.0.0.1:8001/mcp
+```
+
+These commands use the [Codex and Claude HTTP MCP connection format](https://developers.openai.com/learn/docs-mcp).
+
+The server exposes `run_task` to start a session or continue one by passing the
+returned `sessionId` inside `params.arguments`. `send_message` also continues
+a session using its `session_id` argument. Pass `role` or `agent` to start.
+Omit `sessionId` or pass an empty string to create a new session.
+For example, a follow-up through `run_task` uses
+`"params":{"name":"run_task","arguments":{"sessionId":"PASTE_ID_HERE","task":"Continue"}}`.
+`sessionId` next to `arguments` is ignored by MCP tool dispatch. `list_chats`
+and `get_chat` show saved sessions. Roles,
+profiles, workspaces, and session retention are handled by the same
+orchestrator API as regular HTTP requests. The MCP service holds no model token
+and has no Docker socket. It is published only on `127.0.0.1`; keep it local
+because its tools can start workers and execute role-authorized actions. Set
+`MCP_PUBLISH_PORT` if port 8001 is busy, and use that port in the client URL.
+Follow incoming MCP calls with `docker compose logs -f mcp-server`. Each HTTP
+request logs its client IP and port, method, path, headers, and JSON body; the
+response log includes status and headers. Events share a `request_id`. MCP logs
+hide credential fields and sensitive headers, including `Authorization`, cookies,
+and MCP session IDs. JSON request bodies above `logging.mcp_body_max_bytes` are
+counted but not printed.
 
 ## Start and try
 
@@ -38,7 +121,7 @@ For local development, keep Compose Watch running in a terminal instead:
 docker compose up --watch orchestrator worker-image
 ```
 
-Changes to files copied into either image automatically rebuild that image.
+Changes to files copied into a service image automatically rebuild that image.
 `popot_agents/tools.py` and `.dockerignore` rebuild both. The orchestrator
 service is recreated after its rebuild; new tasks and chats use the latest
 worker image after its rebuild. Chat containers that were already started keep
@@ -94,9 +177,36 @@ curl -sS http://127.0.0.1:8000/tasks \
 ```
 
 The request uses the local Ollama profile; set `OLLAMA_MODEL` and make its model
-available before sending it. `/tasks` creates and removes a container for every
-request. New tasks and chats require either `agent` or `role`; follow-up chat
+available before sending it. `/tasks` returns `sessionId` and keeps the worker
+available for five minutes after its last message. Continue through `/messages`
+with that ID. New tasks and chats require either `agent` or `role`; follow-up
 messages can use only `sessionId`. `GET /healthz` checks the API process.
+
+```bash
+curl -sS http://127.0.0.1:8000/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId":"PASTE_ID_HERE","message":"Уточни критерии приемки"}'
+```
+
+Workers log when a model request starts and when a response arrives. Follow API
+requests and answers with `docker compose logs -f orchestrator`. While a worker
+is running, use `docker logs -f <popot-chat-container-name>` to see its model
+request events. Worker logs include turn start/completion, tools available to
+the HTTP model, the number of tool calls it chose, visible assistant messages,
+tool names and safe argument summaries, tool results or result sizes, and the
+final answer. Shell commands, file contents, and arbitrary
+tool output are summarized to avoid exposing credentials. Provider-private
+reasoning is not available through this API. The `/tasks` response is
+synchronous and does not stream tokens. Rebuild the worker image and start a new
+session to see the new trace events.
+
+The orchestrator also logs each API request and response as JSON lines with a
+shared `request_id`, client IP and port, `User-Agent`, method, path, status, and
+the JSON bodies. Credential fields are redacted and authorization headers are
+not logged; task and message text and agent answers are logged in full. Limit
+access to Docker logs accordingly. MCP calls use the `popot-agents-mcp/1` user
+agent and appear with the MCP container's IP. This identifies the calling
+service, not an individual user; the API has no client authentication.
 
 ## Roles and tools
 
@@ -120,7 +230,7 @@ The feature team roles are:
 | `data_analyst` | Metrics, events, funnels and experiments | `calculate`, `utc_time` |
 
 The earlier `chat`, `analyst`, and `local_analyst` roles remain available.
-Feature team roles use the `nous` agent profile by default. Change a role's
+Feature team roles use the `openrouter` agent profile by default. Change a role's
 `agent` field to another configured profile if needed, and set that profile's
 model and credentials in `.env` as described below. For example:
 
@@ -134,8 +244,8 @@ curl -sS http://127.0.0.1:8000/messages \
   -d '{"role":"qa_engineer","message":"Составь проверки для поиска по каталогу: пустой запрос, нет результатов и ошибка API."}'
 ```
 
-The task response includes `role` and `agent`. The chat response includes
-`sessionId` and `role`; send only `sessionId` on later messages. The role and
+The task and chat responses include `sessionId`, `role`, and `agent`; send only
+`sessionId` on later messages. The role and
 its instructions/tools are saved with the chat and restored even if `config/roles.json`
 has changed. To switch roles, start a new chat. A mismatched `agent` or `role`
 on a request returns HTTP 409.
@@ -200,7 +310,7 @@ Create a chat with a first message (omit `sessionId`):
 ```bash
 curl -sS http://127.0.0.1:8000/messages \
   -H 'Content-Type: application/json' \
-  -d '{"agent":"nous","message":"Запомни число 327."}'
+  -d '{"agent":"openrouter","message":"Запомни число 327."}'
 ```
 
 The reply contains `sessionId`, `container`, and `answer`. To continue, pass
@@ -225,14 +335,19 @@ docker ps --filter label=popot.chat_id --format '{{.Names}} {{.Status}}'
 `GET /chats` lists saved chats and their IDs, including `createdAt` and
 `expiresAt`. `GET /chats/ID` shows whether a
 worker is running; `DELETE /chats/ID` removes the worker **and** its saved
-history. The API stops idle workers after 30 minutes and stops all its workers
-when it shuts down. PostgreSQL retains history for seven days **from session
+history. The API stops idle workers after five minutes by default and stops all
+its workers when it shuts down. Set `ttl_seconds` in a role in
+`config/roles.json` to override the idle lifetime for that role; for example,
+`"ttl_seconds": 600` keeps its worker for ten minutes after the last message.
+`"ttl_seconds": 0` disables idle shutdown and session expiry; `expiresAt` is
+`null` for those sessions. Explicit deletion and orchestrator shutdown still
+stop the worker. Other sessions retain history for seven days by default **from session
 creation**, regardless of later activity or image rebuilds. At expiry, requests
 with that `sessionId` return 404; periodic cleanup deletes the database row and
 stops its worker. The persistent workspace is left intact.
 Before expiry, a request with the same `sessionId` starts a new worker and
 restores the conversation.
-Set `AGENT_CHAT_IDLE_SECONDS` to change the idle timeout and `AGENT_SESSION_DIR`
+Set `AGENT_CHAT_IDLE_SECONDS` to change the default idle timeout and `AGENT_SESSION_DIR`
 to store history in files when running without Compose. Imported session files
 without `createdAt` use their last `updatedAt` as the earliest known timestamp.
 
@@ -284,14 +399,18 @@ The worker maps it to `ANTHROPIC_AUTH_TOKEN` for Claude Code.
 The `ollama_claude_local` profile uses the local server and the `ollama`
 placeholder token.
 
-For the configured Nous model `inclusionai/ling-3.0-flash-fin:free`, set
-`NOUS_API_KEY` in `.env` and call:
+The default roles use OpenRouter's `openrouter/free` router, which selects a free
+model compatible with the requested tools.
+Set `OPENROUTER_API_KEY` in `.env` and call:
 
 ```bash
 curl -sS http://127.0.0.1:8000/tasks \
   -H 'Content-Type: application/json' \
-  -d '{"agent":"nous","task":"Say only OK."}'
+  -d '{"role":"product_manager","task":"Say only OK."}'
 ```
+
+To use the `nous` profile, set `NOUS_API_KEY` and a model supported by Nous in
+`NOUS_MODEL`, then select `"agent":"nous"` or assign that profile to a role.
 
 The two Claude Code profiles need an image named `popot-agent-claude:local`
 containing the `claude` executable. This repository supplies the generic CLI
@@ -313,9 +432,10 @@ the same worker adapter.
 
 ## Worker contract and limits
 
-The one-off API sends `{"task":"..."}` to the container's stdin and expects
-one JSON object like `{"answer":"..."}` on stdout. The chat API runs a
-conversation process in its container and talks to it over a local Unix socket.
+The `/tasks` and `/messages` APIs run a conversation process in each container
+and talk to it over a local Unix socket. A task becomes the first saved message
+in that conversation. The worker stays live for five minutes of inactivity by default;
+later messages with its `sessionId` reuse it.
 The runner gives each worker a read-only root filesystem, a writable workspace
 and `/tmp`, CPU/memory/process limits, and a 60-second default deadline (180 seconds
 for the Claude Code profiles and backend role). Only profiles that

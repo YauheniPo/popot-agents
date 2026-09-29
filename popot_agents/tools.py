@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from popot_agents.runtime_config import RUNTIME
 
 WORKSPACE_ROOT = Path(os.getenv("TOOL_WORKSPACE_ROOT", "/workspace"))
-MAX_TOOL_OUTPUT = 12_000
+MAX_TOOL_OUTPUT = RUNTIME["limits"]["tool_output_chars"]
 
 
 TOOL_SCHEMAS = {
@@ -59,7 +60,7 @@ TOOL_SCHEMAS.update({
     "git_clone": _tool("git_clone", "Clone a public HTTPS Git repository into the workspace.",
                        {"url": {"type": "string"}, "directory": {"type": "string"}},
                        ["url", "directory"]),
-    "download_file": _tool("download_file", "Download a public HTTP(S) file into the workspace (up to 5 MB).",
+    "download_file": _tool("download_file", "Download a public HTTP(S) file into the workspace, within the configured size limit.",
                            {"url": {"type": "string"}, "path": {"type": "string"}},
                            ["url", "path"]),
 })
@@ -96,7 +97,8 @@ def _public_url(value: str, https_only: bool = False) -> str:
     return value
 
 
-def _run_command(command: list[str], timeout: int = 45) -> str:
+def _run_command(command: list[str],
+                 timeout: int = RUNTIME["timeouts"]["tool_command_seconds"]) -> str:
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
         try:
             options = {"cwd": WORKSPACE_ROOT, "env": safe_tool_env(),
@@ -116,7 +118,8 @@ def _run_command(command: list[str], timeout: int = 45) -> str:
 
 def _file_action(action: str, arguments: dict) -> str:
     options = {"input": json.dumps(arguments, ensure_ascii=False), "text": True,
-               "capture_output": True, "timeout": 30, "check": False,
+               "capture_output": True,
+               "timeout": RUNTIME["timeouts"]["file_action_seconds"], "check": False,
                "env": safe_tool_env() | {"TOOL_WORKSPACE_ROOT": str(WORKSPACE_ROOT)}}
     if os.geteuid() == 0:
         options.update(user=10001, group=10001)
@@ -158,8 +161,8 @@ def execute_tool(name: str, arguments: dict, allowed: list[str]) -> str:
         return _file_action("read", arguments)
     if name == "write_file":
         if set(arguments) != {"path", "content"} or not isinstance(arguments["content"], str) \
-                or len(arguments["content"].encode("utf-8")) > 100_000:
-            raise ValueError("write_file requires path and content up to 100 KB")
+                or len(arguments["content"].encode("utf-8")) > RUNTIME["limits"]["write_file_bytes"]:
+            raise ValueError(f"write_file requires path and content up to {RUNTIME['limits']['write_file_bytes']} bytes")
         workspace_path(arguments["path"])
         return _file_action("write", arguments)
     if name == "git_clone":
@@ -172,7 +175,8 @@ def execute_tool(name: str, arguments: dict, allowed: list[str]) -> str:
         destination = workspace_path(directory)
         if destination.exists():
             raise ValueError("clone destination already exists")
-        result = _run_command(["git", "clone", "--depth", "1", "--", url, str(destination)], timeout=60)
+        result = _run_command(["git", "clone", "--depth", "1", "--", url, str(destination)],
+                              timeout=RUNTIME["timeouts"]["git_clone_seconds"])
         if not result.startswith("exit_code=0\n"):
             raise RuntimeError(result)
         return f"cloned to {destination}\n{result}"
