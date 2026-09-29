@@ -4,7 +4,7 @@ import asyncio
 import json
 import sys
 
-from harness_tools import MAX_TOOL_OUTPUT, safe_tool_env
+from popot_agents.tools import MAX_TOOL_OUTPUT, safe_tool_env
 
 
 def _parameters(config: dict):
@@ -12,7 +12,7 @@ def _parameters(config: dict):
 
     command = config["command"]
     return StdioServerParameters(command=sys.executable,
-                                 args=["/app/tool_launcher.py", *command],
+                                 args=["-m", "popot_agents.worker.tool_launcher", *command],
                                  env=safe_tool_env())
 
 

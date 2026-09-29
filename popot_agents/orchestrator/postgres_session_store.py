@@ -9,7 +9,7 @@ from pathlib import Path
 import psycopg
 from psycopg.types.json import Jsonb
 
-from session_store import SESSION_RETENTION, SessionStore
+from .session_store import SESSION_RETENTION, SessionStore
 
 
 class PostgresSessionStore:

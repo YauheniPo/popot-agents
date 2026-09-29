@@ -6,7 +6,7 @@ import sys
 import tempfile
 from urllib import request
 
-from harness_tools import MAX_TOOL_OUTPUT, WORKSPACE_ROOT, _public_url, workspace_path
+from popot_agents.tools import MAX_TOOL_OUTPUT, WORKSPACE_ROOT, _public_url, workspace_path
 
 
 def _atomic_write(path, content: bytes) -> None:

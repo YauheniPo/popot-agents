@@ -5,8 +5,8 @@ import os
 import sys
 from urllib import error, request
 
-import mcp_client
-from harness_tools import TOOL_SCHEMAS, execute_tool
+from popot_agents.tools import TOOL_SCHEMAS, execute_tool
+from . import mcp_client
 
 
 def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) -> str:

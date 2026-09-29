@@ -8,9 +8,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_tools import execute_tool
-from http_harness import run_http
-from main import create_server, load_agents, load_roles
+from popot_agents.tools import execute_tool
+from popot_agents.worker.http_harness import run_http
+from popot_agents.orchestrator.main import create_server, load_agents, load_roles
 
 
 class FakeChat:
@@ -85,7 +85,7 @@ class RoleApiTests(unittest.TestCase):
         self.assertEqual(result["role"], "analyst")
         self.assertEqual(self.runner.tasks, [("2+3", self.roles["analyst"])])
         self.assertEqual(self.request("POST", "/tasks", {"role": "missing", "task": "x"})[0], 404)
-        self.assertEqual(self.request("POST", "/tasks", {"role": "analyst", "agent": "demo", "task": "x"})[0], 409)
+        self.assertEqual(self.request("POST", "/tasks", {"role": "analyst", "agent": "other", "task": "x"})[0], 409)
 
     def test_chat_restores_original_role_configuration_after_restart(self):
         status, first = self.request("POST", "/messages", {"role": "analyst", "message": "start"})
@@ -128,8 +128,8 @@ class RoleApiTests(unittest.TestCase):
 
 class FeatureTeamConfigTests(unittest.TestCase):
     def test_feature_team_roles_are_selectable_with_clear_responsibilities(self):
-        roles = load_roles(Path(__file__).with_name("roles.json"),
-                           load_agents(Path(__file__).with_name("agents.json")))
+        config = Path(__file__).resolve().parents[1] / "config"
+        roles = load_roles(config / "roles.json", load_agents(config / "agents.json"))
         expected = {
             "product_manager", "product_designer", "tech_lead",
             "backend_engineer", "frontend_engineer", "qa_engineer", "data_analyst",

@@ -1,4 +1,4 @@
-# Docker agent demo
+# Popot Agents
 
 `POST /messages` creates one Docker worker for a new chat and returns its
 `sessionId`. Pass that ID on later messages to reuse the worker and the full
@@ -8,6 +8,22 @@ receives HTTP requests and starts separate worker containers through Docker.
 The worker image includes Git, Curl, and the MCP Python packages used by the
 backend role.
 
+## Project layout
+
+```text
+popot_agents/
+  orchestrator/   HTTP API, Docker worker lifecycle, session storage
+  worker/         CLI and HTTP harnesses, chat process, MCP and file helpers
+  tools.py        Role tool definitions and execution shared by both images
+config/           Agent profiles and role definitions
+docker/           Dockerfiles for the orchestrator and worker
+tests/            API, worker, roles, sessions, and container tests
+compose.yaml      Local deployment
+```
+
+Run local tests with `python -m unittest discover -s tests -p 'test_*.py'`.
+Run the API without Compose with `python -m popot_agents.orchestrator.main`.
+
 ## Start and try
 
 ```bash
@@ -15,6 +31,20 @@ cp .env.example .env  # only on a fresh checkout
 # Set POPOT_DB_PASSWORD and the provider variables you use in .env.
 docker compose up --build -d orchestrator
 ```
+
+For local development, keep Compose Watch running in a terminal instead:
+
+```bash
+docker compose up --watch orchestrator worker-image
+```
+
+Changes to files copied into either image automatically rebuild that image.
+`popot_agents/tools.py` and `.dockerignore` rebuild both. The orchestrator
+service is recreated after its rebuild; new tasks and chats use the latest
+worker image after its rebuild. Chat containers that were already started keep
+their old image until they are closed and started again. Changes to `.env` still require
+`docker compose up -d --force-recreate orchestrator` because environment values
+are read when the container starts.
 
 Run these commands from the repository directory with Docker running. Set
 `POPOT_DB_PASSWORD` in `.env` to a long random value and add the provider tokens
@@ -26,7 +56,7 @@ container replacement, `docker compose down`, and a new checkout of this
 repository. Check startup with `docker compose logs orchestrator`; stop with
 `docker compose down`. If host port 8000 is occupied, set
 `API_PUBLISH_PORT=18000` when starting Compose and use that port in requests.
-After changing `agents.json` or `roles.json`, run
+After changing `config/agents.json` or `config/roles.json`, run
 `docker compose up --build -d orchestrator` again. After changing only `.env`,
 run `docker compose up -d --force-recreate orchestrator` to load its new values.
 Keep `POPOT_DB_PASSWORD` unchanged for an existing database; changing it in
@@ -60,18 +90,18 @@ In another terminal:
 ```bash
 curl -sS http://127.0.0.1:8000/tasks \
   -H 'Content-Type: application/json' \
-  -d '{"agent":"demo","task":"sum: 2, 3, 5"}'
+  -d '{"agent":"ollama","task":"Reply with exactly OK"}'
 ```
 
-Response: `{"answer": "10"}`. `/tasks` is the original one-off endpoint: it
-creates and removes a container for every request. The `demo` profile is used
-when `agent` is omitted. It has no model or provider; it verifies the worker
-lifecycle. `GET /healthz` checks the API process.
+The request uses the local Ollama profile; set `OLLAMA_MODEL` and make its model
+available before sending it. `/tasks` creates and removes a container for every
+request. New tasks and chats require either `agent` or `role`; follow-up chat
+messages can use only `sessionId`. `GET /healthz` checks the API process.
 
 ## Roles and tools
 
-Roles live in the separate [roles.json](roles.json) file. Each role selects an
-`agent` profile from `agents.json` and defines instructions, built-in `tools`,
+Roles live in the separate [config/roles.json](config/roles.json) file. Each role selects an
+`agent` profile from `config/agents.json` and defines instructions, built-in `tools`,
 `permissions`, and optional `mcpServers`. Set `AGENT_ROLES_FILE` to use another roles
 file. Rebuild the orchestrator image after editing it. Invalid agents or tool names fail at
 startup. Requests can select a configured role by name; they cannot define
@@ -106,7 +136,7 @@ curl -sS http://127.0.0.1:8000/messages \
 
 The task response includes `role` and `agent`. The chat response includes
 `sessionId` and `role`; send only `sessionId` on later messages. The role and
-its instructions/tools are saved with the chat and restored even if `roles.json`
+its instructions/tools are saved with the chat and restored even if `config/roles.json`
 has changed. To switch roles, start a new chat. A mismatched `agent` or `role`
 on a request returns HTTP 409.
 
@@ -142,7 +172,7 @@ through stdio. Only the listed server tools are exposed to the model: `fetch`,
 `git_status`, and `git_diff_unstaged`. In the model they are named
 `mcp__fetch__fetch`, `mcp__git__git_status`, and
 `mcp__git__git_diff_unstaged`. To change MCP connections for a role, edit its
-`mcpServers` commands and tool allowlists in `roles.json`, then rebuild the
+`mcpServers` commands and tool allowlists in `config/roles.json`, then rebuild the
 worker image if the new server package is not installed. MCP commands are
 operator configuration; API requests cannot supply them.
 
@@ -216,7 +246,7 @@ limit and return an error when they reach it.
 
 ## Select a model and provider
 
-Profiles live in [agents.json](agents.json). Put the listed values in `.env`
+Profiles live in [config/agents.json](config/agents.json). Put the listed values in `.env`
 **before starting the API**, or export them in the shell. Exported variables
 take priority over `.env`. Choose the profile with `agent` on the first message.
 Missing variables return HTTP 503. The API never accepts a command, image, URL,
@@ -246,7 +276,7 @@ curl -sS http://127.0.0.1:8000/tasks \
 ```
 
 The Docker worker reaches the host Ollama server through
-`host.docker.internal:11434`. Change that URL in `agents.json` for a different
+`host.docker.internal:11434`. Change that URL in `config/agents.json` for a different
 Docker host. For Ollama Cloud, set `OLLAMA_API_KEY` and `OLLAMA_CLOUD_MODEL` and
 choose `ollama_cloud`. To run **Claude Code against Ollama Cloud**, set
 `OLLAMA_API_KEY` to your Ollama API token and choose `ollama_claude`.
@@ -266,10 +296,11 @@ curl -sS http://127.0.0.1:8000/tasks \
 The two Claude Code profiles need an image named `popot-agent-claude:local`
 containing the `claude` executable. This repository supplies the generic CLI
 adapter, but does not install Claude Code or build that image. Build your own
-image with the CLI and copy `agent_worker.py`, `session_worker.py`, and
-`http_harness.py` into `/app`; use UID 10001. Change the profile's `image` and
-`command` in `agents.json` for any other
-harness or CLI. `{task}` and `{model}` are replaced as individual arguments;
+image with the CLI and copy the `popot_agents` package into `/app`; use UID 10001
+and set `/app` as its working directory. Change the profile's `image` and
+`command` in `config/agents.json` for any other harness or CLI. Rebuild custom
+images that still contain the old flat Python files before using them with this
+version. `{task}` and `{model}` are replaced as individual arguments;
 without `{task}`, the worker sends the task on stdin. The CLI's stdout becomes
 the answer. A CLI can run multiple steps or use tools; the included HTTP harness
 makes at most five completion requests by default. `backend_engineer` allows
@@ -290,13 +321,14 @@ and `/tmp`, CPU/memory/process limits, and a 60-second default deadline (180 sec
 for the Claude Code profiles and backend role). Only profiles that
 need a model endpoint have Docker bridge networking. Credentials are forwarded
 from named host environment variables with Docker `--env NAME`; they are not
-stored in `agents.json` or placed in the Docker command arguments.
+stored in `config/agents.json` or placed in the Docker command arguments.
 
 Inside Compose the API listens on `0.0.0.0:8000`, while the published host port
 is bound to `127.0.0.1`. The orchestrator has access to the Docker socket,
 which grants it broad control over the host's Docker daemon. Keep the API local
-and allow only trusted callers. Running `python main.py` directly still listens
-on `127.0.0.1:8000` by default. `API_HOST`, `API_PORT`,
+and allow only trusted callers. Running
+`python -m popot_agents.orchestrator.main` directly still listens on
+`127.0.0.1:8000` by default. `API_HOST`, `API_PORT`,
 `AGENT_ENV_FILE`, and `AGENT_PROFILES_FILE` override the listener, env file,
 and profile file. `AGENT_ROLES_FILE` overrides the roles file. Edit
 `timeout_seconds` in a profile if its model or CLI needs more than 60 seconds.
@@ -305,10 +337,3 @@ mounts the host repository into the worker; only the selected role's workspace
 is mounted. A role with Bash and internet can execute downloaded code inside
 its Docker container, so configure it only for trusted API callers and use a
 dedicated model credential.
-
-## AX
-
-This local demo uses Docker directly. AX creates tasks on Agent Substrate in a
-Kubernetes cluster. To use AX, replace `DockerAgentRunner` with an AX task
-client and arrange a result channel for the worker's final answer. The profile
-and harness contract can stay the same.

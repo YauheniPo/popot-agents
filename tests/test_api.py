@@ -6,10 +6,11 @@ import threading
 import unittest
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from unittest.mock import patch
 
-from agent_worker import run_harness
-from main import AgentConfigurationError, DockerAgentRunner, create_server, load_agents, load_dotenv
+from popot_agents.worker.agent_worker import run_harness
+from popot_agents.orchestrator.main import AgentConfigurationError, DockerAgentRunner, create_server, load_agents, load_dotenv
 
 
 class ApiTests(unittest.TestCase):
@@ -20,7 +21,7 @@ class ApiTests(unittest.TestCase):
             self.received.append(task)
             return {"answer": "done: " + task}
 
-        self.server = create_server({"demo": run, "other": run}, host="127.0.0.1", port=0)
+        self.server = create_server({"test_agent": run, "other": run}, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -41,10 +42,16 @@ class ApiTests(unittest.TestCase):
         return response.status, data
 
     def test_task_returns_agent_answer(self):
-        status, data = self.request({"task": "check the build"})
+        status, data = self.request({"agent": "test_agent", "task": "check the build"})
         self.assertEqual(status, 200)
         self.assertEqual(data, {"answer": "done: check the build"})
         self.assertEqual(self.received, ["check the build"])
+
+    def test_task_requires_agent_or_role(self):
+        status, data = self.request({"task": "check the build"})
+        self.assertEqual(status, 400)
+        self.assertIn("agent or role", data["error"])
+        self.assertEqual(self.received, [])
 
     def test_empty_task_is_rejected_before_launch(self):
         status, data = self.request({"task": "  "})
@@ -67,22 +74,22 @@ class ApiTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
-        self.server = create_server({"demo": lambda task: (_ for _ in ()).throw(
+        self.server = create_server({"test_agent": lambda task: (_ for _ in ()).throw(
             AgentConfigurationError("missing provider configuration"))}, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        status, data = self.request({"task": "work"})
+        status, data = self.request({"agent": "test_agent", "task": "work"})
         self.assertEqual(status, 503)
         self.assertIn("configuration", data["error"])
 
 
 class DockerRunnerTests(unittest.TestCase):
-    @patch("main.subprocess.run")
+    @patch("popot_agents.orchestrator.main.subprocess.run")
     def test_launches_isolated_container_and_reads_result(self, run):
         run.return_value.returncode = 0
         run.return_value.stdout = '{"answer":"finished"}\n'
         run.return_value.stderr = ""
-        runner = DockerAgentRunner(image="popot-agent-demo:local", timeout_seconds=20)
+        runner = DockerAgentRunner(image="popot-agent-worker:local", timeout_seconds=20)
 
         self.assertEqual(runner("summarize this"), {"answer": "finished"})
 
@@ -91,18 +98,18 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertIn("--memory", args)
         self.assertIn("--cpus", args)
         self.assertIn("HOME=/workspace", args)
-        self.assertIn("popot-agent-demo:local", args)
+        self.assertIn("popot-agent-worker:local", args)
         self.assertNotIn("sh", args)
         self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"task": "summarize this"})
         self.assertEqual(run.call_args.kwargs["timeout"], 20)
 
-    @patch("main.subprocess.run")
+    @patch("popot_agents.orchestrator.main.subprocess.run")
     def test_timeout_removes_container(self, run):
         run.side_effect = [
             subprocess.TimeoutExpired(["docker", "run"], 20),
             subprocess.CompletedProcess(["docker", "rm"], 0),
         ]
-        runner = DockerAgentRunner(image="popot-agent-demo:local", timeout_seconds=20)
+        runner = DockerAgentRunner(image="popot-agent-worker:local", timeout_seconds=20)
 
         with self.assertRaises(subprocess.TimeoutExpired):
             runner("slow task")
@@ -114,7 +121,7 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertEqual(cleanup[:3], ["docker", "rm", "-f"])
         self.assertEqual(cleanup[3], launch[launch.index("--name") + 1])
 
-    @patch("main.subprocess.run")
+    @patch("popot_agents.orchestrator.main.subprocess.run")
     def test_operator_can_enable_network_and_forward_named_credential(self, run):
         run.return_value = subprocess.CompletedProcess(["docker", "run"], 0, '{"answer":"ok"}', "")
         with patch.dict(os.environ, {"EXAMPLE_API_KEY": "private-value"}):
@@ -128,19 +135,19 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertIn("EXAMPLE_API_KEY", args)
         self.assertNotIn("private-value", args)
 
-    @patch("main.subprocess.run")
+    @patch("popot_agents.orchestrator.main.subprocess.run")
     def test_configured_command_and_model_are_passed_to_worker(self, run):
         run.return_value = subprocess.CompletedProcess(["docker", "run"], 0, '{"answer":"ok"}', "")
         with patch.dict(os.environ, {"OPENROUTER_MODEL": "example/model", "OPENROUTER_API_KEY": "secret"}):
             runner = DockerAgentRunner(
-                network="bridge", command=["python", "/app/http_harness.py"],
+                network="bridge", command=["python", "-m", "popot_agents.worker.http_harness"],
                 environment={"HARNESS_BASE_URL": "https://example.test/v1", "HARNESS_API_KEY_ENV": "OPENROUTER_API_KEY"},
                 env_names=["OPENROUTER_API_KEY"], model_env="OPENROUTER_MODEL",
             )
             runner("work")
         args = run.call_args.args[0]
         self.assertIn("HARNESS_MODEL=example/model", args)
-        self.assertIn('HARNESS_COMMAND_JSON=["python", "/app/http_harness.py"]', args)
+        self.assertIn('HARNESS_COMMAND_JSON=["python", "-m", "popot_agents.worker.http_harness"]', args)
         self.assertIn("OPENROUTER_API_KEY", args)
         self.assertNotIn("secret", args)
 
@@ -151,8 +158,7 @@ class DockerRunnerTests(unittest.TestCase):
                 runner("work")
 
     def test_profiles_file_loads_named_runners(self):
-        agents = load_agents("agents.json")
-        self.assertIn("demo", agents)
+        agents = load_agents(Path(__file__).resolve().parents[1] / "config" / "agents.json")
         self.assertIn("openrouter", agents)
         self.assertIn("ollama", agents)
         self.assertIn("ollama_cloud", agents)
@@ -169,6 +175,15 @@ class DockerRunnerTests(unittest.TestCase):
         self.assertEqual(agents["ollama"].environment["HARNESS_BASE_URL"], "http://host.docker.internal:11434/v1")
         self.assertEqual(agents["ollama_cloud"].env_names, ["OLLAMA_API_KEY"])
 
+    def test_profiles_file_does_not_require_a_special_profile(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as file:
+            json.dump({"custom": {"image": "custom:local"}}, file)
+            path = file.name
+        try:
+            self.assertEqual(load_agents(path)["custom"].image, "custom:local")
+        finally:
+            os.unlink(path)
+
     def test_dotenv_loads_values_without_overwriting_process_environment(self):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as file:
             file.write('OPENROUTER_API_KEY="from-file"\nexport OLLAMA_MODEL=qwen2.5-coder:14b\n# ignored\n')
@@ -183,7 +198,7 @@ class DockerRunnerTests(unittest.TestCase):
 
 
 class HarnessWorkerTests(unittest.TestCase):
-    @patch("agent_worker.subprocess.run")
+    @patch("popot_agents.worker.agent_worker.subprocess.run")
     def test_passes_task_to_configured_cli_and_returns_its_answer(self, run):
         run.return_value = subprocess.CompletedProcess(["example-cli"], 0, "completed\n", "")
         with patch.dict(os.environ, {"HARNESS_COMMAND_JSON": '["example-cli", "--print"]'}):
@@ -194,14 +209,14 @@ class HarnessWorkerTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["input"], "Investigate the failure")
         self.assertFalse(run.call_args.kwargs.get("shell", False))
 
-    @patch("agent_worker.subprocess.run")
+    @patch("popot_agents.worker.agent_worker.subprocess.run")
     def test_cli_failure_is_not_reported_as_an_answer(self, run):
         run.return_value = subprocess.CompletedProcess(["example-cli"], 1, "", "failed")
         with patch.dict(os.environ, {"HARNESS_COMMAND_JSON": '["example-cli"]'}):
             with self.assertRaisesRegex(RuntimeError, "harness exited"):
                 run_harness("Investigate the failure")
 
-    @patch("agent_worker.subprocess.run")
+    @patch("popot_agents.worker.agent_worker.subprocess.run")
     def test_cli_can_take_task_as_argument(self, run):
         run.return_value = subprocess.CompletedProcess(["example-cli"], 0, "answer\n", "")
         with patch.dict(os.environ, {"HARNESS_COMMAND_JSON": '["example-cli", "--oneshot", "{task}"]'}):
@@ -213,14 +228,14 @@ class HarnessWorkerTests(unittest.TestCase):
         )
         self.assertEqual(run.call_args.kwargs["input"], "")
 
-    @patch("agent_worker.subprocess.run")
+    @patch("popot_agents.worker.agent_worker.subprocess.run")
     def test_cli_command_can_use_selected_model(self, run):
         run.return_value = subprocess.CompletedProcess(["claude"], 0, "answer\n", "")
         with patch.dict(os.environ, {"HARNESS_COMMAND_JSON": '["claude", "--model", "{model}", "{task}"]', "HARNESS_MODEL": "qwen3"}):
             self.assertEqual(run_harness("work"), "answer")
         self.assertEqual(run.call_args.args[0], ["claude", "--model", "qwen3", "work"])
 
-    @patch("agent_worker.subprocess.run")
+    @patch("popot_agents.worker.agent_worker.subprocess.run")
     def test_cli_receives_named_token_alias_without_command_argument(self, run):
         run.return_value = subprocess.CompletedProcess(["claude"], 0, "answer\n", "")
         with patch.dict(os.environ, {
@@ -235,7 +250,7 @@ class HarnessWorkerTests(unittest.TestCase):
 
 class HttpHarnessTests(unittest.TestCase):
     def test_openai_compatible_request_and_answer(self):
-        from http_harness import run_http
+        from popot_agents.worker.http_harness import run_http
 
         received = {}
 

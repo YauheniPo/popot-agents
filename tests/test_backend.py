@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import harness_tools
-from harness_tools import execute_tool
-from main import DockerAgentRunner, load_agents, load_roles
+from popot_agents import tools as harness_tools
+from popot_agents.tools import execute_tool
+from popot_agents.orchestrator.main import DockerAgentRunner, load_agents, load_roles
 
 
 BACKEND_TOOLS = [
@@ -17,7 +17,7 @@ BACKEND_TOOLS = [
 
 class BackendRoleTests(unittest.TestCase):
     def test_backend_role_has_explicit_permissions_and_mcp_tools(self):
-        root = Path(__file__).parent
+        root = Path(__file__).resolve().parents[1] / "config"
         roles = load_roles(root / "roles.json", load_agents(root / "agents.json"))
         backend = roles["backend_engineer"]
         self.assertTrue(set(BACKEND_TOOLS).issubset(backend["tools"]))
@@ -45,6 +45,18 @@ class BackendRoleTests(unittest.TestCase):
             self.assertIn("0:10001", args)
             self.assertIn("HARNESS_SOCKET_PATH=/run/chat.sock", args)
 
+    def test_existing_persistent_workspace_is_writable_by_tool_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "popot-chat-1234"
+            workspace.mkdir(mode=0o700)
+            role = {"permissions": {"workspace": "persistent"}}
+            with patch.dict(os.environ, {"AGENT_WORKSPACE_DIR": directory}), \
+                 patch("popot_agents.orchestrator.main.os.geteuid", return_value=0), \
+                 patch("popot_agents.orchestrator.main.os.chown") as chown:
+                DockerAgentRunner.workspace_path("popot-chat-1234", role, create=True)
+            chown.assert_called_once_with(workspace.resolve(), -1, 10001)
+            self.assertEqual(workspace.stat().st_mode & 0o777, 0o770)
+
     def test_file_and_shell_tools_work_only_with_allowlist_and_hide_model_key(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)):
@@ -67,8 +79,8 @@ class BackendRoleTests(unittest.TestCase):
     def test_bash_runs_as_unprivileged_user_while_model_process_keeps_credential(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)):
-                with patch("harness_tools.os.geteuid", return_value=0):
-                    with patch("harness_tools.subprocess.run") as run:
+                with patch("popot_agents.tools.os.geteuid", return_value=0):
+                    with patch("popot_agents.tools.subprocess.run") as run:
                         run.return_value.returncode = 0
                         execute_tool("bash", {"command": "pwd"}, ["bash"])
                 self.assertEqual(run.call_args.kwargs["user"], 10001)
@@ -77,8 +89,8 @@ class BackendRoleTests(unittest.TestCase):
     def test_file_write_also_runs_as_unprivileged_workspace_user(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)):
-                with patch("harness_tools.os.geteuid", return_value=0):
-                    with patch("harness_tools.subprocess.run") as run:
+                with patch("popot_agents.tools.os.geteuid", return_value=0):
+                    with patch("popot_agents.tools.subprocess.run") as run:
                         run.return_value.returncode = 0
                         run.return_value.stdout = "wrote code.py\n"
                         execute_tool("write_file", {"path": "code.py", "content": "x"},
@@ -94,7 +106,7 @@ class BackendRoleTests(unittest.TestCase):
                                  BACKEND_TOOLS)
 
     def test_shell_and_mcp_require_internet_permission(self):
-        root = Path(__file__).parent
+        root = Path(__file__).resolve().parents[1] / "config"
         roles = load_roles(root / "roles.json", load_agents(root / "agents.json"))
         roles["backend_engineer"]["permissions"]["internet"] = False
         with tempfile.TemporaryDirectory() as directory:
@@ -112,7 +124,7 @@ class BackendRoleTests(unittest.TestCase):
                 load_roles(path, load_agents(root / "agents.json"))
 
     def test_http_harness_exposes_and_calls_only_role_selected_mcp_tools(self):
-        from http_harness import run_http
+        from popot_agents.worker.http_harness import run_http
         from http.server import BaseHTTPRequestHandler, HTTPServer
         import json
         import threading
@@ -147,8 +159,8 @@ class BackendRoleTests(unittest.TestCase):
         try:
             with patch.dict(os.environ, {"HARNESS_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
                                       "HARNESS_MODEL": "test"}):
-                with patch("mcp_client.discover_tools", return_value=discovered), \
-                     patch("mcp_client.call_tool", return_value="page text") as call:
+                with patch("popot_agents.worker.mcp_client.discover_tools", return_value=discovered), \
+                     patch("popot_agents.worker.mcp_client.call_tool", return_value="page text") as call:
                     answer = run_http("fetch", {"tools": [], "mcpServers": config})
         finally:
             server.shutdown()

@@ -59,7 +59,7 @@ def main() -> None:
             raise ValueError("task is required")
         role_config = json.loads(os.getenv("HARNESS_ROLE_JSON", "{}"))
         if os.getenv("HARNESS_SESSION_MODE") == "http":
-            from http_harness import run_http
+            from .http_harness import run_http
             answer = run_http(task, role_config)
         else:
             instructions = role_config.get("instructions", "")
