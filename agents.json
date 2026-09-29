@@ -1,0 +1,69 @@
+{
+  "demo": {
+    "image": "popot-agent-demo:local",
+    "network": "none",
+    "command": ["python", "/app/demo_harness.py"]
+  },
+  "openrouter": {
+    "image": "popot-agent-demo:local",
+    "session_mode": "http",
+    "network": "bridge",
+    "command": ["python", "/app/http_harness.py"],
+    "environment": {"HARNESS_BASE_URL": "https://openrouter.ai/api/v1", "HARNESS_API_KEY_ENV": "OPENROUTER_API_KEY"},
+    "env_names": ["OPENROUTER_API_KEY"],
+    "model_env": "OPENROUTER_MODEL"
+  },
+  "ollama": {
+    "image": "popot-agent-demo:local",
+    "session_mode": "http",
+    "network": "bridge",
+    "command": ["python", "/app/http_harness.py"],
+    "environment": {"HARNESS_BASE_URL": "http://host.docker.internal:11434/v1"},
+    "model_env": "OLLAMA_MODEL"
+  },
+  "ollama_cloud": {
+    "image": "popot-agent-demo:local",
+    "session_mode": "http",
+    "network": "bridge",
+    "command": ["python", "/app/http_harness.py"],
+    "environment": {"HARNESS_BASE_URL": "https://ollama.com/v1", "HARNESS_API_KEY_ENV": "OLLAMA_API_KEY"},
+    "env_names": ["OLLAMA_API_KEY"],
+    "model_env": "OLLAMA_CLOUD_MODEL"
+  },
+  "ollama_claude": {
+    "image": "popot-agent-claude:local",
+    "timeout_seconds": 180,
+    "network": "bridge",
+    "command": ["claude", "--print", "--model", "{model}", "{task}"],
+    "environment": {"ANTHROPIC_BASE_URL": "https://ollama.com"},
+    "env_names": ["OLLAMA_API_KEY"],
+    "env_aliases": {"ANTHROPIC_AUTH_TOKEN": "OLLAMA_API_KEY"},
+    "model_env": "OLLAMA_CLAUDE_MODEL"
+  },
+  "ollama_claude_local": {
+    "image": "popot-agent-claude:local",
+    "timeout_seconds": 180,
+    "network": "bridge",
+    "command": ["claude", "--print", "--model", "{model}", "{task}"],
+    "environment": {"ANTHROPIC_BASE_URL": "http://host.docker.internal:11434", "ANTHROPIC_AUTH_TOKEN": "ollama"},
+    "model_env": "OLLAMA_CLAUDE_MODEL"
+  },
+  "nous": {
+    "image": "popot-agent-demo:local",
+    "session_mode": "http",
+    "network": "bridge",
+    "command": ["python", "/app/http_harness.py"],
+    "environment": {"HARNESS_BASE_URL": "https://inference-api.nousresearch.com/v1", "HARNESS_API_KEY_ENV": "NOUS_API_KEY"},
+    "env_names": ["NOUS_API_KEY"],
+    "model_env": "NOUS_MODEL"
+  },
+  "nvidia_nim": {
+    "image": "popot-agent-demo:local",
+    "session_mode": "http",
+    "network": "bridge",
+    "command": ["python", "/app/http_harness.py"],
+    "environment": {"HARNESS_BASE_URL": "https://integrate.api.nvidia.com/v1", "HARNESS_API_KEY_ENV": "NVIDIA_API_KEY"},
+    "env_names": ["NVIDIA_API_KEY"],
+    "model_env": "NVIDIA_MODEL"
+  }
+}

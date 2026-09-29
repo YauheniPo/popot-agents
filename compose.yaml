@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: popot_agents
+      POSTGRES_USER: popot
+      POSTGRES_PASSWORD: ${POPOT_DB_PASSWORD:?Set POPOT_DB_PASSWORD in .env}
+    volumes:
+      - ${HOME:?HOME is required}/.popot-agents/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U popot -d popot_agents"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  worker-image:
+    image: popot-agent-demo:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["true"]
+
+  orchestrator:
+    image: popot-orchestrator:local
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    depends_on:
+      db:
+        condition: service_healthy
+      worker-image:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      AGENT_SESSION_BACKEND: postgres
+      AGENT_LEGACY_SESSION_DIR: /data/legacy-sessions
+      PGHOST: db
+      PGDATABASE: popot_agents
+      PGUSER: popot
+      PGPASSWORD: ${POPOT_DB_PASSWORD:?Set POPOT_DB_PASSWORD in .env}
+      AGENT_WORKSPACE_DIR: /data/workspaces
+      AGENT_WORKSPACE_HOST_DIR: ${HOME:?HOME is required}/.popot-agents/workspaces
+    ports:
+      - "127.0.0.1:${API_PUBLISH_PORT:-8000}:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.sessions:/data/legacy-sessions:ro
+      - ${HOME:?HOME is required}/.popot-agents/workspaces:/data/workspaces
+    restart: unless-stopped

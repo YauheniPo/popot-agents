@@ -1,0 +1,164 @@
+import os
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import harness_tools
+from harness_tools import execute_tool
+from main import DockerAgentRunner, load_agents, load_roles
+
+
+BACKEND_TOOLS = [
+    "bash", "read_file", "write_file", "git_clone", "download_file",
+]
+
+
+class BackendRoleTests(unittest.TestCase):
+    def test_backend_role_has_explicit_permissions_and_mcp_tools(self):
+        root = Path(__file__).parent
+        roles = load_roles(root / "roles.json", load_agents(root / "agents.json"))
+        backend = roles["backend_engineer"]
+        self.assertTrue(set(BACKEND_TOOLS).issubset(backend["tools"]))
+        self.assertEqual(backend["permissions"], {
+            "workspace": "persistent", "shell": True, "internet": True,
+        })
+        self.assertEqual(set(backend["mcpServers"]), {"fetch", "git"})
+        self.assertEqual(backend["mcpServers"]["fetch"]["tools"], ["fetch"])
+        self.assertEqual(backend["mcpServers"]["git"]["tools"],
+                         ["git_status", "git_diff_unstaged"])
+        self.assertEqual(backend["max_tool_rounds"], 12)
+
+    def test_backend_chat_gets_a_durable_private_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            role = {"permissions": {"workspace": "persistent", "shell": True,
+                                    "internet": True}, "tools": BACKEND_TOOLS}
+            with patch.dict(os.environ, {"AGENT_WORKSPACE_DIR": directory}):
+                args = DockerAgentRunner(network="bridge")._docker_command(
+                    "popot-chat-1234", detached=True, role_config=role)
+            workspace = Path(directory).resolve() / "popot-chat-1234"
+            self.assertTrue(workspace.is_dir())
+            self.assertIn(f"type=bind,src={workspace},dst=/workspace", args)
+            self.assertNotIn("/workspace:rw,uid=10001,gid=10001,size=256m", args)
+            self.assertIn("--user", args)
+            self.assertIn("0:10001", args)
+            self.assertIn("HARNESS_SOCKET_PATH=/run/chat.sock", args)
+
+    def test_file_and_shell_tools_work_only_with_allowlist_and_hide_model_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)):
+                self.assertEqual(execute_tool("write_file", {
+                    "path": "app/main.py", "content": "print('ok')\n"}, BACKEND_TOOLS),
+                    "wrote app/main.py")
+                self.assertEqual(execute_tool("read_file", {"path": "app/main.py"},
+                                              BACKEND_TOOLS), "print('ok')\n")
+                with patch.dict(os.environ, {"NOUS_API_KEY": "private-test-value"}):
+                    output = execute_tool("bash", {
+                        "command": "printf '%s' \"${NOUS_API_KEY:-unset}\""}, BACKEND_TOOLS)
+                self.assertIn("unset", output)
+                self.assertNotIn("private-test-value", output)
+                with self.assertRaisesRegex(ValueError, "outside workspace"):
+                    execute_tool("write_file", {"path": "../escape", "content": "x"},
+                                 BACKEND_TOOLS)
+                with self.assertRaisesRegex(ValueError, "not allowed"):
+                    execute_tool("bash", {"command": "pwd"}, ["calculate"])
+
+    def test_bash_runs_as_unprivileged_user_while_model_process_keeps_credential(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)):
+                with patch("harness_tools.os.geteuid", return_value=0):
+                    with patch("harness_tools.subprocess.run") as run:
+                        run.return_value.returncode = 0
+                        execute_tool("bash", {"command": "pwd"}, ["bash"])
+                self.assertEqual(run.call_args.kwargs["user"], 10001)
+                self.assertEqual(run.call_args.kwargs["group"], 10001)
+
+    def test_file_write_also_runs_as_unprivileged_workspace_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)):
+                with patch("harness_tools.os.geteuid", return_value=0):
+                    with patch("harness_tools.subprocess.run") as run:
+                        run.return_value.returncode = 0
+                        run.return_value.stdout = "wrote code.py\n"
+                        execute_tool("write_file", {"path": "code.py", "content": "x"},
+                                     ["write_file"])
+                self.assertEqual(run.call_args.kwargs["user"], 10001)
+                self.assertEqual(run.call_args.kwargs["group"], 10001)
+
+    def test_git_clone_does_not_accept_local_file_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)):
+                with self.assertRaisesRegex(ValueError, "HTTPS"):
+                    execute_tool("git_clone", {"url": "file:///etc", "directory": "repo"},
+                                 BACKEND_TOOLS)
+
+    def test_shell_and_mcp_require_internet_permission(self):
+        root = Path(__file__).parent
+        roles = load_roles(root / "roles.json", load_agents(root / "agents.json"))
+        roles["backend_engineer"]["permissions"]["internet"] = False
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "roles.json"
+            roles["backend_engineer"]["tools"] = ["bash"]
+            roles["backend_engineer"]["mcpServers"] = {}
+            path.write_text(json.dumps(roles), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "internet permission"):
+                load_roles(path, load_agents(root / "agents.json"))
+            roles["backend_engineer"]["tools"] = []
+            roles["backend_engineer"]["mcpServers"] = {
+                "fetch": {"command": ["python", "-m", "mcp_server_fetch"], "tools": ["fetch"]}}
+            path.write_text(json.dumps(roles), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "internet permission"):
+                load_roles(path, load_agents(root / "agents.json"))
+
+    def test_http_harness_exposes_and_calls_only_role_selected_mcp_tools(self):
+        from http_harness import run_http
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import json
+        import threading
+
+        calls = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                calls.append(payload)
+                message = ({"content": None, "tool_calls": [{"id": "call-1", "type": "function",
+                            "function": {"name": "mcp__fetch__fetch",
+                                         "arguments": '{"url":"https://example.com"}'}}]}
+                           if len(calls) == 1 else {"content": "done"})
+                body = json.dumps({"choices": [{"message": message}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        config = {"fetch": {"command": ["python", "-m", "mcp_server_fetch"],
+                            "tools": ["fetch"]}}
+        discovered = {"mcp__fetch__fetch": {"server": "fetch", "native_name": "fetch",
+                      "schema": {"type": "function", "function": {"name": "mcp__fetch__fetch",
+                       "description": "fetch", "parameters": {"type": "object"}}}}}
+        try:
+            with patch.dict(os.environ, {"HARNESS_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+                                      "HARNESS_MODEL": "test"}):
+                with patch("mcp_client.discover_tools", return_value=discovered), \
+                     patch("mcp_client.call_tool", return_value="page text") as call:
+                    answer = run_http("fetch", {"tools": [], "mcpServers": config})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        self.assertEqual(answer, "done")
+        self.assertEqual(calls[0]["tools"], [discovered["mcp__fetch__fetch"]["schema"]])
+        self.assertEqual(calls[1]["messages"][-1]["content"], "page text")
+        self.assertEqual(call.call_args.args, (config["fetch"], "fetch", {"url": "https://example.com"}))
+
+
+if __name__ == "__main__":
+    unittest.main()

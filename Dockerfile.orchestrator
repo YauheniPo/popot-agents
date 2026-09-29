@@ -1,0 +1,12 @@
+FROM python:3.10-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends docker-cli \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir 'psycopg[binary]==3.3.6'
+
+WORKDIR /app
+COPY main.py session_store.py postgres_session_store.py harness_tools.py agents.json roles.json /app/
+
+ENV API_HOST=0.0.0.0 API_PORT=8000
+EXPOSE 8000
+CMD ["python", "-u", "/app/main.py"]
