@@ -122,7 +122,7 @@ class RequestLoggingTests(unittest.TestCase):
         handler.path = "/tasks"
         handler.request_version = "HTTP/1.1"
         handler.requestline = "POST /tasks HTTP/1.1"
-        handler.server = SimpleNamespace()
+        handler.server = SimpleNamespace(task_slots=threading.BoundedSemaphore(1))
         handler.headers = Message()
         body = json.dumps({"agent": "test_agent", "task": "проверить каталог",
                            "api_key": "private-value",
