@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from main import DockerAgentRunner
+from popot_agents.orchestrator.main import DockerAgentRunner
 
 
 class OrchestratorContainerTests(unittest.TestCase):

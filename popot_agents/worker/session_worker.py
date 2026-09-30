@@ -6,8 +6,8 @@ import socket
 import socketserver
 import sys
 
-from agent_worker import run_harness
-from http_harness import run_http
+from .agent_worker import run_harness
+from .http_harness import run_http
 
 
 SOCKET_PATH = os.getenv("HARNESS_SOCKET_PATH", "/workspace/chat.sock")

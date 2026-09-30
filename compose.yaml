@@ -15,17 +15,27 @@ services:
     restart: unless-stopped
 
   worker-image:
-    image: popot-agent-demo:local
+    image: popot-agent-worker:local
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/worker.Dockerfile
     command: ["true"]
+    develop:
+      watch:
+        - action: rebuild
+          path: .
+          include:
+            - docker/worker.Dockerfile
+            - .dockerignore
+            - popot_agents/__init__.py
+            - popot_agents/tools.py
+            - popot_agents/worker/**
 
   orchestrator:
     image: popot-orchestrator:local
     build:
       context: .
-      dockerfile: Dockerfile.orchestrator
+      dockerfile: docker/orchestrator.Dockerfile
     depends_on:
       db:
         condition: service_healthy
@@ -50,3 +60,14 @@ services:
       - ./.sessions:/data/legacy-sessions:ro
       - ${HOME:?HOME is required}/.popot-agents/workspaces:/data/workspaces
     restart: unless-stopped
+    develop:
+      watch:
+        - action: rebuild
+          path: .
+          include:
+            - docker/orchestrator.Dockerfile
+            - .dockerignore
+            - popot_agents/__init__.py
+            - popot_agents/tools.py
+            - popot_agents/orchestrator/**
+            - config/**

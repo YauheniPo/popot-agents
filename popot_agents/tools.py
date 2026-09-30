@@ -121,7 +121,7 @@ def _file_action(action: str, arguments: dict) -> str:
     if os.geteuid() == 0:
         options.update(user=10001, group=10001)
     completed = subprocess.run(
-        [sys.executable, str(Path(__file__).with_name("file_worker.py")), action], **options)
+        [sys.executable, "-m", "popot_agents.worker.file_worker", action], **options)
     if completed.returncode != 0:
         raise RuntimeError(f"{action} failed: {completed.stderr.strip()[:300]}")
     return completed.stdout

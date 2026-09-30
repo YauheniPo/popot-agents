@@ -5,4 +5,4 @@ __pycache__
 .env
 .sessions
 .workspaces
-test_*.py
+tests/

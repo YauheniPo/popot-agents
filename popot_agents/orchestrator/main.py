@@ -14,12 +14,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Callable, Mapping
 
-from harness_tools import TOOL_SCHEMAS
-from session_store import SessionStore
+from popot_agents.tools import TOOL_SCHEMAS
+from .session_store import SessionStore
 
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_TASK_LENGTH = 10_000
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CHAT_WORKER_MODULE = "popot_agents.worker.session_worker"
 
 
 class AgentRunError(Exception):
@@ -33,7 +35,7 @@ class AgentConfigurationError(Exception):
 class DockerAgentRunner:
     def __init__(
         self,
-        image: str = "popot-agent-demo:local",
+        image: str = "popot-agent-worker:local",
         timeout_seconds: int = 60,
         network: str = "none",
         env_names: list[str] | None = None,
@@ -71,12 +73,14 @@ class DockerAgentRunner:
         permissions = (role_config or {}).get("permissions", {})
         if permissions.get("workspace") != "persistent":
             return None
-        root = Path(os.getenv("AGENT_WORKSPACE_DIR", str(Path(__file__).parent / ".workspaces"))).resolve()
+        root = Path(os.getenv("AGENT_WORKSPACE_DIR", str(PROJECT_ROOT / ".workspaces"))).resolve()
         path = root / container_name
         if create:
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.chmod(root, 0o700)
             path.mkdir(mode=0o770, exist_ok=True)
+            if os.geteuid() == 0:
+                os.chown(path, -1, 10001)
             os.chmod(path, 0o770)
         return path
 
@@ -182,7 +186,7 @@ class DockerAgentRunner:
         container_name = f"popot-chat-{chat_id}"
         command = self._docker_command(container_name, detached=True, role_config=role_config)
         command.extend(["--label", f"popot.chat_id={chat_id}", self.image,
-                        "python", "-u", "/app/session_worker.py", "serve"])
+                        "python", "-u", "-m", CHAT_WORKER_MODULE, "serve"])
         started = subprocess.run(command, text=True, capture_output=True,
                                  timeout=15, check=False)
         if started.returncode != 0:
@@ -199,7 +203,7 @@ class DockerAgentRunner:
                           self.workspace_host_path(container_name, role_config))
         for _ in range(20):
             ready = subprocess.run(
-                ["docker", "exec", container_name, "python", "/app/session_worker.py", "ping"],
+                ["docker", "exec", container_name, "python", "-m", CHAT_WORKER_MODULE, "ping"],
                 text=True, capture_output=True, timeout=3, check=False,
             )
             if ready.returncode == 0:
@@ -227,7 +231,7 @@ class DockerChat:
         try:
             completed = subprocess.run(
                 ["docker", "exec", self.container_name,
-                 "python", "/app/session_worker.py", "ping"],
+                 "python", "-m", CHAT_WORKER_MODULE, "ping"],
                 text=True, capture_output=True, timeout=3, check=False,
             )
             return completed.returncode == 0 and json.loads(completed.stdout).get("status") == "ok"
@@ -237,7 +241,7 @@ class DockerChat:
     def restore(self, messages: list[dict[str, str]]) -> None:
         completed = subprocess.run(
             ["docker", "exec", "--interactive", self.container_name,
-             "python", "/app/session_worker.py", "restore"],
+             "python", "-m", CHAT_WORKER_MODULE, "restore"],
             input=json.dumps({"messages": messages}, ensure_ascii=False),
             text=True, capture_output=True, timeout=10, check=False,
         )
@@ -253,7 +257,7 @@ class DockerChat:
     def send(self, message: str) -> dict[str, str]:
         completed = subprocess.run(
             ["docker", "exec", "--interactive", self.container_name,
-             "python", "/app/session_worker.py", "message"],
+             "python", "-m", CHAT_WORKER_MODULE, "message"],
             input=json.dumps({"message": message}, ensure_ascii=False),
             text=True, capture_output=True, timeout=self.timeout_seconds, check=False,
         )
@@ -282,8 +286,8 @@ class DockerChat:
 def load_agents(path: str) -> dict[str, DockerAgentRunner]:
     with open(path, encoding="utf-8") as file:
         profiles = json.load(file)
-    if not isinstance(profiles, dict) or "demo" not in profiles:
-        raise ValueError("agents file must contain a demo profile")
+    if not isinstance(profiles, dict) or not profiles:
+        raise ValueError("agents file must contain at least one profile")
     agents = {}
     for name, profile in profiles.items():
         if not isinstance(profile, dict):
@@ -538,7 +542,10 @@ def create_server(
                 self._reply(404, {"error": "unknown role"})
                 return
             role_config = roles.get(role) if role else None
-            agent = role_config["agent"] if role_config else payload.get("agent", "demo")
+            if not role_config and "agent" not in payload:
+                self._reply(400, {"error": "agent or role is required"})
+                return
+            agent = role_config["agent"] if role_config else payload["agent"]
             if role_config and "agent" in payload and payload["agent"] != agent:
                 self._reply(409, {"error": "role uses another agent"})
                 return
@@ -562,7 +569,10 @@ def create_server(
                     self._reply(404, {"error": "unknown role"})
                     return
                 role_config = roles.get(role) if role else None
-                agent = role_config["agent"] if role_config else payload.get("agent", "demo")
+                if not role_config and "agent" not in payload:
+                    self._reply(400, {"error": "agent or role is required"})
+                    return
+                agent = role_config["agent"] if role_config else payload["agent"]
                 if role_config and "agent" in payload and payload["agent"] != agent:
                     self._reply(409, {"error": "role uses another agent"})
                     return
@@ -683,26 +693,25 @@ def create_server(
             self.server.store.delete(session_id)
             self._reply(200, {"status": "closed"})
 
-    directory = session_dir or Path(__file__).resolve().parent / ".sessions"
+    directory = session_dir or PROJECT_ROOT / ".sessions"
     return ChatServer((host, port), Handler, directory, idle_seconds, store)
 
 
 def main() -> None:
-    directory = Path(__file__).resolve().parent
-    load_dotenv(os.getenv("AGENT_ENV_FILE", str(directory / ".env")))
+    load_dotenv(os.getenv("AGENT_ENV_FILE", str(PROJECT_ROOT / ".env")))
     host = os.getenv("API_HOST", "127.0.0.1")
     port = int(os.getenv("API_PORT", "8000"))
-    agents = load_agents(os.getenv("AGENT_PROFILES_FILE", str(directory / "agents.json")))
-    roles = load_roles(os.getenv("AGENT_ROLES_FILE", str(directory / "roles.json")), agents)
+    agents = load_agents(os.getenv("AGENT_PROFILES_FILE", str(PROJECT_ROOT / "config" / "agents.json")))
+    roles = load_roles(os.getenv("AGENT_ROLES_FILE", str(PROJECT_ROOT / "config" / "roles.json")), agents)
     store = None
     if os.getenv("AGENT_SESSION_BACKEND") == "postgres":
-        from postgres_session_store import PostgresSessionStore
+        from .postgres_session_store import PostgresSessionStore
         store = PostgresSessionStore()
         if os.getenv("AGENT_LEGACY_SESSION_DIR"):
             store.import_legacy(os.environ["AGENT_LEGACY_SESSION_DIR"])
     server = create_server(
         agents, host, port,
-        session_dir=os.getenv("AGENT_SESSION_DIR", str(directory / ".sessions")),
+        session_dir=os.getenv("AGENT_SESSION_DIR", str(PROJECT_ROOT / ".sessions")),
         idle_seconds=int(os.getenv("AGENT_CHAT_IDLE_SECONDS", "1800")),
         roles=roles,
         store=store,

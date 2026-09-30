@@ -1,6 +1,5 @@
 import json
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -10,8 +9,8 @@ from http.client import HTTPConnection
 from pathlib import Path
 from unittest.mock import patch
 
-from main import AgentRunError, DockerAgentRunner, create_server
-from session_worker import Conversation
+from popot_agents.orchestrator.main import AgentRunError, DockerAgentRunner, create_server
+from popot_agents.worker.session_worker import Conversation
 
 
 class FakeChat:
@@ -55,7 +54,7 @@ class ChatApiTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.runner = FakeRunner()
-        self.server = create_server({"demo": self.runner}, port=0, session_dir=self.directory.name)
+        self.server = create_server({"test_agent": self.runner}, port=0, session_dir=self.directory.name)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -77,7 +76,7 @@ class ChatApiTests(unittest.TestCase):
         return status, data
 
     def test_chat_can_be_inspected_and_closed(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         session_id = first["sessionId"]
         self.assertEqual(first["container"], f"worker-{session_id}")
         status, info = self.request("GET", f"/chats/{session_id}")
@@ -96,8 +95,14 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(len(self.runner.chats), 0)
 
+    def test_new_chat_requires_agent_or_role(self):
+        status, data = self.request("POST", "/messages", {"message": "hello"})
+        self.assertEqual(status, 400)
+        self.assertIn("agent or role", data["error"])
+        self.assertEqual(len(self.runner.chats), 0)
+
     def test_messages_create_chat_without_session_id_and_reuse_it_with_id(self):
-        status, first = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+        status, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         self.assertEqual(status, 200)
         self.assertEqual(first["answer"], "turn 1")
         self.assertEqual(len(self.runner.chats), 1)
@@ -108,7 +113,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(followup["container"], first["container"])
         self.assertEqual(len(self.runner.chats), 1)
 
-        status, second = self.request("POST", "/messages", {"agent": "demo", "message": "new chat"})
+        status, second = self.request("POST", "/messages", {"agent": "test_agent", "message": "new chat"})
         self.assertEqual(status, 200)
         self.assertNotEqual(second["sessionId"], first["sessionId"])
         self.assertEqual(len(self.runner.chats), 2)
@@ -120,7 +125,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(self.runner.chats, [])
 
     def test_stopped_chat_restores_history_in_a_new_worker(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "remember 137"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "remember 137"})
         session_id = first["sessionId"]
         old_worker = self.runner.chats[0]
         self.server.shutdown()
@@ -128,7 +133,7 @@ class ChatApiTests(unittest.TestCase):
         self.thread.join()
         self.assertTrue(old_worker.closed)
 
-        self.server = create_server({"demo": self.runner}, port=0, session_dir=self.directory.name)
+        self.server = create_server({"test_agent": self.runner}, port=0, session_dir=self.directory.name)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         status, info = self.request("GET", f"/chats/{session_id}")
@@ -145,7 +150,7 @@ class ChatApiTests(unittest.TestCase):
         ])
 
     def test_saved_chat_reports_missing_profile_after_configuration_change(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
@@ -159,7 +164,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertIn("profile", response["error"])
 
     def test_stopped_worker_recovers_on_first_followup(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "remember 137"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "remember 137"})
         self.runner.chats[0].close()
         status, followup = self.request("POST", "/messages", {
             "sessionId": first["sessionId"], "message": "what number?",
@@ -169,7 +174,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(len(self.runner.chats), 2)
 
     def test_model_error_keeps_live_worker_and_saved_history(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         session_id = first["sessionId"]
         status, _ = self.request("POST", "/messages", {"sessionId": session_id, "message": "fail"})
         self.assertEqual(status, 502)
@@ -179,7 +184,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(len(self.runner.chats), 1)
 
     def test_idle_worker_stops_but_session_remains_resumable(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         session_id = first["sessionId"]
         self.server.live[session_id].last_used = time.monotonic() - 1900
         self.server.service_actions()
@@ -189,7 +194,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(info["status"], "stopped")
 
     def test_session_creation_time_survives_messages_and_server_restart(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         session_id = first["sessionId"]
         path = Path(self.directory.name) / f"{session_id}.json"
         created_at = json.loads(path.read_text(encoding="utf-8"))["createdAt"]
@@ -199,14 +204,14 @@ class ChatApiTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
-        self.server = create_server({"demo": self.runner}, port=0, session_dir=self.directory.name)
+        self.server = create_server({"test_agent": self.runner}, port=0, session_dir=self.directory.name)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.request("POST", "/messages", {"sessionId": session_id, "message": "later"})
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["createdAt"], created_at)
 
     def test_session_expires_seven_days_after_creation_even_if_recently_used(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         session_id = first["sessionId"]
         path = Path(self.directory.name) / f"{session_id}.json"
         saved = json.loads(path.read_text(encoding="utf-8"))
@@ -227,7 +232,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertNotIn(session_id, [chat["sessionId"] for chat in self.request("GET", "/chats")[1]["chats"]])
 
     def test_old_session_file_without_created_at_remains_resumable(self):
-        _, first = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+        _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         session_id = first["sessionId"]
         path = Path(self.directory.name) / f"{session_id}.json"
         saved = json.loads(path.read_text(encoding="utf-8"))
@@ -245,7 +250,7 @@ class ChatApiTests(unittest.TestCase):
 
     def test_storage_failure_closes_new_worker(self):
         with patch.object(self.server.store, "save", side_effect=OSError("disk full")):
-            status, _ = self.request("POST", "/messages", {"agent": "demo", "message": "hello"})
+            status, _ = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         self.assertEqual(status, 500)
         self.assertTrue(self.runner.chats[0].closed)
         self.assertEqual(self.server.live, {})
@@ -284,17 +289,8 @@ class ConversationTests(unittest.TestCase):
             "remember 137", "I will remember", "what number?",
         ])
 
-    def test_demo_cli_can_answer_later_turn_from_transcript(self):
-        completed = subprocess.run(
-            [sys.executable, "demo_harness.py"],
-            input="User: sum: 2, 3\n\nAssistant: 5\n\nUser: sum: 4, 5\n\nAssistant:",
-            text=True, capture_output=True, check=False,
-        )
-        self.assertEqual(completed.returncode, 0)
-        self.assertEqual(completed.stdout.strip(), "9")
-
     def test_oversized_answer_does_not_save_unrestorable_history(self):
-        with patch("session_worker.MAX_HISTORY_BYTES", 200):
+        with patch("popot_agents.worker.session_worker.MAX_HISTORY_BYTES", 200):
             conversation = Conversation(lambda messages: "x" * 300)
             with self.assertRaisesRegex(ValueError, "history"):
                 conversation.ask("hello")
@@ -302,7 +298,7 @@ class ConversationTests(unittest.TestCase):
 
 
 class DockerChatTests(unittest.TestCase):
-    @patch("main.subprocess.run")
+    @patch("popot_agents.orchestrator.main.subprocess.run")
     def test_starts_one_container_then_executes_messages_and_stops_it(self, run):
         run.side_effect = [
             subprocess.CompletedProcess([], 0, "container-id\n", ""),
@@ -324,7 +320,7 @@ class DockerChatTests(unittest.TestCase):
         self.assertEqual(commands[3][:3], ["docker", "exec", "--interactive"])
         self.assertEqual(commands[4][:3], ["docker", "rm", "-f"])
 
-    @patch("main.subprocess.run")
+    @patch("popot_agents.orchestrator.main.subprocess.run")
     def test_reconnects_owned_container_after_api_restart(self, run):
         run.side_effect = [
             subprocess.CompletedProcess([], 125, "", "container name already in use"),
