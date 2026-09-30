@@ -40,12 +40,25 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
     model = os.environ.get("HARNESS_MODEL", "")
     if not base_url.startswith(("http://", "https://")) or not model:
         raise ValueError("HARNESS_BASE_URL and HARNESS_MODEL are required")
+    turn_timeout = float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS",
+                                   str(RUNTIME["worker"]["default_timeout_seconds"])))
+    if turn_timeout <= 0:
+        raise ValueError("HARNESS_TURN_TIMEOUT_SECONDS must be positive")
+    deadline = time.monotonic() + turn_timeout
+
+    def remaining_seconds() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("turn deadline exceeded")
+        return remaining
+
     messages = [{"role": "user", "content": task}] if isinstance(task, str) else list(task)
     role_config = role_config or {}
     instructions = role_config.get("instructions", "")
     allowed = role_config.get("tools", [])
     mcp_servers = role_config.get("mcpServers", {})
-    mcp_tools = mcp_client.discover_tools(mcp_servers) if mcp_servers else {}
+    mcp_tools = (mcp_client.discover_tools(mcp_servers, timeout_seconds=remaining_seconds())
+                 if mcp_servers else {})
     schemas = [TOOL_SCHEMAS[name] for name in allowed]
     schemas.extend(item["schema"] for item in mcp_tools.values())
     if instructions:
@@ -63,6 +76,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
         headers["Authorization"] = f"Bearer {key}"
     for round_number in range(1, role_config.get("max_tool_rounds",
                                              RUNTIME["model"]["default_max_tool_rounds"]) + 1):
+        request_timeout = min(RUNTIME["timeouts"]["model_request_seconds"], remaining_seconds())
         body = {"model": model, "messages": messages}
         body.update(model_parameters)
         if schemas:
@@ -77,7 +91,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
         print(f"LLM request started round={round_number}",
               file=sys.stderr, flush=True)
         try:
-            with request.urlopen(call, timeout=RUNTIME["timeouts"]["model_request_seconds"]) as response:
+            with request.urlopen(call, timeout=request_timeout) as response:
                 result = json.load(response)
         except error.HTTPError as exc:
             print(f"LLM response HTTP {exc.code} after {time.monotonic() - started_at:.1f}s",
@@ -89,6 +103,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
             raise RuntimeError("model endpoint is unreachable") from exc
         print(f"LLM response received after {time.monotonic() - started_at:.1f}s",
               file=sys.stderr, flush=True)
+        remaining_seconds()
         try:
             message = result["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -101,6 +116,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
                 _trace("assistant_message", round=round_number, content=content)
             messages.append(message)
             for tool_call in calls:
+                remaining_seconds()
                 name = None
                 try:
                     function = tool_call["function"]
@@ -115,9 +131,11 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
                     if name in mcp_tools:
                         selected = mcp_tools[name]
                         output = mcp_client.call_tool(
-                            mcp_servers[selected["server"]], selected["native_name"], arguments)
+                            mcp_servers[selected["server"]], selected["native_name"], arguments,
+                            timeout_seconds=remaining_seconds())
                     else:
-                        output = execute_tool(name, arguments, allowed)
+                        output = execute_tool(name, arguments, allowed,
+                                              timeout_seconds=remaining_seconds())
                     call_id = tool_call["id"]
                 except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
                     _trace("tool_error", round=round_number, name=name,
@@ -138,6 +156,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError("model endpoint returned an empty answer")
         _trace("assistant_answer", round=round_number, content=answer.strip())
+        remaining_seconds()
         return answer.strip()
     raise RuntimeError("model exceeded the tool-call limit")
 

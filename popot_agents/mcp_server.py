@@ -47,6 +47,40 @@ def _normalized_session_id(session_id: str | None) -> str | None:
     return session_id.strip() or None
 
 
+def _require_target(role: str | None, agent: str | None,
+                    session_id: str | None) -> None:
+    for name, value in (("role", role), ("agent", agent)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{name} must be a nonempty string")
+    if session_id is None and role is None and agent is None:
+        raise ValueError("To start a chat, provide role or agent; "
+                         "to continue, provide session_id")
+
+
+def _describe_chat_tool_schema(schema: dict, names: tuple[str, ...]) -> None:
+    """Advertise the alternatives FastMCP cannot infer from optional arguments."""
+    schema["anyOf"] = [
+        {"required": [name],
+         "properties": {name: {"type": "string", "minLength": 1,
+                                "pattern": r"\S"}}}
+        for name in names
+    ]
+    properties = schema.setdefault("properties", {})
+    descriptions = {
+        "role": "Configured role for a new session. Use 'chat' for general questions. "
+                "Ask the user if the intended role is unclear.",
+        "agent": "Configured agent profile for a new session; use this instead of role "
+                 "only when the user specifies an agent profile.",
+        "sessionId": "Existing session ID returned by run_task; omit when starting a new session.",
+        "session_id": "Existing session ID returned by a previous response; "
+                      "omit when starting a new session.",
+    }
+    for name in names:
+        properties.setdefault(name, {})["description"] = descriptions[name]
+        if name in {"role", "agent"}:
+            properties[name]["pattern"] = r"\S"
+
+
 class MCPHTTPLoggingMiddleware:
     """Log HTTP metadata and bounded JSON requests without buffering responses."""
 
@@ -143,6 +177,7 @@ class OrchestratorClient:
     def run_task(self, task: str, role: str | None = None,
                  agent: str | None = None, session_id: str | None = None) -> dict:
         session_id = _normalized_session_id(session_id)
+        _require_target(role, agent, session_id)
         if session_id is not None:
             return self.send_message(task, session_id=session_id, role=role, agent=agent)
         payload = {"task": task}
@@ -154,6 +189,8 @@ class OrchestratorClient:
 
     def send_message(self, message: str, session_id: str | None = None,
                      role: str | None = None, agent: str | None = None) -> dict:
+        session_id = _normalized_session_id(session_id)
+        _require_target(role, agent, session_id)
         payload = {"message": message}
         if session_id is not None:
             payload["sessionId"] = session_id
@@ -178,6 +215,17 @@ def main() -> None:
         def streamable_http_app(self):
             return MCPHTTPLoggingMiddleware(super().streamable_http_app())
 
+        async def list_tools(self):
+            tools = await super().list_tools()
+            for tool in tools:
+                if tool.name == "run_task":
+                    _describe_chat_tool_schema(tool.inputSchema,
+                                               ("role", "agent", "sessionId", "session_id"))
+                elif tool.name == "send_message":
+                    _describe_chat_tool_schema(tool.inputSchema,
+                                               ("session_id", "role", "agent"))
+            return tools
+
     client = OrchestratorClient(
         os.getenv("MCP_ORCHESTRATOR_URL", "http://127.0.0.1:8000"),
         int(os.getenv("MCP_UPSTREAM_TIMEOUT_SECONDS", str(RUNTIME["timeouts"]["mcp_upstream_seconds"]))),
@@ -198,7 +246,9 @@ def main() -> None:
     @server.tool()
     def run_task(task: str, role: str | None = None, agent: str | None = None,
                  sessionId: str | None = None, session_id: str | None = None) -> dict:
-        """Start a task with an empty sessionId, or continue one with an existing ID."""
+        """Start a task with role (use chat for general questions) or agent. For a follow-up,
+        pass the returned sessionId or session_id instead. If the role is unclear, ask the user.
+        """
         sessionId = _normalized_session_id(sessionId)
         session_id = _normalized_session_id(session_id)
         if sessionId is not None and session_id is not None and sessionId != session_id:
@@ -209,7 +259,9 @@ def main() -> None:
     @server.tool()
     def send_message(message: str, session_id: str | None = None,
                      role: str | None = None, agent: str | None = None) -> dict:
-        """Start a chat with role or agent, or continue it with session_id."""
+        """Continue a chat with its returned session_id. For a new chat, use run_task;
+        if starting here, provide role or agent. Ask the user when the role is unclear.
+        """
         return client.send_message(message, session_id=session_id, role=role, agent=agent)
 
     @server.tool()

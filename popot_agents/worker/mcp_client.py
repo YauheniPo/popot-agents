@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+import time
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import MAX_TOOL_OUTPUT, safe_tool_env
@@ -44,12 +45,19 @@ async def _discover_one(alias: str, config: dict) -> dict:
     return result
 
 
-def discover_tools(servers: dict) -> dict:
+def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> dict:
     discovered = {}
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     for alias, config in servers.items():
         try:
+            timeout = RUNTIME["timeouts"]["mcp_discovery_seconds"]
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                timeout = min(timeout, remaining)
             discovered.update(asyncio.run(asyncio.wait_for(
-                _discover_one(alias, config), RUNTIME["timeouts"]["mcp_discovery_seconds"])))
+                _discover_one(alias, config), timeout)))
         except TimeoutError as exc:
             raise RuntimeError(f"MCP server {alias} timed out during discovery") from exc
         except Exception as exc:
@@ -73,10 +81,14 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
     return output[:MAX_TOOL_OUTPUT] + ("\n[output truncated]" if len(output) > MAX_TOOL_OUTPUT else "")
 
 
-def call_tool(config: dict, native_name: str, arguments: dict) -> str:
+def call_tool(config: dict, native_name: str, arguments: dict,
+              *, timeout_seconds: float | None = None) -> str:
     try:
+        timeout = RUNTIME["timeouts"]["mcp_tool_seconds"]
+        if timeout_seconds is not None:
+            timeout = min(timeout, timeout_seconds)
         return asyncio.run(asyncio.wait_for(
-            _call_one(config, native_name, arguments), RUNTIME["timeouts"]["mcp_tool_seconds"]))
+            _call_one(config, native_name, arguments), timeout))
     except TimeoutError as exc:
         raise RuntimeError("MCP tool call timed out") from exc
     except Exception as exc:

@@ -30,10 +30,13 @@ Run the API without Compose with `python -m popot_agents.orchestrator.main`.
 
 Edit [config/runtime.json](config/runtime.json) for shared non-secret settings.
 `sessions` sets the default worker idle time, session retention, and cleanup
-interval. `worker` sets Docker resources and startup probing. `timeouts` covers
+interval. `worker` sets Docker resources, startup probing, and
+`max_concurrent_tasks` (default: 4). When all task slots are busy, the API
+returns HTTP 503; `/healthz` remains available. `timeouts` covers
 model, MCP, tool, Docker, and database calls. `limits` sets request, history,
 tool output, and file sizes. `logging` sets how much of an MCP request body is
-recorded. `model` sets the default tool-round limit and optional
+recorded and the worker log tail and file size limits. `model` sets the default
+tool-round limit and optional
 `temperature`/`max_tokens`; `null` omits either model parameter from requests.
 The same file is copied into the orchestrator, worker, and MCP images. Its
 values are validated at startup, so an invalid setting prevents that service
@@ -89,7 +92,11 @@ These commands use the [Codex and Claude HTTP MCP connection format](https://dev
 
 The server exposes `run_task` to start a session or continue one by passing the
 returned `sessionId` inside `params.arguments`. `send_message` also continues
-a session using its `session_id` argument. Pass `role` or `agent` to start.
+a session using its `session_id` argument. The MCP tool schemas require one of
+`role` or `agent` for a new session, or a session ID for a follow-up. Use
+`"role":"chat"` for general questions such as arithmetic; ask the user which
+role to use when their intent is unclear. Missing targets are rejected by MCP
+before an HTTP request reaches the orchestrator.
 Omit `sessionId` or pass an empty string to create a new session.
 For example, a follow-up through `run_task` uses
 `"params":{"name":"run_task","arguments":{"sessionId":"PASTE_ID_HERE","task":"Continue"}}`.
@@ -191,7 +198,12 @@ curl -sS http://127.0.0.1:8000/messages \
 Workers log when a model request starts and when a response arrives. Follow API
 requests and answers with `docker compose logs -f orchestrator`. While a worker
 is running, use `docker logs -f <popot-chat-container-name>` to see its model
-request events. Worker logs include turn start/completion, tools available to
+request events. After each turn and before a container is removed, the
+orchestrator saves the worker log in
+`$HOME/.popot-agents/worker-logs/<sessionId>.log`. For example, run
+`tail -f "$HOME/.popot-agents/worker-logs/<sessionId>.log"`. The file is removed
+when its session is deleted or expires. Worker logs include turn
+start/completion, tools available to
 the HTTP model, the number of tool calls it chose, visible assistant messages,
 tool names and safe argument summaries, tool results or result sizes, and the
 final answer. Shell commands, file contents, and arbitrary

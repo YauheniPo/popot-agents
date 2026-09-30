@@ -6,6 +6,7 @@
   },
   "worker": {
     "default_timeout_seconds": 60,
+    "max_concurrent_tasks": 4,
     "memory": "1g",
     "cpus": 1,
     "pids_limit": 64,
@@ -40,7 +41,9 @@
     "download_bytes": 5000000
   },
   "logging": {
-    "mcp_body_max_bytes": 65536
+    "mcp_body_max_bytes": 65536,
+    "worker_log_tail_lines": 200,
+    "worker_log_max_bytes": 1048576
   },
   "model": {
     "default_max_tool_rounds": 5,

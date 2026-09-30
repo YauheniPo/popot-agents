@@ -346,6 +346,39 @@ class HarnessWorkerTests(unittest.TestCase):
 
 class HttpHarnessTests(unittest.TestCase):
     @patch("popot_agents.worker.http_harness.request.urlopen")
+    def test_turn_deadline_limits_model_rounds(self, urlopen):
+        from popot_agents.worker.http_harness import run_http
+
+        clock = [0.0]
+        tool_reply = {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1", "type": "function", "function": {
+                "name": "calculate", "arguments": '{"expression":"1+1"}'}}]}}]}
+
+        def reply(_request, timeout):
+            self.assertLessEqual(timeout, 1.0 - clock[0])
+            clock[0] += 0.6
+            return io.BytesIO(json.dumps(tool_reply).encode())
+
+        urlopen.side_effect = reply
+        tool_timeouts = []
+
+        def execute(_name, _arguments, _allowed, *, timeout_seconds):
+            tool_timeouts.append(timeout_seconds)
+            return "2"
+
+        with patch.dict(os.environ, {"HARNESS_BASE_URL": "https://example.test/v1",
+                                  "HARNESS_MODEL": "example-model",
+                                  "HARNESS_TURN_TIMEOUT_SECONDS": "1"}), \
+                patch("popot_agents.worker.http_harness.time.monotonic",
+                      side_effect=lambda: clock[0]), \
+                patch("popot_agents.worker.http_harness.execute_tool", side_effect=execute), \
+                redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "turn deadline exceeded"):
+                run_http("calculate", {"tools": ["calculate"], "max_tool_rounds": 3})
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertTrue(all(0 < value <= 0.4 for value in tool_timeouts))
+
+    @patch("popot_agents.worker.http_harness.request.urlopen")
     def test_logs_visible_model_steps_and_tool_calls(self, urlopen):
         from popot_agents.worker.http_harness import run_http
 

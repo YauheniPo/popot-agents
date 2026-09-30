@@ -8,10 +8,11 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -177,6 +178,9 @@ class DockerAgentRunner:
             environment["HARNESS_ENV_ALIASES_JSON"] = json.dumps(self.env_aliases)
         if self.model_env:
             environment["HARNESS_MODEL"] = os.environ[self.model_env]
+        if self.session_mode == "http":
+            turn_timeout = (role_config or {}).get("timeout_seconds", self.timeout_seconds)
+            environment["HARNESS_TURN_TIMEOUT_SECONDS"] = str(max(0.1, turn_timeout - 5))
         if self.model_parameters:
             environment["HARNESS_MODEL_PARAMETERS_JSON"] = json.dumps(self.model_parameters)
         environment["HARNESS_SESSION_MODE"] = self.session_mode
@@ -279,6 +283,47 @@ class DockerChat:
         self.timeout_seconds = timeout_seconds
         self.workspace_path = str(workspace_path) if workspace_path else None
         self.closed = False
+        self._last_log_lines: list[str] = []
+
+    def _capture_logs(self) -> None:
+        log_dir = os.getenv("AGENT_WORKER_LOG_DIR")
+        match = re.fullmatch(r"popot-chat-([0-9a-f]{16})", self.container_name)
+        if not log_dir or match is None:
+            return
+        try:
+            completed = subprocess.run(
+                ["docker", "logs", "--tail", str(RUNTIME["logging"]["worker_log_tail_lines"]),
+                 self.container_name],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=RUNTIME["timeouts"]["docker_inspect_seconds"], check=False,
+            )
+            if completed.returncode != 0:
+                return
+            lines = completed.stdout.splitlines(keepends=True)
+            overlap = 0
+            for count in range(min(len(self._last_log_lines), len(lines)), 0, -1):
+                if self._last_log_lines[-count:] == lines[:count]:
+                    overlap = count
+                    break
+            self._last_log_lines = lines
+            addition = "".join(lines[overlap:]).encode("utf-8")
+            if not addition:
+                return
+            directory = Path(log_dir)
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path = directory / f"{match.group(1)}.log"
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags, 0o600)
+            with os.fdopen(descriptor, "r+b") as file:
+                existing = file.read()
+                content = (existing + addition)[-RUNTIME["logging"]["worker_log_max_bytes"]:]
+                content = content.decode("utf-8", errors="ignore").encode("utf-8")
+                file.seek(0)
+                file.write(content)
+                file.truncate()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"worker log capture failed for {self.container_name}: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
 
     def is_alive(self) -> bool:
         if self.closed:
@@ -310,12 +355,15 @@ class DockerChat:
             raise AgentRunError(result.get("error", "chat worker could not restore history"))
 
     def send(self, message: str) -> dict[str, str]:
-        completed = subprocess.run(
-            ["docker", "exec", "--interactive", self.container_name,
-             "python", "-m", CHAT_WORKER_MODULE, "message"],
-            input=json.dumps({"message": message}, ensure_ascii=False),
-            text=True, capture_output=True, timeout=self.timeout_seconds, check=False,
-        )
+        try:
+            completed = subprocess.run(
+                ["docker", "exec", "--interactive", self.container_name,
+                 "python", "-m", CHAT_WORKER_MODULE, "message"],
+                input=json.dumps({"message": message}, ensure_ascii=False),
+                text=True, capture_output=True, timeout=self.timeout_seconds, check=False,
+            )
+        finally:
+            self._capture_logs()
         if completed.returncode != 0:
             raise AgentRunError("chat worker is unavailable")
         try:
@@ -331,12 +379,24 @@ class DockerChat:
     def close(self) -> None:
         if not self.closed:
             self.closed = True
+            self._capture_logs()
             try:
                 subprocess.run(["docker", "rm", "-f", self.container_name],
                                text=True, capture_output=True,
                                timeout=RUNTIME["timeouts"]["docker_remove_seconds"], check=False)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+
+
+def remove_worker_log(session_id: str) -> None:
+    log_dir = os.getenv("AGENT_WORKER_LOG_DIR")
+    if not log_dir or re.fullmatch(r"[0-9a-f]{16}", session_id) is None:
+        return
+    try:
+        (Path(log_dir) / f"{session_id}.log").unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"worker log cleanup failed for {session_id}: {type(exc).__name__}",
+              file=sys.stderr, flush=True)
 
 
 def load_agents(path: str) -> dict[str, DockerAgentRunner]:
@@ -460,14 +520,23 @@ class ChatRecord:
     last_used: float = field(default_factory=time.monotonic)
 
 
-class ChatServer(HTTPServer):
+class ChatServer(ThreadingHTTPServer):
+    daemon_threads = False
+
     def __init__(self, address, handler, session_dir: str | Path, idle_seconds: int,
                  store=None):
         self.store = store if store is not None else SessionStore(session_dir)
         self.live: dict[str, ChatRecord] = {}
+        self.live_lock = threading.RLock()
+        self.session_locks = [threading.RLock() for _ in range(64)]
+        self.task_slots = threading.BoundedSemaphore(RUNTIME["worker"]["max_concurrent_tasks"])
+        self.pending_expired: set[str] = set()
         self.idle_seconds = idle_seconds
         self.last_prune = 0.0
         super().__init__(address, handler)
+
+    def session_lock(self, session_id: str):
+        return self.session_locks[hash(session_id) % len(self.session_locks)]
 
     def service_actions(self) -> None:
         now = time.monotonic()
@@ -477,21 +546,46 @@ class ChatServer(HTTPServer):
                 expired = self.store.prune_expired()
             except OSError:
                 expired = set()
-            for session_id in expired:
-                record = self.live.pop(session_id, None)
+            self.pending_expired.update(expired)
+        for session_id in tuple(self.pending_expired):
+            lock = self.session_lock(session_id)
+            if not lock.acquire(blocking=False):
+                continue
+            try:
+                self.pending_expired.discard(session_id)
+                with self.live_lock:
+                    record = self.live.pop(session_id, None)
                 if record is not None:
                     record.worker.close()
-        for session_id, record in list(self.live.items()):
-            ttl = (record.role_config or {}).get("ttl_seconds", self.idle_seconds)
-            if ttl > 0 and now - record.last_used > ttl:
-                record.worker.close()
-                self.live.pop(session_id, None)
+                remove_worker_log(session_id)
+            finally:
+                lock.release()
+        with self.live_lock:
+            session_ids = list(self.live)
+        for session_id in session_ids:
+            lock = self.session_lock(session_id)
+            if not lock.acquire(blocking=False):
+                continue
+            try:
+                with self.live_lock:
+                    record = self.live.get(session_id)
+                if record is None:
+                    continue
+                ttl = (record.role_config or {}).get("ttl_seconds", self.idle_seconds)
+                if ttl > 0 and now - record.last_used > ttl:
+                    with self.live_lock:
+                        self.live.pop(session_id, None)
+                    record.worker.close()
+            finally:
+                lock.release()
 
     def server_close(self) -> None:
-        for record in self.live.values():
-            record.worker.close()
-        self.live.clear()
         super().server_close()
+        with self.live_lock:
+            records = list(self.live.values())
+            self.live.clear()
+        for record in records:
+            record.worker.close()
 
 
 def create_server(
@@ -545,6 +639,8 @@ def create_server(
             self._log_request(None)
             try:
                 self._get()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except OSError:
                 self._reply(500, {"error": "session storage failed"})
 
@@ -552,6 +648,8 @@ def create_server(
             if self.path == "/healthz":
                 self._reply(200, {"status": "ok"})
             elif self.path == "/chats":
+                with self.server.live_lock:
+                    running = set(self.server.live)
                 self._reply(200, {"chats": [
                     {
                         "sessionId": saved["sessionId"],
@@ -562,34 +660,40 @@ def create_server(
                                       else None),
                         "updatedAt": saved["updatedAt"],
                         "turns": len(saved["messages"]) // 2,
-                        "status": "running" if saved["sessionId"] in self.server.live else "stopped",
+                        "status": "running" if saved["sessionId"] in running else "stopped",
                     }
                     for saved in self.server.store.list_chats()
                 ]})
             elif self.path.startswith("/chats/"):
                 session_id = self.path.removeprefix("/chats/")
-                saved = self.server.store.get(session_id)
-                if saved is None:
-                    self._reply(404, {"error": "unknown sessionId"})
-                else:
-                    live = self.server.live.get(session_id)
-                    if live and not live.worker.is_alive():
-                        live.worker.close()
-                        self.server.live.pop(session_id, None)
-                        live = None
-                    self._reply(200, {
-                        "sessionId": session_id, "agent": saved["agent"],
-                        "role": saved.get("role"),
-                        "createdAt": saved.get("createdAt", saved["updatedAt"]),
-                        "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
-                                      else None),
-                        "status": "running" if live else "stopped",
-                        "container": live.worker.container_name if live else None,
-                        "workspace": self._workspace(saved, live),
-                        "turns": len(saved["messages"]) // 2,
-                    })
+                with self.server.session_lock(session_id):
+                    self._get_chat(session_id)
             else:
                 self._reply(404, {"error": "not found"})
+
+        def _get_chat(self, session_id: str) -> None:
+            saved = self.server.store.get(session_id)
+            if saved is None:
+                self._reply(404, {"error": "unknown sessionId"})
+            else:
+                with self.server.live_lock:
+                    live = self.server.live.get(session_id)
+                if live and not live.worker.is_alive():
+                    live.worker.close()
+                    with self.server.live_lock:
+                        self.server.live.pop(session_id, None)
+                    live = None
+                self._reply(200, {
+                    "sessionId": session_id, "agent": saved["agent"],
+                    "role": saved.get("role"),
+                    "createdAt": saved.get("createdAt", saved["updatedAt"]),
+                    "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
+                                  else None),
+                    "status": "running" if live else "stopped",
+                    "container": live.worker.container_name if live else None,
+                    "workspace": self._workspace(saved, live),
+                    "turns": len(saved["messages"]) // 2,
+                })
 
         def _read_payload(self) -> dict | None:
             if self.headers.get_content_type() != "application/json":
@@ -648,6 +752,14 @@ def create_server(
             self._reply(200, result)
 
         def _message(self, payload: dict) -> None:
+            session_id = payload.get("sessionId")
+            if isinstance(session_id, str):
+                with self.server.session_lock(session_id):
+                    self._message_locked(payload)
+            else:
+                self._message_locked(payload)
+
+        def _message_locked(self, payload: dict) -> None:
             message = payload.get("message")
             if not isinstance(message, str) or not message.strip() or len(message) > MAX_TASK_LENGTH:
                 self._reply(400, {"error": f"message must be a nonempty string up to {MAX_TASK_LENGTH} characters"})
@@ -673,12 +785,14 @@ def create_server(
                 worker = (agents[agent].start_chat(session_id, role_config) if role_config
                           else agents[agent].start_chat(session_id))
                 record = ChatRecord(agent, worker, [], role, role_config)
-                self.server.live[session_id] = record
+                with self.server.live_lock:
+                    self.server.live[session_id] = record
                 try:
                     self.server.store.save(session_id, agent, [], role, role_config)
                 except OSError:
                     worker.close()
-                    self.server.live.pop(session_id, None)
+                    with self.server.live_lock:
+                        self.server.live.pop(session_id, None)
                     raise
             else:
                 if not isinstance(session_id, str):
@@ -700,10 +814,12 @@ def create_server(
                 if "role" in payload and payload["role"] != role:
                     self._reply(409, {"error": "sessionId belongs to another role"})
                     return
-                record = self.server.live.get(session_id)
+                with self.server.live_lock:
+                    record = self.server.live.get(session_id)
                 if record is not None and not record.worker.is_alive():
                     record.worker.close()
-                    self.server.live.pop(session_id, None)
+                    with self.server.live_lock:
+                        self.server.live.pop(session_id, None)
                     record = None
                 if record is None:
                     worker = (agents[agent].start_chat(session_id, role_config) if role_config
@@ -714,7 +830,8 @@ def create_server(
                         worker.close()
                         raise
                     record = ChatRecord(agent, worker, saved["messages"], role, role_config)
-                    self.server.live[session_id] = record
+                    with self.server.live_lock:
+                        self.server.live[session_id] = record
             try:
                 result = record.worker.send(message.strip())
                 history = record.messages + [
@@ -728,11 +845,13 @@ def create_server(
             except AgentRunError:
                 if not record.worker.is_alive():
                     record.worker.close()
-                    self.server.live.pop(session_id, None)
+                    with self.server.live_lock:
+                        self.server.live.pop(session_id, None)
                 raise
             except (subprocess.TimeoutExpired, OSError):
                 record.worker.close()
-                self.server.live.pop(session_id, None)
+                with self.server.live_lock:
+                    self.server.live.pop(session_id, None)
                 raise
             self._reply(200, {
                 "sessionId": session_id, "container": record.worker.container_name,
@@ -748,6 +867,9 @@ def create_server(
             payload = self._read_payload()
             if payload is None:
                 return
+            if not self.server.task_slots.acquire(blocking=False):
+                self._reply(503, {"error": "orchestrator is busy; retry later"})
+                return
             try:
                 if self.path == "/tasks":
                     self._task(payload)
@@ -761,13 +883,19 @@ def create_server(
                 self._reply(503, {"error": str(exc)})
             except AgentRunError as exc:
                 self._reply(502, {"error": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except OSError:
                 self._reply(500, {"error": "session storage failed"})
+            finally:
+                self.server.task_slots.release()
 
         def do_DELETE(self) -> None:
             self._log_request(None)
             try:
                 self._delete()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except OSError:
                 self._reply(500, {"error": "session storage failed"})
 
@@ -776,13 +904,19 @@ def create_server(
                 self._reply(404, {"error": "not found"})
                 return
             session_id = self.path.removeprefix("/chats/")
+            with self.server.session_lock(session_id):
+                self._delete_chat(session_id)
+
+        def _delete_chat(self, session_id: str) -> None:
             if self.server.store.get(session_id) is None:
                 self._reply(404, {"error": "unknown sessionId"})
                 return
-            record = self.server.live.pop(session_id, None)
+            with self.server.live_lock:
+                record = self.server.live.pop(session_id, None)
             if record is not None:
                 record.worker.close()
             self.server.store.delete(session_id)
+            remove_worker_log(session_id)
             self._reply(200, {"status": "closed"})
 
     directory = session_dir or PROJECT_ROOT / ".sessions"

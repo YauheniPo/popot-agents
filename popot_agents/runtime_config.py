@@ -9,7 +9,7 @@ from pathlib import Path
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "config" / "runtime.json"
 FIELDS = {
     "sessions": {"default_idle_seconds", "retention_days", "prune_interval_seconds"},
-    "worker": {"default_timeout_seconds", "memory", "cpus", "pids_limit", "tmpfs_mb", "workspace_tmpfs_mb",
+    "worker": {"default_timeout_seconds", "max_concurrent_tasks", "memory", "cpus", "pids_limit", "tmpfs_mb", "workspace_tmpfs_mb",
                "startup_probe_attempts", "startup_probe_interval_seconds"},
     "timeouts": {"model_request_seconds", "mcp_discovery_seconds", "mcp_tool_seconds",
                  "mcp_upstream_seconds", "tool_command_seconds", "git_clone_seconds",
@@ -18,7 +18,7 @@ FIELDS = {
                  "docker_remove_seconds", "postgres_connect_seconds"},
     "limits": {"request_bytes", "message_chars", "history_bytes", "socket_message_bytes", "tool_output_chars",
                "write_file_bytes", "download_bytes"},
-    "logging": {"mcp_body_max_bytes"},
+    "logging": {"mcp_body_max_bytes", "worker_log_tail_lines", "worker_log_max_bytes"},
     "model": {"default_max_tool_rounds", "temperature", "max_tokens"},
 }
 

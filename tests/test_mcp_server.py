@@ -98,6 +98,21 @@ class GatewayTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "404.*unknown sessionId"):
                 client.send_message("continue", session_id="missing")
 
+    def test_new_chat_requires_role_or_agent_before_http(self):
+        from popot_agents.mcp_server import OrchestratorClient
+
+        client = OrchestratorClient(self.base_url)
+        with patch("urllib.request.urlopen", side_effect=self.urlopen):
+            with self.assertRaisesRegex(ValueError, "role or agent"):
+                client.run_task("2+1?")
+            with self.assertRaisesRegex(ValueError, "role or agent"):
+                client.send_message("2+1?")
+            with self.assertRaisesRegex(ValueError, "role or agent"):
+                client.run_task("2+1?", session_id="   ")
+            with self.assertRaisesRegex(ValueError, "role must be a nonempty string"):
+                client.run_task("2+1?", role="   ")
+        self.assertEqual(self.calls, [])
+
     def test_list_chats_uses_existing_api(self):
         from popot_agents.mcp_server import OrchestratorClient
 
@@ -125,6 +140,12 @@ class GatewayTests(unittest.TestCase):
                     self.tools[function.__name__] = function
                     return function
                 return register
+
+            async def list_tools(self):
+                return [types.SimpleNamespace(name=name, inputSchema={
+                    "type": "object", "properties": {},
+                    "required": ["task" if name == "run_task" else "message"],
+                }) for name in ("run_task", "send_message")]
 
             def run(self, transport):
                 self.transport = transport
@@ -177,6 +198,12 @@ class GatewayTests(unittest.TestCase):
                 FakeFastMCP.instance.tools["run_task"](
                     "continue", sessionId="first", session_id="second")
         server = FakeFastMCP.instance
+        advertised = {tool.name: tool.inputSchema
+                      for tool in asyncio.run(server.list_tools())}
+        self.assertEqual(len(advertised["run_task"]["anyOf"]), 4)
+        self.assertEqual(len(advertised["send_message"]["anyOf"]), 3)
+        self.assertIn("chat", advertised["run_task"]["properties"]["role"]["description"])
+        self.assertIn("session", advertised["send_message"]["properties"]["session_id"]["description"])
         self.assertEqual(server.name, "popot-agents")
         self.assertEqual(server.transport, "streamable-http")
         self.assertEqual(set(server.tools), {"run_task", "send_message", "list_chats", "get_chat"})

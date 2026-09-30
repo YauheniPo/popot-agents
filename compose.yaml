@@ -55,15 +55,16 @@ services:
       PGPASSWORD: ${POPOT_DB_PASSWORD:?Set POPOT_DB_PASSWORD in .env}
       AGENT_WORKSPACE_DIR: /data/workspaces
       AGENT_WORKSPACE_HOST_DIR: ${HOME:?HOME is required}/.popot-agents/workspaces
+      AGENT_WORKER_LOG_DIR: /data/worker-logs
     ports:
       - "127.0.0.1:${API_PUBLISH_PORT:-8000}:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.sessions:/data/legacy-sessions:ro
       - ${HOME:?HOME is required}/.popot-agents/workspaces:/data/workspaces
+      - ${HOME:?HOME is required}/.popot-agents/worker-logs:/data/worker-logs
     healthcheck:
-      # Task requests block this single-threaded server; check its listening socket.
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), timeout=2).close()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
       interval: 15s
       timeout: 3s
       retries: 10
