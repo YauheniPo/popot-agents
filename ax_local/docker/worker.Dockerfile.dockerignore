@@ -1,0 +1,15 @@
+*
+!popot_agents/
+!popot_agents/__init__.py
+!popot_agents/tools.py
+!popot_agents/runtime_config.py
+!popot_agents/worker/
+!popot_agents/worker/**
+!config/
+!config/runtime.json
+!ax_local/
+!ax_local/__init__.py
+!ax_local/worker/
+!ax_local/worker/**
+**/__pycache__/
+**/*.pyc
