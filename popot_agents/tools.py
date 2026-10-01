@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from popot_agents.runtime_config import RUNTIME
 
 WORKSPACE_ROOT = Path(os.getenv("TOOL_WORKSPACE_ROOT", "/workspace"))
-MAX_TOOL_OUTPUT = 12_000
+MAX_TOOL_OUTPUT = RUNTIME["limits"]["tool_output_chars"]
 
 
 TOOL_SCHEMAS = {
@@ -59,7 +60,7 @@ TOOL_SCHEMAS.update({
     "git_clone": _tool("git_clone", "Clone a public HTTPS Git repository into the workspace.",
                        {"url": {"type": "string"}, "directory": {"type": "string"}},
                        ["url", "directory"]),
-    "download_file": _tool("download_file", "Download a public HTTP(S) file into the workspace (up to 5 MB).",
+    "download_file": _tool("download_file", "Download a public HTTP(S) file into the workspace, within the configured size limit.",
                            {"url": {"type": "string"}, "path": {"type": "string"}},
                            ["url", "path"]),
 })
@@ -96,7 +97,8 @@ def _public_url(value: str, https_only: bool = False) -> str:
     return value
 
 
-def _run_command(command: list[str], timeout: int = 45) -> str:
+def _run_command(command: list[str],
+                 timeout: float = RUNTIME["timeouts"]["tool_command_seconds"]) -> str:
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
         try:
             options = {"cwd": WORKSPACE_ROOT, "env": safe_tool_env(),
@@ -114,9 +116,12 @@ def _run_command(command: list[str], timeout: int = 45) -> str:
     return f"exit_code={completed.returncode}\n{snippet}"
 
 
-def _file_action(action: str, arguments: dict) -> str:
+def _file_action(action: str, arguments: dict, timeout_seconds: float | None = None) -> str:
     options = {"input": json.dumps(arguments, ensure_ascii=False), "text": True,
-               "capture_output": True, "timeout": 30, "check": False,
+               "capture_output": True,
+               "timeout": min(RUNTIME["timeouts"]["file_action_seconds"], timeout_seconds)
+               if timeout_seconds is not None else RUNTIME["timeouts"]["file_action_seconds"],
+               "check": False,
                "env": safe_tool_env() | {"TOOL_WORKSPACE_ROOT": str(WORKSPACE_ROOT)}}
     if os.geteuid() == 0:
         options.update(user=10001, group=10001)
@@ -141,7 +146,8 @@ def _evaluate(node):
     return value
 
 
-def execute_tool(name: str, arguments: dict, allowed: list[str]) -> str:
+def execute_tool(name: str, arguments: dict, allowed: list[str],
+                 *, timeout_seconds: float | None = None) -> str:
     if name not in allowed or name not in TOOL_SCHEMAS:
         raise ValueError(f"tool is not allowed: {name}")
     if not isinstance(arguments, dict):
@@ -150,18 +156,20 @@ def execute_tool(name: str, arguments: dict, allowed: list[str]) -> str:
         if set(arguments) != {"command"} or not isinstance(arguments["command"], str) \
                 or len(arguments["command"]) > 4000:
             raise ValueError("bash requires a command up to 4000 characters")
-        return _run_command(["bash", "--noprofile", "--norc", "-c", arguments["command"]])
+        timeout = RUNTIME["timeouts"]["tool_command_seconds"]
+        return _run_command(["bash", "--noprofile", "--norc", "-c", arguments["command"]],
+                            timeout=min(timeout, timeout_seconds) if timeout_seconds is not None else timeout)
     if name == "read_file":
         if set(arguments) != {"path"}:
             raise ValueError("read_file requires path")
         workspace_path(arguments["path"])
-        return _file_action("read", arguments)
+        return _file_action("read", arguments, timeout_seconds)
     if name == "write_file":
         if set(arguments) != {"path", "content"} or not isinstance(arguments["content"], str) \
-                or len(arguments["content"].encode("utf-8")) > 100_000:
-            raise ValueError("write_file requires path and content up to 100 KB")
+                or len(arguments["content"].encode("utf-8")) > RUNTIME["limits"]["write_file_bytes"]:
+            raise ValueError(f"write_file requires path and content up to {RUNTIME['limits']['write_file_bytes']} bytes")
         workspace_path(arguments["path"])
-        return _file_action("write", arguments)
+        return _file_action("write", arguments, timeout_seconds)
     if name == "git_clone":
         if set(arguments) != {"url", "directory"}:
             raise ValueError("git_clone requires url and directory")
@@ -172,7 +180,9 @@ def execute_tool(name: str, arguments: dict, allowed: list[str]) -> str:
         destination = workspace_path(directory)
         if destination.exists():
             raise ValueError("clone destination already exists")
-        result = _run_command(["git", "clone", "--depth", "1", "--", url, str(destination)], timeout=60)
+        result = _run_command(["git", "clone", "--depth", "1", "--", url, str(destination)],
+                              timeout=min(RUNTIME["timeouts"]["git_clone_seconds"], timeout_seconds)
+                              if timeout_seconds is not None else RUNTIME["timeouts"]["git_clone_seconds"])
         if not result.startswith("exit_code=0\n"):
             raise RuntimeError(result)
         return f"cloned to {destination}\n{result}"
@@ -181,7 +191,7 @@ def execute_tool(name: str, arguments: dict, allowed: list[str]) -> str:
             raise ValueError("download_file requires url and path")
         url = _public_url(arguments["url"])
         workspace_path(arguments["path"])
-        return _file_action("download", {"url": url, "path": arguments["path"]})
+        return _file_action("download", {"url": url, "path": arguments["path"]}, timeout_seconds)
     if name == "utc_time":
         if arguments:
             raise ValueError("utc_time takes no arguments")

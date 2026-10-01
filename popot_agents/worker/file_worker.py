@@ -6,6 +6,7 @@ import sys
 import tempfile
 from urllib import request
 
+from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import MAX_TOOL_OUTPUT, WORKSPACE_ROOT, _public_url, workspace_path
 
 
@@ -36,11 +37,11 @@ def main() -> None:
         sys.stdout.write(f"wrote {path.relative_to(WORKSPACE_ROOT.resolve())}")
     elif action == "download":
         url = _public_url(arguments["url"])
-        with request.urlopen(url, timeout=20) as response:
+        with request.urlopen(url, timeout=RUNTIME["timeouts"]["file_download_seconds"]) as response:
             _public_url(response.geturl())
-            content = response.read(5_000_001)
-        if len(content) > 5_000_000:
-            raise ValueError("download exceeds 5 MB")
+            content = response.read(RUNTIME["limits"]["download_bytes"] + 1)
+        if len(content) > RUNTIME["limits"]["download_bytes"]:
+            raise ValueError(f"download exceeds {RUNTIME['limits']['download_bytes']} bytes")
         _atomic_write(path, content)
         sys.stdout.write(f"downloaded {len(content)} bytes to {path.relative_to(WORKSPACE_ROOT.resolve())}")
     else:

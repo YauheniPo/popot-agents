@@ -1,0 +1,53 @@
+{
+  "sessions": {
+    "default_idle_seconds": 300,
+    "retention_days": 7,
+    "prune_interval_seconds": 60
+  },
+  "worker": {
+    "default_timeout_seconds": 60,
+    "max_concurrent_tasks": 4,
+    "memory": "1g",
+    "cpus": 1,
+    "pids_limit": 64,
+    "tmpfs_mb": 16,
+    "workspace_tmpfs_mb": 256,
+    "startup_probe_attempts": 20,
+    "startup_probe_interval_seconds": 0.1
+  },
+  "timeouts": {
+    "model_request_seconds": 45,
+    "mcp_discovery_seconds": 20,
+    "mcp_tool_seconds": 30,
+    "mcp_upstream_seconds": 360,
+    "tool_command_seconds": 45,
+    "git_clone_seconds": 60,
+    "file_action_seconds": 30,
+    "file_download_seconds": 20,
+    "docker_start_seconds": 15,
+    "docker_probe_seconds": 3,
+    "docker_restore_seconds": 10,
+    "docker_inspect_seconds": 5,
+    "docker_remove_seconds": 5,
+    "postgres_connect_seconds": 5
+  },
+  "limits": {
+    "request_bytes": 65536,
+    "message_chars": 10000,
+    "history_bytes": 100000,
+    "socket_message_bytes": 131072,
+    "tool_output_chars": 12000,
+    "write_file_bytes": 100000,
+    "download_bytes": 5000000
+  },
+  "logging": {
+    "mcp_body_max_bytes": 65536,
+    "worker_log_tail_lines": 200,
+    "worker_log_max_bytes": 1048576
+  },
+  "model": {
+    "default_max_tool_rounds": 5,
+    "temperature": null,
+    "max_tokens": null
+  }
+}

@@ -7,8 +7,9 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from popot_agents.runtime_config import RUNTIME
 
-SESSION_RETENTION = timedelta(days=7)
+SESSION_RETENTION = timedelta(days=RUNTIME["sessions"]["retention_days"])
 
 
 class SessionStore:
@@ -31,7 +32,9 @@ class SessionStore:
         return None if self._expired(saved) else saved
 
     @staticmethod
-    def expires_at(saved: dict) -> datetime:
+    def expires_at(saved: dict) -> datetime | None:
+        if (saved.get("roleConfig") or {}).get("ttl_seconds") == 0:
+            return None
         # Older session files have only updatedAt; use it when creation is unknown.
         created = datetime.fromisoformat(saved.get("createdAt", saved["updatedAt"]))
         if created.tzinfo is None:
@@ -40,7 +43,8 @@ class SessionStore:
 
     @classmethod
     def _expired(cls, saved: dict) -> bool:
-        return datetime.now(timezone.utc) >= cls.expires_at(saved)
+        expiry = cls.expires_at(saved)
+        return expiry is not None and datetime.now(timezone.utc) >= expiry
 
     def prune_expired(self) -> set[str]:
         if not self.directory.exists():

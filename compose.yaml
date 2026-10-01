@@ -28,8 +28,10 @@ services:
             - docker/worker.Dockerfile
             - .dockerignore
             - popot_agents/__init__.py
+            - popot_agents/runtime_config.py
             - popot_agents/tools.py
             - popot_agents/worker/**
+            - config/runtime.json
 
   orchestrator:
     image: popot-orchestrator:local
@@ -53,12 +55,19 @@ services:
       PGPASSWORD: ${POPOT_DB_PASSWORD:?Set POPOT_DB_PASSWORD in .env}
       AGENT_WORKSPACE_DIR: /data/workspaces
       AGENT_WORKSPACE_HOST_DIR: ${HOME:?HOME is required}/.popot-agents/workspaces
+      AGENT_WORKER_LOG_DIR: /data/worker-logs
     ports:
       - "127.0.0.1:${API_PUBLISH_PORT:-8000}:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.sessions:/data/legacy-sessions:ro
       - ${HOME:?HOME is required}/.popot-agents/workspaces:/data/workspaces
+      - ${HOME:?HOME is required}/.popot-agents/worker-logs:/data/worker-logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
     develop:
       watch:
@@ -68,6 +77,34 @@ services:
             - docker/orchestrator.Dockerfile
             - .dockerignore
             - popot_agents/__init__.py
+            - popot_agents/runtime_config.py
             - popot_agents/tools.py
             - popot_agents/orchestrator/**
             - config/**
+
+  mcp-server:
+    image: popot-mcp:local
+    build:
+      context: .
+      dockerfile: docker/mcp.Dockerfile
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8001
+      MCP_ORCHESTRATOR_URL: http://orchestrator:8000
+    ports:
+      - "127.0.0.1:${MCP_PUBLISH_PORT:-8001}:8001"
+    restart: unless-stopped
+    develop:
+      watch:
+        - action: rebuild
+          path: .
+          include:
+            - docker/mcp.Dockerfile
+            - .dockerignore
+            - popot_agents/__init__.py
+            - popot_agents/runtime_config.py
+            - popot_agents/mcp_server.py
+            - config/runtime.json

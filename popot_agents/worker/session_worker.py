@@ -5,13 +5,20 @@ import os
 import socket
 import socketserver
 import sys
+import time
 
 from .agent_worker import run_harness
 from .http_harness import run_http
+from popot_agents.runtime_config import RUNTIME
 
 
 SOCKET_PATH = os.getenv("HARNESS_SOCKET_PATH", "/workspace/chat.sock")
-MAX_HISTORY_BYTES = 100_000
+MAX_HISTORY_BYTES = RUNTIME["limits"]["history_bytes"]
+
+
+def _trace(event: str, **fields) -> None:
+    print(json.dumps({"event": event, **fields}, ensure_ascii=False),
+          file=sys.stderr, flush=True)
 
 
 class Conversation:
@@ -20,18 +27,29 @@ class Conversation:
         self.messages = []
 
     def ask(self, message: str) -> str:
-        if not isinstance(message, str) or not message.strip() or len(message) > 10_000:
-            raise ValueError("message must be a nonempty string up to 10000 characters")
+        if not isinstance(message, str) or not message.strip() \
+                or len(message) > RUNTIME["limits"]["message_chars"]:
+            raise ValueError(f"message must be a nonempty string up to {RUNTIME['limits']['message_chars']} characters")
         candidate = self.messages + [{"role": "user", "content": message.strip()}]
         if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > MAX_HISTORY_BYTES:
             raise ValueError("chat history is full; start a new chat")
-        answer = self.answer(candidate)
-        if not isinstance(answer, str) or not answer.strip():
-            raise RuntimeError("harness returned an empty answer")
-        completed = candidate + [{"role": "assistant", "content": answer}]
-        if len(json.dumps(completed, ensure_ascii=False).encode("utf-8")) > MAX_HISTORY_BYTES:
-            raise ValueError("chat history is full; start a new chat")
-        self.messages = completed
+        turn = len(self.messages) // 2 + 1
+        started_at = time.monotonic()
+        _trace("turn_started", turn=turn)
+        try:
+            answer = self.answer(candidate)
+            if not isinstance(answer, str) or not answer.strip():
+                raise RuntimeError("harness returned an empty answer")
+            completed = candidate + [{"role": "assistant", "content": answer}]
+            if len(json.dumps(completed, ensure_ascii=False).encode("utf-8")) > MAX_HISTORY_BYTES:
+                raise ValueError("chat history is full; start a new chat")
+            self.messages = completed
+        except Exception as exc:
+            _trace("turn_failed", turn=turn, error_type=type(exc).__name__,
+                   elapsed_seconds=round(time.monotonic() - started_at, 1))
+            raise
+        _trace("turn_completed", turn=turn, answer_chars=len(answer),
+               elapsed_seconds=round(time.monotonic() - started_at, 1))
         return answer
 
     def restore(self, messages: list[dict[str, str]]) -> None:
@@ -70,7 +88,7 @@ def serve() -> None:
     class Handler(socketserver.StreamRequestHandler):
         def handle(self) -> None:
             try:
-                payload = json.loads(self.rfile.readline(128 * 1024))
+                payload = json.loads(self.rfile.readline(RUNTIME["limits"]["socket_message_bytes"]))
                 if not isinstance(payload, dict):
                     raise ValueError("JSON object is required")
                 if payload.get("action") == "ping":
@@ -79,14 +97,17 @@ def serve() -> None:
                     result = {"answer": conversation.ask(payload.get("message"))}
                 elif payload.get("action") == "restore":
                     conversation.restore(payload.get("messages"))
+                    _trace("session_restored", turns=len(conversation.messages) // 2)
                     result = {"status": "ok"}
                 else:
                     result = {"error": "unknown action"}
             except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+                _trace("worker_error", error_type=type(exc).__name__)
                 result = {"error": str(exc)}
             self.wfile.write((json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"))
 
     with socketserver.UnixStreamServer(SOCKET_PATH, Handler) as server:
+        _trace("worker_ready", session_mode=os.getenv("HARNESS_SESSION_MODE", "cli"))
         server.serve_forever()
 
 

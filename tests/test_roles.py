@@ -83,7 +83,11 @@ class RoleApiTests(unittest.TestCase):
         status, result = self.request("POST", "/tasks", {"role": "analyst", "task": "2+3"})
         self.assertEqual(status, 200)
         self.assertEqual(result["role"], "analyst")
-        self.assertEqual(self.runner.tasks, [("2+3", self.roles["analyst"])])
+        self.assertEqual(result["agent"], "nous")
+        self.assertEqual(result["answer"], "2+3")
+        self.assertEqual(result["sessionId"], self.runner.chats[0][0])
+        self.assertEqual(self.runner.chats[0][1], self.roles["analyst"])
+        self.assertEqual(self.runner.tasks, [])
         self.assertEqual(self.request("POST", "/tasks", {"role": "missing", "task": "x"})[0], 404)
         self.assertEqual(self.request("POST", "/tasks", {"role": "analyst", "agent": "other", "task": "x"})[0], 409)
 
@@ -127,6 +131,19 @@ class RoleApiTests(unittest.TestCase):
 
 
 class FeatureTeamConfigTests(unittest.TestCase):
+    def test_role_ttl_accepts_zero_and_rejects_invalid_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "roles.json"
+            role = {"agent": "nous", "instructions": "x", "tools": [], "ttl_seconds": 0}
+            runner = FakeRunner()
+            path.write_text(json.dumps({"chat": role}))
+            self.assertEqual(load_roles(path, {"nous": runner})["chat"]["ttl_seconds"], 0)
+            for value in (-1, True, 1.5, "300"):
+                role["ttl_seconds"] = value
+                path.write_text(json.dumps({"chat": role}))
+                with self.assertRaisesRegex(ValueError, "ttl_seconds"):
+                    load_roles(path, {"nous": runner})
+
     def test_feature_team_roles_are_selectable_with_clear_responsibilities(self):
         config = Path(__file__).resolve().parents[1] / "config"
         roles = load_roles(config / "roles.json", load_agents(config / "agents.json"))
