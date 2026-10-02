@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: popot_agents_ax
       POSTGRES_USER: popot
-      POSTGRES_PASSWORD: ${POPOT_DB_PASSWORD:?Set POPOT_DB_PASSWORD in the root .env}
+      POSTGRES_PASSWORD: ${POPOT_DB_PASSWORD:-}
     ports:
       - "127.0.0.1:15432:5432"
     volumes:
@@ -38,7 +38,7 @@ services:
       AX_LOCAL_KUBECONFIG: /run/ax-local/kubeconfig
       KUBECONFIG: /run/ax-local/kubeconfig
       AX_LOCAL_WORKER_IMAGE_FILE: /run/ax-local/worker-image
-      POPOT_DB_PASSWORD: ${POPOT_DB_PASSWORD:?Set POPOT_DB_PASSWORD in the root .env}
+      POPOT_DB_PASSWORD: ${POPOT_DB_PASSWORD:-}
     volumes:
       - type: bind
         source: ./.local/kubeconfig-container
