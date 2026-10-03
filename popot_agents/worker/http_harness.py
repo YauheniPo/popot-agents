@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from urllib import error, request
 from urllib.parse import urlsplit
 
@@ -35,7 +36,8 @@ def _trace_arguments(name: str, arguments: dict) -> dict:
     return {"argument_keys": sorted(arguments)}
 
 
-def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) -> str:
+def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
+             *, extra_tools: dict | None = None) -> str:
     base_url = os.environ.get("HARNESS_BASE_URL", "").rstrip("/")
     model = os.environ.get("HARNESS_MODEL", "")
     if not base_url.startswith(("http://", "https://")) or not model:
@@ -61,6 +63,9 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
                  if mcp_servers else {})
     schemas = [TOOL_SCHEMAS[name] for name in allowed]
     schemas.extend(item["schema"] for item in mcp_tools.values())
+    extra_tools = extra_tools or {}
+    turn_id = uuid.uuid4().hex
+    schemas.extend(item["schema"] for item in extra_tools.values())
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
     headers = {"Content-Type": "application/json"}
@@ -128,7 +133,11 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None) 
                            call_id=tool_call["id"],
                            arguments=_trace_arguments(name, arguments))
                     tool_started_at = time.monotonic()
-                    if name in mcp_tools:
+                    if name in extra_tools:
+                        output = extra_tools[name]["call"](
+                            arguments, timeout_seconds=remaining_seconds(),
+                            call_id=turn_id + ":" + tool_call["id"])
+                    elif name in mcp_tools:
                         selected = mcp_tools[name]
                         output = mcp_client.call_tool(
                             mcp_servers[selected["server"]], selected["native_name"], arguments,

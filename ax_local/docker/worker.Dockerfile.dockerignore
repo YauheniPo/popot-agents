@@ -3,6 +3,7 @@
 !popot_agents/__init__.py
 !popot_agents/tools.py
 !popot_agents/runtime_config.py
+!popot_agents/role_env.py
 !popot_agents/worker/
 !popot_agents/worker/**
 !config/

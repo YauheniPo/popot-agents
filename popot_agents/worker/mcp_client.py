@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import MAX_TOOL_OUTPUT, safe_tool_env
@@ -14,7 +15,8 @@ def _parameters(config: dict):
 
     command = config["command"]
     return StdioServerParameters(command=sys.executable,
-                                 args=["-m", "popot_agents.worker.tool_launcher", *command],
+                                 args=["-I", str(Path(__file__).with_name("tool_launcher.py")),
+                                       *command],
                                  env=safe_tool_env())
 
 

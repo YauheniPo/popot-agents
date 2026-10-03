@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
+from popot_agents.role_env import selected_role_env
+from popot_agents.runtime_config import RUNTIME
 from popot_agents.runtime_config import RUNTIME
 from ..config import AX_CONFIG
 from ..worker.remote_client import RESPONSE_PREFIX
@@ -35,6 +39,7 @@ class AxAgentRunner:
         self.base_url = base_url.rstrip("/")
         self.context = context
         self.proxy_token = proxy_token
+        self.delegation = None
 
     def _run(self, *args: str, input: str | None = None,
              timeout: int = AX_CONFIG["ax"]["cli_timeout_seconds"],
@@ -75,10 +80,25 @@ class AxAgentRunner:
             "HOME": "/workspace",
             "XDG_CACHE_HOME": "/workspace/.cache",
             "XDG_CONFIG_HOME": "/workspace/.config",
+            "HARNESS_TURN_TIMEOUT_SECONDS": str(role_config.get(
+                "timeout_seconds", RUNTIME["worker"]["default_timeout_seconds"])),
         }
+        if role_config.get("mcpServers") or set(role_config.get("tools", [])) & {
+                "bash", "git_clone", "read_file", "write_file", "download_file"}:
+            env["POPOT_TOOLS_UID"] = "10001"
+        if self.delegation:
+            env.update(self.delegation.worker_environment(chat_id, role_config))
+            env["AX_DELEGATION_POLL_SECONDS"] = str(self.delegation.policy["poll_interval_seconds"])
         if self.proxy_token:
             env["HARNESS_API_KEY_ENV"] = "AX_PROXY_TOKEN"
             env["AX_PROXY_TOKEN"] = self.proxy_token
+        try:
+            names = [name for name in role_config.get("env_names", [])
+                     if name in RUNTIME["role_env_names"]]
+            env.update(selected_role_env(names))
+            env["HARNESS_TOOL_ENV_NAMES_JSON"] = json.dumps(names)
+        except ValueError as exc:
+            raise AgentConfigurationError(str(exc)) from exc
         return {
             "apiVersion": "ax.io/v1alpha1", "kind": "Task",
             "metadata": {"name": f"popot-chat-{chat_id}",
@@ -119,9 +139,9 @@ class AxAgentRunner:
                     return answer
         raise AgentRunError("AX worker returned no response")
 
-    def task_status(self, task_name: str) -> tuple[str | None, str | None]:
+    def task_status(self, task_name: str, timeout: float = 15) -> tuple[str | None, str | None]:
         """Read only AX status fields; never expose Task environment values."""
-        result = self._run("describe", "task", task_name, timeout=15, allow_failure=True)
+        result = self._run("describe", "task", task_name, timeout=timeout, allow_failure=True)
         if result.returncode:
             return None, None
         phase = None
@@ -141,30 +161,54 @@ class AxAgentRunner:
                     reason = fields[2]
         return phase, reason
 
-    def start_chat(self, chat_id: str, role_config: dict | None = None) -> AxChat:
+    def start_chat(self, chat_id: str, role_config: dict | None = None,
+                   *, deadline: float | None = None, cancel_event=None) -> AxChat:
+        if self.delegation:
+            role_config = self.delegation.prepare_config(chat_id, role_config)
         task_name = f"popot-chat-{chat_id}"
-        existing = self._run("get", "task", task_name, allow_failure=True)
+        def remaining(limit):
+            if cancel_event is not None and cancel_event.is_set():
+                raise TimeoutError("AX startup canceled")
+            if deadline is None:
+                return limit
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                raise TimeoutError("AX startup deadline exceeded")
+            return min(limit, budget)
+
+        existing = self._run("get", "task", task_name, allow_failure=True,
+                             timeout=remaining(AX_CONFIG["ax"]["cli_timeout_seconds"]))
         if existing.returncode and "NotFound" not in existing.stderr:
             raise AgentRunError("AX task lookup failed")
         if not existing.returncode:
             # A previous API process may have left a task with an expired proxy token.
-            self._run("delete", "task", task_name, timeout=60)
-        self._run("apply", "-f", "-",
-                  input=json.dumps(self.workspace_manifest()))
-        self._run("apply", "-f", "-",
-                  input=json.dumps(self.task_manifest(chat_id, role_config)))
+            self._run("delete", "task", task_name, timeout=remaining(60))
         chat = AxChat(self, task_name,
                       (role_config or {}).get("timeout_seconds",
                                               RUNTIME["worker"]["default_timeout_seconds"]))
+        try:
+            self._run("apply", "-f", "-", input=json.dumps(self.workspace_manifest()),
+                      timeout=remaining(AX_CONFIG["ax"]["cli_timeout_seconds"]))
+            self._run("apply", "-f", "-", input=json.dumps(self.task_manifest(chat_id, role_config)),
+                      timeout=remaining(AX_CONFIG["ax"]["cli_timeout_seconds"]))
+            return self._wait_for_chat(chat, remaining, deadline)
+        except Exception:
+            chat.close()
+            raise
+
+    def _wait_for_chat(self, chat: AxChat, remaining, outer_deadline: float | None) -> AxChat:
         deadline = time.monotonic() + AX_CONFIG["ax"]["startup_timeout_seconds"]
+        if outer_deadline is not None:
+            deadline = min(deadline, outer_deadline)
+        task_name = chat.container_name
         last_phase = None
         last_reason = None
         last_report = None
         while True:
-            if chat.is_alive():
+            if chat.is_alive(timeout_seconds=remaining(15)):
                 return chat
             try:
-                phase, reason = self.task_status(task_name)
+                phase, reason = self.task_status(task_name, timeout=remaining(15))
             except (AgentRunError, subprocess.TimeoutExpired, OSError):
                 phase, reason = None, None
             report = (phase, reason, chat.probe_issue)
@@ -183,7 +227,7 @@ class AxAgentRunner:
                 raise AgentRunError(detail)
             if time.monotonic() >= deadline:
                 break
-            time.sleep(AX_CONFIG["ax"]["startup_probe_interval_seconds"])
+            time.sleep(remaining(AX_CONFIG["ax"]["startup_probe_interval_seconds"]))
         chat.close()
         detail = "AX chat worker did not become ready"
         if last_phase:
@@ -197,6 +241,11 @@ class AxAgentRunner:
             detail += f" (probe: {chat.probe_issue})"
         raise AgentRunError(detail)
 
+    def close_session(self, session_id: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{16}", session_id):
+            raise ValueError("invalid AX session ID")
+        AxChat(self, f"popot-chat-{session_id}", 1).close()
+
 
 @dataclass
 class AxChat:
@@ -206,13 +255,14 @@ class AxChat:
     workspace_path: None = None
     closed: bool = False
     probe_issue: str | None = None
+    _close_lock: object = field(default_factory=threading.Lock, repr=False)
 
-    def is_alive(self) -> bool:
+    def is_alive(self, timeout_seconds: float = 15) -> bool:
         if self.closed:
             return False
         try:
             ready = self.runner.remote(self.container_name, {"action": "ping"},
-                                       timeout=15).get("status") == "ok"
+                                       timeout=timeout_seconds).get("status") == "ok"
             self.probe_issue = None if ready else "worker ping did not succeed"
             return ready
         except AgentRunError as exc:
@@ -242,10 +292,15 @@ class AxChat:
         if result.get("status") != "ok":
             raise AgentRunError(result.get("error", "AX chat worker could not restore history"))
 
-    def send(self, message: str) -> dict[str, str]:
-        result = self.runner.remote(self.container_name,
-                                    {"action": "message", "message": message},
-                                    timeout=self.timeout_seconds)
+    def send(self, message: str, *, timeout_seconds: float | None = None) -> dict[str, str]:
+        timeout = self.timeout_seconds if timeout_seconds is None else min(
+            self.timeout_seconds, timeout_seconds)
+        service = self.runner.delegation
+        with (service.turn(self.container_name.removeprefix("popot-chat-"), timeout)
+              if service else nullcontext()):
+            result = self.runner.remote(self.container_name,
+                                        {"action": "message", "message": message},
+                                        timeout=timeout + 10)
         if isinstance(result.get("error"), str):
             raise AgentRunError(result["error"])
         if not isinstance(result.get("answer"), str):
@@ -253,11 +308,15 @@ class AxChat:
         return {"answer": result["answer"]}
 
     def close(self) -> None:
-        if not self.closed:
+        with self._close_lock:
+            if self.closed:
+                return
             self.closed = True
+            if self.runner.delegation:
+                self.runner.delegation.revoke(self.container_name.removeprefix("popot-chat-"))
             try:
                 self.runner._run("delete", "task", self.container_name,
-                                 timeout=30,
+                                 timeout=5,
                                  allow_failure=True)
             except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError):
                 pass

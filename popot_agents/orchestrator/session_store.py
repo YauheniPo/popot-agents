@@ -47,6 +47,13 @@ class SessionStore:
         return expiry is not None and datetime.now(timezone.utc) >= expiry
 
     def prune_expired(self) -> set[str]:
+        expired = set()
+        for session_id in self.expired_ids():
+            if self.delete_expired(session_id):
+                expired.add(session_id)
+        return expired
+
+    def expired_ids(self) -> set[str]:
         if not self.directory.exists():
             return set()
         expired = set()
@@ -56,9 +63,21 @@ class SessionStore:
             except (OSError, json.JSONDecodeError):
                 continue
             if self._expired(saved):
-                path.unlink(missing_ok=True)
                 expired.add(path.stem)
         return expired
+
+    def delete_expired(self, session_id: str) -> bool:
+        path = self._path(session_id)
+        if path is None or not path.exists():
+            return False
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not self._expired(saved):
+            return False
+        path.unlink(missing_ok=True)
+        return True
 
     def list_chats(self) -> list[dict]:
         if not self.directory.exists():

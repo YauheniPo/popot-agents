@@ -20,6 +20,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(settings["timeouts"]["model_request_seconds"], 45)
         self.assertEqual(settings["limits"]["request_bytes"], 65536)
         self.assertEqual(settings["logging"]["mcp_body_max_bytes"], 65536)
+        self.assertEqual(settings["role_env_names"], ["GITHUB_PERSONAL_ACCESS_TOKEN"])
 
     def test_custom_config_is_loaded_and_bad_values_are_rejected(self):
         from popot_agents.runtime_config import load_runtime_config
@@ -52,6 +53,24 @@ class RuntimeConfigTests(unittest.TestCase):
             path.write_text(json.dumps(loaded))
             with self.assertRaisesRegex(ValueError, "default_idle_seconds"):
                 load_runtime_config(path)
+
+    def test_role_env_names_are_validated_in_runtime_config(self):
+        from popot_agents.runtime_config import load_runtime_config
+
+        settings = load_runtime_config()
+        settings["role_env_names"] = ["GITHUB_TOKEN", "SERVICE_API_KEY"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime.json"
+            path.write_text(json.dumps(settings))
+            self.assertEqual(load_runtime_config(path)["role_env_names"],
+                             ["GITHUB_TOKEN", "SERVICE_API_KEY"])
+            for value in ("GITHUB_TOKEN", ["GITHUB_TOKEN", "GITHUB_TOKEN"],
+                          ["bad-name"], ["HARNESS_MODEL"], ["AX_PROXY_TOKEN"], ["PATH"]):
+                with self.subTest(value=value):
+                    settings["role_env_names"] = value
+                    path.write_text(json.dumps(settings))
+                    with self.assertRaisesRegex(ValueError, "role_env_names"):
+                        load_runtime_config(path)
 
     def test_services_use_the_same_custom_runtime_file(self):
         from popot_agents.runtime_config import load_runtime_config

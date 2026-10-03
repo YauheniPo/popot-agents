@@ -7,12 +7,15 @@ import os
 import secrets
 import signal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from popot_agents.orchestrator.main import create_server, load_dotenv, load_roles
 from popot_agents.runtime_config import RUNTIME
 from ..config import AX_CONFIG
 from .provider_proxy import network_address_toward, resolve_provider, start_proxy
 from .ax_runner import AxAgentRunner
+from .cron import CronScheduler
+from .delegation import DelegationService, start_a2a_server
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,8 +53,18 @@ def make_server():
     roles = load_roles(ROOT / "config" / "roles.json",
                        {name: runner for name in profiles})
     # Keep role instructions and tools while routing all roles to the selected provider.
-    for config in roles.values():
+    policy = AX_CONFIG["delegation"]
+    for name, config in roles.items():
         config["agent"] = provider
+        config["_ax_role"] = name
+        if policy["enabled"] and config.get("allowed_roles"):
+            config["timeout_seconds"] = max(config.get("timeout_seconds", 60),
+                                            policy["turn_timeout_seconds"])
+            config["instructions"] += (
+                " You can use delegate_task to start a specialist agent. Available roles: "
+                + ", ".join(config["allowed_roles"])
+                + ". Pass the task and relevant context explicitly, then use the returned result. "
+                  "Do not claim delegation happened without a delegate_task tool result.")
     backend = os.getenv("AX_LOCAL_SESSION_BACKEND", AX_CONFIG["ax"]["session_backend"])
     if backend == "postgres":
         from popot_agents.orchestrator.postgres_session_store import PostgresSessionStore
@@ -60,7 +73,7 @@ def make_server():
         store = None
     else:
         raise ValueError("AX_LOCAL_SESSION_BACKEND must be postgres or file")
-    return create_server(
+    server = create_server(
         {provider: runner},
         host=os.getenv("AX_LOCAL_BIND_HOST", "127.0.0.1"),
         port=int(os.getenv("AX_LOCAL_API_PORT", "8002")),
@@ -68,6 +81,15 @@ def make_server():
         idle_seconds=RUNTIME["sessions"]["default_idle_seconds"],
         roles=roles, store=store,
     )
+    server.delegation = None
+    if policy["enabled"]:
+        host = urlsplit(os.environ["AX_LOCAL_BASE_URL"]).hostname
+        runner.delegation = DelegationService(
+            roles, policy, runner, server.store, f"http://{host}:{policy['port']}")
+        server.delegation = runner.delegation
+    server.cron = CronScheduler(roles, runner, server.store,
+                                max_concurrent_tasks=policy["max_concurrent_tasks"])
+    return server
 
 
 def main() -> None:
@@ -99,9 +121,21 @@ def main() -> None:
     os.environ["AX_LOCAL_BIND_HOST"] = network_address_toward("db", 5432)
     os.environ["AX_LOCAL_PROXY_TOKEN"] = secrets.token_urlsafe(32)
     proxy = start_proxy(selected, os.environ["AX_LOCAL_PROXY_TOKEN"], host=kind_ip)
+    a2a = None
     try:
         server = make_server()
+        if server.delegation:
+            server.delegation.recover_interrupted()
+            a2a = start_a2a_server(server.delegation, kind_ip, AX_CONFIG["delegation"]["port"])
+        server.cron.recover_interrupted()
+        server.cron.start()
     except Exception:
+        if "server" in locals():
+            if hasattr(server, "cron"):
+                server.cron.close()
+            if server.delegation:
+                server.delegation.close()
+            server.server_close()
         proxy.shutdown()
         proxy.server_close()
         raise
@@ -116,6 +150,12 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        server.cron.close()
+        if server.delegation:
+            server.delegation.close()
+        if a2a:
+            a2a.shutdown()
+            a2a.server_close()
         server.server_close()
         proxy.shutdown()
         proxy.server_close()

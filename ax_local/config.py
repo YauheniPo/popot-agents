@@ -15,8 +15,8 @@ def load_ax_config(path: str | Path | None = None) -> dict:
     with config_path.open(encoding="utf-8") as source:
         settings = json.load(source)
     if not isinstance(settings, dict) or set(settings) != {
-            "default_provider", "default_model", "ax", "proxy"}:
-        raise ValueError("AX config must define provider, model, ax and proxy settings")
+            "default_provider", "default_model", "ax", "proxy", "delegation"}:
+        raise ValueError("AX config must define provider, model, ax, proxy and delegation settings")
     if not all(isinstance(settings[key], str) and settings[key].strip()
                for key in ("default_provider", "default_model")):
         raise ValueError("AX default provider and model must be nonempty strings")
@@ -56,6 +56,22 @@ def load_ax_config(path: str | Path | None = None) -> dict:
     for key in ("max_request_bytes", "max_response_bytes"):
         if type(proxy[key]) is not int or proxy[key] <= 0:
             raise ValueError(f"AX config proxy.{key} must be positive")
+    delegation = settings["delegation"]
+    if not isinstance(delegation, dict) or set(delegation) != {
+            "enabled", "port", "max_depth", "max_calls_per_turn", "max_concurrent_tasks",
+            "turn_timeout_seconds", "poll_interval_seconds"}:
+        raise ValueError("AX config has invalid delegation settings")
+    if type(delegation["enabled"]) is not bool:
+        raise ValueError("AX config delegation.enabled must be boolean")
+    for key, maximum in {"port": 65535, "max_depth": 8, "max_calls_per_turn": 32,
+                         "max_concurrent_tasks": 16, "turn_timeout_seconds": 300}.items():
+        if type(delegation[key]) is not int or not 1 <= delegation[key] <= maximum:
+            raise ValueError(f"AX config delegation.{key} is out of range")
+    interval = delegation["poll_interval_seconds"]
+    if type(interval) not in {int, float} or not 0.05 <= interval <= 5:
+        raise ValueError("AX config delegation.poll_interval_seconds is out of range")
+    if delegation["port"] == proxy["port"]:
+        raise ValueError("AX delegation and proxy ports must differ")
     return settings
 
 

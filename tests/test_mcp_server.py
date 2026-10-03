@@ -2,12 +2,43 @@ import asyncio
 import io
 import json
 import os
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 from urllib.error import HTTPError
 from unittest.mock import patch
+
+
+class ImagePackagingTests(unittest.TestCase):
+    def test_mcp_image_contains_modules_needed_at_import(self):
+        project = Path(__file__).resolve().parents[1]
+        dockerfile = project / "docker" / "mcp.Dockerfile"
+        with tempfile.TemporaryDirectory() as directory:
+            image_root = Path(directory)
+            for line in dockerfile.read_text().splitlines():
+                parts = shlex.split(line)
+                if not parts or parts[0] != "COPY":
+                    continue
+                destination = parts[-1]
+                sources = parts[1:-1]
+                for source in sources:
+                    target = image_root / destination.lstrip("/")
+                    if destination.endswith("/") or len(sources) > 1:
+                        target /= Path(source).name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(project / source, target)
+            result = subprocess.run(
+                [sys.executable, "-S", "-c", "import popot_agents.mcp_server"],
+                cwd=image_root, env={**os.environ, "PYTHONPATH": str(image_root / "app")},
+                text=True, capture_output=True, check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class GatewayTests(unittest.TestCase):

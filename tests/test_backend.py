@@ -1,13 +1,18 @@
 import os
+import builtins
 import json
 import tempfile
+import subprocess
+import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from popot_agents import tools as harness_tools
 from popot_agents.tools import execute_tool
 from popot_agents.orchestrator.main import DockerAgentRunner, load_agents, load_roles
+from popot_agents.runtime_config import RUNTIME
 
 
 BACKEND_TOOLS = [
@@ -16,6 +21,101 @@ BACKEND_TOOLS = [
 
 
 class BackendRoleTests(unittest.TestCase):
+    def test_role_env_is_forwarded_to_tools_without_other_credentials(self):
+        with patch.dict(os.environ, {"HARNESS_TOOL_ENV_NAMES_JSON": '["GITHUB_TOKEN"]',
+                 "GITHUB_TOKEN": "selected-secret",
+                 "NOUS_API_KEY": "model-secret", "AX_DELEGATION_TOKEN": "runtime-secret"}):
+            forwarded = harness_tools.safe_tool_env()
+        self.assertEqual(forwarded["GITHUB_TOKEN"], "selected-secret")
+        self.assertNotIn("NOUS_API_KEY", forwarded)
+        self.assertNotIn("AX_DELEGATION_TOKEN", forwarded)
+        self.assertIn("HOME", forwarded)
+        with patch.dict(os.environ, {"HARNESS_TOOL_ENV_NAMES_JSON": "[]",
+                                     "GITHUB_TOKEN": "selected-secret"}):
+            self.assertNotIn("GITHUB_TOKEN", harness_tools.safe_tool_env())
+
+    @patch("popot_agents.orchestrator.main.subprocess.run")
+    def test_docker_role_adds_only_selected_env_names(self, run):
+        run.return_value = subprocess.CompletedProcess(["docker", "run"], 0, '{"answer":"ok"}', "")
+        runner = DockerAgentRunner(image="example:local", network="bridge",
+                                   env_names=["OPENROUTER_API_KEY"])
+        with patch.dict(RUNTIME, {"role_env_names": ["GITHUB_TOKEN"]}), \
+             patch.dict(os.environ, {"OPENROUTER_API_KEY": "model-secret",
+                                  "GITHUB_TOKEN": "selected-secret", "OTHER_TOKEN": "other-secret"}):
+            runner("task", {"agent": "openrouter", "instructions": "x", "tools": [],
+                            "env_names": ["GITHUB_TOKEN"]})
+        args = run.call_args.args[0]
+        self.assertIn("OPENROUTER_API_KEY", args)
+        self.assertIn("GITHUB_TOKEN", args)
+        self.assertNotIn("OTHER_TOKEN", args)
+        self.assertNotIn("selected-secret", args)
+        self.assertIn('HARNESS_TOOL_ENV_NAMES_JSON=["GITHUB_TOKEN"]', args)
+
+    def test_mcp_launcher_resolves_command_before_dropping_privileges(self):
+        launcher = Path(harness_tools.__file__).parent / "worker" / "tool_launcher.py"
+        source = compile(launcher.read_text(), str(launcher), "exec")
+        real_import = builtins.__import__
+        dropped = False
+
+        def drop_uid(uid):
+            nonlocal dropped
+            self.assertEqual(uid, 10001)
+            dropped = True
+
+        def guarded_import(name, *args, **kwargs):
+            if dropped:
+                raise ModuleNotFoundError(f"No module named '{name}' after UID drop")
+            return real_import(name, *args, **kwargs)
+
+        def exec_as_tool_user(path, arguments, environment):
+            self.assertTrue(dropped)
+            self.assertEqual(path, str(executable))
+            self.assertEqual(arguments, ["test-mcp", "--stdio"])
+            self.assertEqual(environment["PATH"], directory)
+
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "test-mcp"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": directory}), \
+                 patch.object(sys, "argv", [str(launcher), "test-mcp", "--stdio"]), \
+                 patch.object(os, "geteuid", return_value=0), \
+                 patch.object(os, "setgroups") as groups, \
+                 patch.object(os, "setgid") as gid, \
+                 patch.object(os, "setuid", side_effect=drop_uid), \
+                 patch.object(os, "execve", side_effect=exec_as_tool_user) as execute, \
+                 patch.object(builtins, "__import__", side_effect=guarded_import):
+                exec(source, {"__name__": "__main__"})
+            groups.assert_called_once_with([])
+            gid.assert_called_once_with(10001)
+            execute.assert_called_once()
+
+    def test_mcp_launcher_works_outside_package_directory(self):
+        from popot_agents.worker.mcp_client import _parameters
+        fake_sdk = SimpleNamespace(StdioServerParameters=lambda **kwargs: SimpleNamespace(**kwargs))
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)), \
+             patch.dict(sys.modules, {"mcp": fake_sdk}), \
+             patch.dict(os.environ, {"AX_DELEGATION_TOKEN": "private-test-value"}):
+            params = _parameters({"command": [sys.executable, "-c",
+                'import os; print(os.getenv("AX_DELEGATION_TOKEN", "unset"))']})
+            self.assertNotIn("PYTHONPATH", params.env)
+            completed = subprocess.run([params.command, *params.args], cwd=directory,
+                                       env=params.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "unset")
+
+    def test_file_helpers_work_from_ax_workspace_without_pythonpath(self):
+        real_run = subprocess.run
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)), \
+             patch("popot_agents.tools.subprocess.run",
+                   side_effect=lambda *args, **kwargs: real_run(*args, cwd=directory, **kwargs)):
+            self.assertEqual(execute_tool("write_file", {
+                "path": "code.txt", "content": "workspace data"}, BACKEND_TOOLS), "wrote code.txt")
+            self.assertEqual(execute_tool("read_file", {"path": "code.txt"}, BACKEND_TOOLS),
+                             "workspace data")
+
     def test_backend_role_has_explicit_permissions_and_mcp_tools(self):
         root = Path(__file__).resolve().parents[1] / "config"
         roles = load_roles(root / "roles.json", load_agents(root / "agents.json"))

@@ -25,7 +25,7 @@ RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETA
 RUN pip install --no-cache-dir 'psycopg[binary]==3.3.6'
 COPY --from=ax-cli /ax /usr/local/bin/ax
 WORKDIR /app
-COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py /app/popot_agents/
+COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/orchestrator /app/popot_agents/orchestrator
 COPY ax_local/__init__.py ax_local/config.py ax_local/config.json /app/ax_local/
 COPY ax_local/api /app/ax_local/api

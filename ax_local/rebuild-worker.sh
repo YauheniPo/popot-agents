@@ -15,6 +15,7 @@ if [[ ! -f "$IMAGE_FILE" ]]; then
   echo "AX local cluster is not bootstrapped; run ax_local/bootstrap.sh first" >&2
   exit 1
 fi
+bash "$ROOT/ax_local/cluster/controller_tools.sh"
 
 docker build --platform "linux/$(go env GOARCH)" \
   -f "$ROOT/ax_local/docker/worker.Dockerfile" -t "$IMAGE" "$ROOT"

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from popot_agents.tools import TOOL_SCHEMAS
+from popot_agents.role_env import selected_role_env, validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from .session_store import SessionStore
 
@@ -139,6 +140,12 @@ class DockerAgentRunner:
 
     def _docker_command(self, container_name: str, detached: bool,
                         role_config: dict | None = None) -> list[str]:
+        role_env_names = [name for name in (role_config or {}).get("env_names", [])
+                          if name in RUNTIME["role_env_names"]]
+        try:
+            selected_role_env(role_env_names)
+        except ValueError as exc:
+            raise AgentConfigurationError(str(exc)) from exc
         for name in self.env_names:
             if not os.getenv(name):
                 raise AgentConfigurationError(f"required environment variable is missing: {name}")
@@ -171,6 +178,9 @@ class DockerAgentRunner:
                             "/run:rw,uid=0,gid=0,mode=0700,size=1m"])
         for name in self.env_names:
             command.extend(["--env", name])
+        for name in role_env_names:
+            if name not in self.env_names:
+                command.extend(["--env", name])
         environment = dict(self.environment)
         if self.command is not None:
             environment["HARNESS_COMMAND_JSON"] = json.dumps(self.command)
@@ -188,6 +198,7 @@ class DockerAgentRunner:
             environment["HARNESS_SOCKET_PATH"] = "/run/chat.sock"
         if role_config is not None:
             environment["HARNESS_ROLE_JSON"] = json.dumps(role_config, ensure_ascii=False)
+            environment["HARNESS_TOOL_ENV_NAMES_JSON"] = json.dumps(role_env_names)
         for name, value in environment.items():
             command.extend(["--env", f"{name}={value}"])
         return command
@@ -422,7 +433,7 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
             raise ValueError(f"invalid role name: {name}")
         required = {"agent", "instructions", "tools"}
         optional = {"permissions", "mcpServers", "timeout_seconds", "max_tool_rounds",
-                    "ttl_seconds"}
+                    "ttl_seconds", "allowed_roles", "cron", "env_names"}
         if not isinstance(config, dict) or not required.issubset(config) \
                 or set(config) - required - optional:
             raise ValueError(f"role {name} must define agent, instructions and tools")
@@ -431,6 +442,35 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
             raise ValueError(f"role {name} uses an unknown agent")
         if not isinstance(config["instructions"], str) or len(config["instructions"]) > 4000:
             raise ValueError(f"role {name} has invalid instructions")
+        allowed_roles = config.get("allowed_roles", [])
+        if not isinstance(allowed_roles, list) or any(
+                not isinstance(target, str) or target not in roles or target == name
+                for target in allowed_roles):
+            raise ValueError(f"role {name} has invalid allowed_roles: use existing other roles")
+        if len(allowed_roles) != len(set(allowed_roles)):
+            raise ValueError(f"role {name} has duplicate allowed_roles")
+        if "env_names" in config:
+            try:
+                selected = validate_role_env_names(config["env_names"])
+            except ValueError as exc:
+                raise ValueError(f"role {name} has invalid env_names") from exc
+            if not set(selected).issubset(RUNTIME["role_env_names"]):
+                raise ValueError(f"role {name} env_names must be allowed by runtime config")
+        if "cron" in config:
+            from .cron import validate_cron
+            schedules = config["cron"]
+            if not isinstance(schedules, list) or not schedules:
+                raise ValueError(f"role {name} has invalid cron schedules")
+            for schedule in schedules:
+                if not isinstance(schedule, dict) or set(schedule) != {"schedule", "task"} \
+                        or not isinstance(schedule["task"], str) \
+                        or not schedule["task"].strip() \
+                        or len(schedule["task"]) > RUNTIME["limits"]["message_chars"]:
+                    raise ValueError(f"role {name} has invalid cron task")
+                try:
+                    validate_cron(schedule["schedule"])
+                except ValueError as exc:
+                    raise ValueError(f"role {name} has invalid cron expression") from exc
         tools = config["tools"]
         if not isinstance(tools, list) or any(not isinstance(tool, str) for tool in tools):
             raise ValueError(f"role {name} has invalid tools")
@@ -520,6 +560,12 @@ class ChatRecord:
     last_used: float = field(default_factory=time.monotonic)
 
 
+def session_has_active_owner(server, session_id: str) -> bool:
+    return any(owner is not None and owner.is_active(session_id)
+               for owner in (getattr(server, "delegation", None),
+                             getattr(server, "cron", None)))
+
+
 class ChatServer(ThreadingHTTPServer):
     daemon_threads = False
 
@@ -543,7 +589,7 @@ class ChatServer(ThreadingHTTPServer):
         if now - self.last_prune >= RUNTIME["sessions"]["prune_interval_seconds"]:
             self.last_prune = now
             try:
-                expired = self.store.prune_expired()
+                expired = self.store.expired_ids()
             except OSError:
                 expired = set()
             self.pending_expired.update(expired)
@@ -552,7 +598,15 @@ class ChatServer(ThreadingHTTPServer):
             if not lock.acquire(blocking=False):
                 continue
             try:
+                if session_has_active_owner(self, session_id):
+                    continue
+                try:
+                    deleted = self.store.delete_expired(session_id)
+                except OSError:
+                    continue
                 self.pending_expired.discard(session_id)
+                if not deleted:
+                    continue
                 with self.live_lock:
                     record = self.live.pop(session_id, None)
                 if record is not None:
@@ -753,13 +807,17 @@ def create_server(
 
         def _message(self, payload: dict) -> None:
             session_id = payload.get("sessionId")
-            if isinstance(session_id, str):
+            if session_id is None:
+                new_session_id = uuid.uuid4().hex[:16]
+                with self.server.session_lock(new_session_id):
+                    self._message_locked(payload, new_session_id)
+            elif isinstance(session_id, str):
                 with self.server.session_lock(session_id):
                     self._message_locked(payload)
             else:
                 self._message_locked(payload)
 
-        def _message_locked(self, payload: dict) -> None:
+        def _message_locked(self, payload: dict, new_session_id: str | None = None) -> None:
             message = payload.get("message")
             if not isinstance(message, str) or not message.strip() or len(message) > MAX_TASK_LENGTH:
                 self._reply(400, {"error": f"message must be a nonempty string up to {MAX_TASK_LENGTH} characters"})
@@ -781,7 +839,7 @@ def create_server(
                 if not isinstance(agent, str) or agent not in agents:
                     self._reply(404, {"error": "unknown agent"})
                     return
-                session_id = uuid.uuid4().hex[:16]
+                session_id = new_session_id
                 worker = (agents[agent].start_chat(session_id, role_config) if role_config
                           else agents[agent].start_chat(session_id))
                 record = ChatRecord(agent, worker, [], role, role_config)
@@ -910,6 +968,9 @@ def create_server(
         def _delete_chat(self, session_id: str) -> None:
             if self.server.store.get(session_id) is None:
                 self._reply(404, {"error": "unknown sessionId"})
+                return
+            if session_has_active_owner(self.server, session_id):
+                self._reply(409, {"error": "session is owned by an active task"})
                 return
             with self.server.live_lock:
                 record = self.server.live.pop(session_id, None)

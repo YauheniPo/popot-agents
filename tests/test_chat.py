@@ -57,6 +57,26 @@ class FakeRunner:
 
 
 class TaskSessionTests(unittest.TestCase):
+    @staticmethod
+    def _post_to_handler(handler_class, server, payload):
+        body = json.dumps(payload).encode()
+        handler = handler_class.__new__(handler_class)
+        handler.client_address = ("192.0.2.7", 1234)
+        handler.command = "POST"
+        handler.path = "/messages"
+        handler.request_version = "HTTP/1.1"
+        handler.requestline = "POST /messages HTTP/1.1"
+        handler.server = server
+        handler.headers = Message()
+        handler.headers["Content-Type"] = "application/json"
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = io.BytesIO()
+        with redirect_stderr(io.StringIO()):
+            handler.do_POST()
+        raw = handler.wfile.getvalue()
+        return int(raw.split(b" ", 2)[1]), json.loads(raw.split(b"\r\n\r\n", 1)[1])
+
     def test_orchestrator_handles_requests_in_threads(self):
         self.assertTrue(issubclass(ChatServer, ThreadingHTTPServer))
 
@@ -106,7 +126,8 @@ class TaskSessionTests(unittest.TestCase):
         lock = threading.Lock()
         lock.acquire()
         server = SimpleNamespace(
-            store=SimpleNamespace(prune_expired=lambda: {session_id}),
+            store=SimpleNamespace(expired_ids=lambda: {session_id},
+                                  delete_expired=lambda _session_id: True),
             live={session_id: SimpleNamespace(worker=chat, role_config={"ttl_seconds": 0},
                                               last_used=time.monotonic())},
             live_lock=threading.RLock(), session_lock=lambda _session_id: lock,
@@ -118,6 +139,98 @@ class TaskSessionTests(unittest.TestCase):
         lock.release()
         ChatServer.service_actions(server)
         self.assertTrue(chat.closed)
+
+    def test_first_turn_holds_session_lock_until_saved(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class BlockingChat(FakeChat):
+            def send(self, message):
+                entered.set()
+                release.wait(2)
+                if self.closed:
+                    raise AgentRunError("worker closed during first turn")
+                return super().send(message)
+
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeRunner()
+            runner.start_chat = lambda chat_id, role_config=None: BlockingChat(f"worker-{chat_id}")
+            with patch("popot_agents.orchestrator.main.ChatServer") as server_class:
+                create_server({"test_agent": runner})
+            handler_class = server_class.call_args.args[1]
+            lock = threading.RLock()
+            server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
+                                     last_prune=time.monotonic(), live_lock=threading.RLock(),
+                                     session_lock=lambda _session_id: lock,
+                                     task_slots=threading.BoundedSemaphore(4), pending_expired=set())
+            result = []
+
+            def post():
+                result.append(self._post_to_handler(handler_class, server, {
+                    "agent": "test_agent", "message": "hello"}))
+
+            request = threading.Thread(target=post, daemon=True)
+            try:
+                request.start()
+                self.assertTrue(entered.wait(2))
+                session_id = next(iter(server.live))
+                server.live[session_id].last_used = time.monotonic() - 301
+                ChatServer.service_actions(server)
+                self.assertFalse(server.live[session_id].worker.closed)
+            finally:
+                release.set()
+                request.join(3)
+            self.assertEqual(result[0][0], 200)
+
+    def test_expired_followup_is_not_pruned_during_active_turn(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class BlockingChat(FakeChat):
+            def send(self, message):
+                if message == "continue":
+                    entered.set()
+                    release.wait(2)
+                return super().send(message)
+
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeRunner()
+            runner.start_chat = lambda chat_id, role_config=None: BlockingChat(f"worker-{chat_id}")
+            with patch("popot_agents.orchestrator.main.ChatServer") as server_class:
+                create_server({"test_agent": runner})
+            handler_class = server_class.call_args.args[1]
+            lock = threading.RLock()
+            server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
+                                     last_prune=time.monotonic(), live_lock=threading.RLock(),
+                                     session_lock=lambda _session_id: lock,
+                                     task_slots=threading.BoundedSemaphore(4), pending_expired=set())
+
+            def post(payload):
+                return self._post_to_handler(handler_class, server, payload)
+
+            result = []
+            request = None
+            try:
+                _, first = post({"agent": "test_agent", "message": "hello"})
+                session_id = first["sessionId"]
+                request = threading.Thread(target=lambda: result.append(post({
+                    "sessionId": session_id, "message": "continue",
+                })), daemon=True)
+                request.start()
+                self.assertTrue(entered.wait(2))
+                path = Path(directory) / f"{session_id}.json"
+                saved = json.loads(path.read_text())
+                saved["createdAt"] = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+                path.write_text(json.dumps(saved))
+                server.last_prune = 0
+                ChatServer.service_actions(server)
+                self.assertTrue(path.exists())
+            finally:
+                release.set()
+                if request:
+                    request.join(3)
+            self.assertEqual(result[0][0], 200)
+            self.assertEqual(json.loads(path.read_text())["createdAt"], saved["createdAt"])
+            ChatServer.service_actions(server)
+            self.assertFalse(path.exists())
 
     def test_role_ttl_controls_idle_worker_and_zero_never_expires(self):
         with tempfile.TemporaryDirectory() as directory:
