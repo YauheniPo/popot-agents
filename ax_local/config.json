@@ -1,0 +1,24 @@
+{
+  "default_provider": "openrouter",
+  "default_model": "openrouter/free",
+  "ax": {
+    "context": "kind-popot-ax",
+    "atespace": "ate-demo-counter",
+    "workspace_name": "popot-local",
+    "task_resources": {
+      "requests": {"cpu": "250m", "memory": "256Mi"},
+      "limits": {"cpu": "1", "memory": "1Gi"}
+    },
+    "task_debug": true,
+    "cli_timeout_seconds": 60,
+    "route_timeout_seconds": 330,
+    "startup_timeout_seconds": 300,
+    "startup_probe_interval_seconds": 3,
+    "session_backend": "postgres"
+  },
+  "proxy": {
+    "port": 8004,
+    "max_request_bytes": 2097152,
+    "max_response_bytes": 4194304
+  }
+}

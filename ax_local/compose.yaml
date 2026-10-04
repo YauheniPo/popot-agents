@@ -1,0 +1,84 @@
+name: popot-ax-local
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: popot_agents_ax
+      POSTGRES_USER: popot
+      POSTGRES_PASSWORD: ${POPOT_DB_PASSWORD:-}
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - ax-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U popot -d popot_agents_ax"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    image: popot-ax-api:local
+    build:
+      context: ..
+      dockerfile: ax_local/docker/api.Dockerfile
+    env_file: ../.env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
+      - kind
+    environment:
+      AX_LOCAL_API_PORT: 8002
+      AX_LOCAL_PROVIDER: ${AX_LOCAL_PROVIDER:-}
+      AX_LOCAL_MODEL: ${AX_LOCAL_MODEL:-}
+      AX_LOCAL_PGHOST: db
+      AX_LOCAL_PGPORT: 5432
+      AX_LOCAL_KUBECONFIG: /run/ax-local/kubeconfig
+      KUBECONFIG: /run/ax-local/kubeconfig
+      AX_LOCAL_WORKER_IMAGE_FILE: /run/ax-local/worker-image
+      POPOT_DB_PASSWORD: ${POPOT_DB_PASSWORD:-}
+    volumes:
+      - type: bind
+        source: ./.local/kubeconfig-container
+        target: /run/ax-local/kubeconfig
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.local/worker-image
+        target: /run/ax-local/worker-image
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; from ax_local.api.provider_proxy import network_address_toward; urllib.request.urlopen('http://' + network_address_toward('db', 5432) + ':8002/healthz', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  mcp-server:
+    image: popot-ax-mcp:local
+    build:
+      context: ..
+      dockerfile: docker/mcp.Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8001
+      MCP_ORCHESTRATOR_URL: http://api:8002
+    ports:
+      - "127.0.0.1:${AX_MCP_PUBLISH_PORT:-8003}:8001"
+    restart: unless-stopped
+
+volumes:
+  ax-postgres:
+
+networks:
+  kind:
+    external: true
+    name: kind
