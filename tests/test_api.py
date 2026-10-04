@@ -442,11 +442,11 @@ class HttpHarnessTests(unittest.TestCase):
             "id": "call-1", "type": "function", "function": {
                 "name": "calculate",
                 "arguments": '{"expression":"2+3","token":"private-token"}'}}]}}]}
-        urlopen.return_value = io.BytesIO(json.dumps(message).encode())
+        urlopen.side_effect = lambda *args, **kwargs: io.BytesIO(json.dumps(message).encode())
         output = io.StringIO()
         with patch.dict(os.environ, {"HARNESS_BASE_URL": "https://example.test/v1",
                                   "HARNESS_MODEL": "example-model"}), redirect_stderr(output):
-            with self.assertRaisesRegex(RuntimeError, "invalid tool call"):
+            with self.assertRaisesRegex(RuntimeError, "tool-call limit"):
                 run_http("calculate", {"tools": ["calculate"]})
         self.assertNotIn("private-token", output.getvalue())
 

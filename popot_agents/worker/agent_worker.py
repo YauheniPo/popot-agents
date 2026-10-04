@@ -4,6 +4,10 @@ import json
 import os
 import subprocess
 import sys
+import math
+
+from popot_agents.skills import prepare_role_config
+from popot_agents.runtime_config import RUNTIME
 
 
 def run_harness(task: str) -> str:
@@ -19,8 +23,17 @@ def run_harness(task: str) -> str:
     has_task_argument = "{task}" in command
     if "{model}" in command and not os.getenv("HARNESS_MODEL"):
         raise ValueError("HARNESS_MODEL is required by the command")
+    role_config = json.loads(os.getenv("HARNESS_ROLE_JSON", "{}"))
+    max_turns = role_config.get("max_tool_rounds", RUNTIME["model"]["default_max_tool_rounds"])
+    if type(max_turns) is not int or not 1 <= max_turns <= 20:
+        raise ValueError("max_tool_rounds must be between 1 and 20")
+    timeout = float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS",
+                             str(RUNTIME["worker"]["default_timeout_seconds"])))
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("HARNESS_TURN_TIMEOUT_SECONDS must be positive and finite")
     command = [
-        task if arg == "{task}" else os.environ["HARNESS_MODEL"] if arg == "{model}" else arg
+        task if arg == "{task}" else os.environ["HARNESS_MODEL"] if arg == "{model}"
+        else str(max_turns) if arg == "{max_turns}" else arg
         for arg in command
     ]
     aliases = json.loads(os.getenv("HARNESS_ENV_ALIASES_JSON", "{}"))
@@ -34,15 +47,20 @@ def run_harness(task: str) -> str:
         if not child_env.get(source):
             raise ValueError(f"required environment variable is missing: {source}")
         child_env[target] = child_env[source]
-    completed = subprocess.run(
-        command,
-        input="" if has_task_argument else task,
-        text=True,
-        capture_output=True,
-        check=False,
-        cwd="/workspace",
-        env=child_env,
-    )
+    try:
+        # The CLI owns its tool loop. Relaunching it could repeat completed writes.
+        completed = subprocess.run(
+            command,
+            input="" if has_task_argument else task,
+            text=True,
+            capture_output=True,
+            check=False,
+            cwd="/workspace",
+            env=child_env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"CLI harness turn timed out after {timeout:g}s") from None
     if completed.returncode != 0:
         raise RuntimeError(f"harness exited with status {completed.returncode}")
     answer = completed.stdout.strip()
@@ -57,7 +75,7 @@ def main() -> None:
         task = request["task"]
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task is required")
-        role_config = json.loads(os.getenv("HARNESS_ROLE_JSON", "{}"))
+        role_config = prepare_role_config(json.loads(os.getenv("HARNESS_ROLE_JSON", "{}")))
         if os.getenv("HARNESS_SESSION_MODE") == "http":
             from .http_harness import run_http
             answer = run_http(task, role_config)

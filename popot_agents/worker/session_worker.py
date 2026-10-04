@@ -10,6 +10,7 @@ import time
 from .agent_worker import run_harness
 from .http_harness import run_http
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.skills import prepare_role_config
 
 
 SOCKET_PATH = os.getenv("HARNESS_SOCKET_PATH", "/workspace/chat.sock")
@@ -78,7 +79,7 @@ def answer_with_cli(messages: list[dict[str, str]], instructions: str = "") -> s
 
 
 def serve(*, extra_tools: dict | None = None) -> None:
-    role_config = json.loads(os.getenv("HARNESS_ROLE_JSON", "{}"))
+    role_config = prepare_role_config(json.loads(os.getenv("HARNESS_ROLE_JSON", "{}")))
     if os.getenv("HARNESS_SESSION_MODE") == "http":
         answer = lambda messages: run_http(messages, role_config, extra_tools=extra_tools)
     else:

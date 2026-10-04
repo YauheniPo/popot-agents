@@ -15,10 +15,12 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Mapping
+from urllib.parse import urlsplit
 
 from popot_agents.tools import TOOL_SCHEMAS
 from popot_agents.role_env import selected_role_env, validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
+from popot_agents.skills import load_skill_instructions
 from .session_store import SessionStore
 
 
@@ -188,9 +190,8 @@ class DockerAgentRunner:
             environment["HARNESS_ENV_ALIASES_JSON"] = json.dumps(self.env_aliases)
         if self.model_env:
             environment["HARNESS_MODEL"] = os.environ[self.model_env]
-        if self.session_mode == "http":
-            turn_timeout = (role_config or {}).get("timeout_seconds", self.timeout_seconds)
-            environment["HARNESS_TURN_TIMEOUT_SECONDS"] = str(max(0.1, turn_timeout - 5))
+        turn_timeout = (role_config or {}).get("timeout_seconds", self.timeout_seconds)
+        environment["HARNESS_TURN_TIMEOUT_SECONDS"] = str(max(0.1, turn_timeout - 5))
         if self.model_parameters:
             environment["HARNESS_MODEL_PARAMETERS_JSON"] = json.dumps(self.model_parameters)
         environment["HARNESS_SESSION_MODE"] = self.session_mode
@@ -433,7 +434,7 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
             raise ValueError(f"invalid role name: {name}")
         required = {"agent", "instructions", "tools"}
         optional = {"permissions", "mcpServers", "timeout_seconds", "max_tool_rounds",
-                    "ttl_seconds", "allowed_roles", "cron", "env_names"}
+                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description"}
         if not isinstance(config, dict) or not required.issubset(config) \
                 or set(config) - required - optional:
             raise ValueError(f"role {name} must define agent, instructions and tools")
@@ -442,6 +443,13 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
             raise ValueError(f"role {name} uses an unknown agent")
         if not isinstance(config["instructions"], str) or len(config["instructions"]) > 4000:
             raise ValueError(f"role {name} has invalid instructions")
+        if "description" in config and (not isinstance(config["description"], str)
+                or not config["description"].strip() or len(config["description"]) > 1000):
+            raise ValueError(f"role {name} has invalid description")
+        try:
+            load_skill_instructions(config.get("skills", []))
+        except ValueError as exc:
+            raise ValueError(f"role {name} has invalid skills: {exc}") from exc
         allowed_roles = config.get("allowed_roles", [])
         if not isinstance(allowed_roles, list) or any(
                 not isinstance(target, str) or target not in roles or target == name
@@ -515,12 +523,27 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
             raise ValueError(f"role {name} must grant internet permission for MCP servers")
         for alias, server in mcp_servers.items():
             if not isinstance(alias, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", alias) \
-                    or not isinstance(server, dict) or set(server) != {"command", "tools"}:
+                    or not isinstance(server, dict) or set(server) not in (
+                        {"command", "tools"}, {"url", "bearer_token_env", "tools"}):
                 raise ValueError(f"role {name} has invalid MCP server")
-            command, offered = server["command"], server["tools"]
-            if not isinstance(command, list) or not command or not all(
-                    isinstance(part, str) and part for part in command):
-                raise ValueError(f"role {name} has invalid MCP command")
+            offered = server["tools"]
+            if "url" in server:
+                url = server["url"]
+                if not isinstance(url, str):
+                    raise ValueError(f"role {name} has invalid MCP URL")
+                parsed = urlsplit(url)
+                if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                        or parsed.password is not None or parsed.query or parsed.fragment
+                        or any(char.isspace() for char in url)):
+                    raise ValueError(f"role {name} needs a credential-free HTTPS MCP URL")
+                token_name = server["bearer_token_env"]
+                if not isinstance(token_name, str) or token_name not in config.get("env_names", []):
+                    raise ValueError(f"role {name} MCP token must be selected in env_names")
+            else:
+                command = server["command"]
+                if not isinstance(command, list) or not command or not all(
+                        isinstance(part, str) and part for part in command):
+                    raise ValueError(f"role {name} has invalid MCP command")
             if not isinstance(offered, list) or not offered or not all(
                     isinstance(tool, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tool)
                     for tool in offered) or len(offered) != len(set(offered)):

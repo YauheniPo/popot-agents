@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -154,6 +155,47 @@ class AxRunnerTests(unittest.TestCase):
             self.runner.start_chat("0123456789abcdef")
         self.assertEqual(run.call_args_list[1].args[:3],
                          ("delete", "task", "popot-chat-0123456789abcdef"))
+
+    def test_cleanup_timeout_identifies_session_start_stage_without_applying(self):
+        present = subprocess.CompletedProcess([], 0, "", "")
+        error = subprocess.TimeoutExpired(["ax", "private-command-value"], 17,
+                                          stderr="private-stderr-value")
+        with patch.dict(AX_CONFIG["ax"], {"cli_timeout_seconds": 17}), \
+             patch.object(self.runner, "_run", side_effect=[present, error]) as run:
+            with self.assertRaisesRegex(AgentRunError, "deleting previous AX task") as caught:
+                self.runner.start_chat("0123456789abcdef")
+        self.assertIn("popot-chat-0123456789abcdef", str(caught.exception))
+        self.assertNotIn("private", str(caught.exception))
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.kwargs["timeout"], 17)
+
+    def test_cleanup_uses_remaining_parent_budget(self):
+        present = subprocess.CompletedProcess([], 0, "", "")
+        error = subprocess.TimeoutExpired(["ax"], 2)
+        with patch.dict(AX_CONFIG["ax"], {"cli_timeout_seconds": 17}), \
+             patch.object(self.runner, "_run", side_effect=[present, error]) as run, \
+             patch("ax_local.api.ax_runner.time.monotonic", return_value=8):
+            with self.assertRaises(AgentRunError):
+                self.runner.start_chat("0123456789abcdef", deadline=10)
+        self.assertEqual(run.call_args.kwargs["timeout"], 2)
+
+    def test_close_reports_unconfirmed_cleanup_without_exposing_stderr(self):
+        failures = [subprocess.CompletedProcess([], 1, "", "private-stderr-value"),
+                    subprocess.TimeoutExpired(["ax", "private-command-value"], 5)]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                chat = AxChat(self.runner, "popot-chat-0123456789abcdef", 12)
+                kwargs = ({"side_effect": failure} if isinstance(failure, Exception)
+                          else {"return_value": failure})
+                with patch.object(self.runner, "_run", **kwargs) as run, \
+                     patch("sys.stderr", new_callable=io.StringIO) as log:
+                    chat.close()
+                    chat.close()
+                run.assert_called_once()
+                self.assertTrue(chat.closed)
+                self.assertIn("AX task cleanup not confirmed", log.getvalue())
+                self.assertIn(chat.container_name, log.getvalue())
+                self.assertNotIn("private", log.getvalue())
 
     def test_failed_ax_task_stops_startup_with_its_status_reason(self):
         missing = subprocess.CompletedProcess([], 1, "", "rpc error: code = NotFound")

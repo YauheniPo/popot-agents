@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
 from popot_agents.role_env import selected_role_env
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.runtime_config import RUNTIME
 from ..config import AX_CONFIG
 from ..worker.remote_client import RESPONSE_PREFIX
 
@@ -182,7 +181,17 @@ class AxAgentRunner:
             raise AgentRunError("AX task lookup failed")
         if not existing.returncode:
             # A previous API process may have left a task with an expired proxy token.
-            self._run("delete", "task", task_name, timeout=remaining(60))
+            try:
+                self._run("delete", "task", task_name,
+                          timeout=remaining(AX_CONFIG["ax"]["cli_timeout_seconds"]))
+            except subprocess.TimeoutExpired as exc:
+                # No model turn has started. Do not report this as an agent timeout
+                # or create a replacement while the previous actor may still exist.
+                raise AgentRunError(
+                    f"Timed out deleting previous AX task {task_name} after {exc.timeout:g}s; "
+                    "session restart blocked before worker startup. "
+                    "Check AX task status and ax-controller logs for cleanup errors."
+                ) from None
         chat = AxChat(self, task_name,
                       (role_config or {}).get("timeout_seconds",
                                               RUNTIME["worker"]["default_timeout_seconds"]))
@@ -315,8 +324,15 @@ class AxChat:
             if self.runner.delegation:
                 self.runner.delegation.revoke(self.container_name.removeprefix("popot-chat-"))
             try:
-                self.runner._run("delete", "task", self.container_name,
-                                 timeout=5,
-                                 allow_failure=True)
-            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError):
-                pass
+                result = self.runner._run("delete", "task", self.container_name,
+                                          timeout=5, allow_failure=True)
+                if result.returncode:
+                    self._report_cleanup_failure(f"CLI exit {result.returncode}")
+            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError) as exc:
+                self._report_cleanup_failure(type(exc).__name__)
+
+    def _report_cleanup_failure(self, reason: str) -> None:
+        # CLI output and exception strings can include environment or command data.
+        print(f"AX task cleanup not confirmed: task={self.container_name} reason={reason}; "
+              "check AX task status and ax-controller logs",
+              file=sys.stderr, flush=True)

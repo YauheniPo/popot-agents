@@ -5,7 +5,9 @@ from __future__ import annotations
 import hmac
 import json
 import socket
+import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import error, request
@@ -72,28 +74,43 @@ def dispatch_request(selected: Provider, token: str, path: str,
         upstream = make_upstream_request(selected, body)
     except ValueError:
         return 400, b'{}'
+    # Leave time to deliver an upstream timeout before the worker's socket expires.
+    # A shorter remaining turn budget can still disconnect; _reply handles that.
+    model_timeout = RUNTIME["timeouts"]["model_request_seconds"]
+    timeout = model_timeout - min(AX_CONFIG["proxy"]["response_margin_seconds"], model_timeout / 2)
+    started_at = time.monotonic()
     try:
-        with request.urlopen(upstream,
-                             timeout=RUNTIME["timeouts"]["model_request_seconds"]) as response:
+        with request.urlopen(upstream, timeout=timeout) as response:
             answer = response.read(AX_CONFIG["proxy"]["max_response_bytes"] + 1)
             if len(answer) > AX_CONFIG["proxy"]["max_response_bytes"]:
                 return 502, b'{}'
             return response.status, answer
     except error.HTTPError as exc:
         return exc.code, b'{}'
-    except (error.URLError, TimeoutError, OSError):
-        return 502, b'{}'
+    except (error.URLError, TimeoutError, OSError) as exc:
+        timed_out = isinstance(exc, TimeoutError) or (
+            isinstance(exc, error.URLError) and isinstance(exc.reason, TimeoutError))
+        print(json.dumps({
+            "event": "model_upstream_timeout" if timed_out else "model_upstream_error",
+            "provider": selected.name, "model": selected.model,
+            "elapsed_seconds": round(time.monotonic() - started_at, 1),
+            "timeout_seconds": timeout,
+        }), file=sys.stderr, flush=True)
+        return (504 if timed_out else 502), b'{}'
 
 
 def start_proxy(selected: Provider, token: str, host: str = "0.0.0.0",
                 port: int = AX_CONFIG["proxy"]["port"]) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, status: int, body: bytes) -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
 
         def do_POST(self) -> None:
             authorization = self.headers.get("Authorization", "")

@@ -61,10 +61,14 @@ def make_server():
             config["timeout_seconds"] = max(config.get("timeout_seconds", 60),
                                             policy["turn_timeout_seconds"])
             config["instructions"] += (
-                " You can use delegate_task to start a specialist agent. Available roles: "
-                + ", ".join(config["allowed_roles"])
-                + ". Pass the task and relevant context explicitly, then use the returned result. "
-                  "Do not claim delegation happened without a delegate_task tool result.")
+                " When delegate_task is available, its schema lists the currently available "
+                "specialists and their descriptions. Choose a specialist whose description matches "
+                "the subtask, delegate with relevant context, and incorporate its result. "
+                "Send changed code to code_reviewer before reporting it complete when that role "
+                "is available. Workspaces are separate: include the diff and relevant source, "
+                "requirements and checks, or a readable repository/ref/PR. If the tool is absent "
+                "or a review fails, explicitly report that limitation. Do not claim delegation "
+                "or approval without a successful delegate_task result.")
     backend = os.getenv("AX_LOCAL_SESSION_BACKEND", AX_CONFIG["ax"]["session_backend"])
     if backend == "postgres":
         from popot_agents.orchestrator.postgres_session_store import PostgresSessionStore

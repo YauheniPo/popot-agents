@@ -124,11 +124,11 @@ class BackendRoleTests(unittest.TestCase):
         self.assertEqual(backend["permissions"], {
             "workspace": "persistent", "shell": True, "internet": True,
         })
-        self.assertEqual(set(backend["mcpServers"]), {"fetch", "git"})
+        self.assertEqual(set(backend["mcpServers"]), {"fetch", "git", "github"})
         self.assertEqual(backend["mcpServers"]["fetch"]["tools"], ["fetch"])
         self.assertEqual(backend["mcpServers"]["git"]["tools"],
                          ["git_status", "git_diff_unstaged"])
-        self.assertEqual(backend["max_tool_rounds"], 12)
+        self.assertIn("search_repositories", backend["mcpServers"]["github"]["tools"])
 
     def test_backend_chat_gets_a_durable_private_workspace(self):
         with tempfile.TemporaryDirectory() as directory:

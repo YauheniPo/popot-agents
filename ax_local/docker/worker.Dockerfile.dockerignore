@@ -4,6 +4,9 @@
 !popot_agents/tools.py
 !popot_agents/runtime_config.py
 !popot_agents/role_env.py
+!popot_agents/skills.py
+!skills/
+!skills/**
 !popot_agents/worker/
 !popot_agents/worker/**
 !config/

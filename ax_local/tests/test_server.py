@@ -43,11 +43,14 @@ class AxServerTests(unittest.TestCase):
         self.assertIn("bash", roles["backend_engineer"]["tools"])
         self.assertEqual(set(create.call_args.args[0]), {"openrouter"})
         self.assertNotIn("allowed_roles", server.delegation.policy)
-        self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst"])
+        self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer"])
         env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
         import json
         self.assertEqual(json.loads(env["AX_DELEGATION_ROLES"]), roles["backend_engineer"]["allowed_roles"])
-        self.assertIn("Available roles: qa_engineer, analyst", roles["backend_engineer"]["instructions"])
+        descriptions = json.loads(env["AX_DELEGATION_DESCRIPTIONS"])
+        self.assertEqual(set(descriptions), set(roles["backend_engineer"]["allowed_roles"]))
+        self.assertEqual(descriptions["code_reviewer"], roles["code_reviewer"]["description"])
+        self.assertIn("delegate_task", roles["backend_engineer"]["instructions"])
 
     def test_container_bind_host_is_configurable(self):
         environment = {

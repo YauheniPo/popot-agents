@@ -17,6 +17,9 @@ def make_tools(environ: dict | None = None) -> dict:
     allowed = json.loads(environ.get("AX_DELEGATION_ROLES", "[]"))
     if not url or not token or not allowed:
         return {}
+    descriptions = json.loads(environ.get("AX_DELEGATION_DESCRIPTIONS", "{}"))
+    catalog = "\n".join(f"- {role}: {descriptions.get(role, 'Specialist role: ' + role)}"
+                        for role in allowed)
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname \
             or parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -25,7 +28,10 @@ def make_tools(environ: dict | None = None) -> dict:
         "name": "delegate_task",
         "description": "Start a separate AX agent with an allowed role and wait for its result. "
                        "Give it the task and all required context explicitly. Its workspace and "
-                       "conversation are separate. Use its result in your final answer.",
+                       "conversation are separate. Select by the role descriptions below. "
+                       "For code review, send requirements, the diff and relevant source, test "
+                       "results, or a readable repository/ref/PR; a local path alone is insufficient. "
+                       "Use its result in your final answer. Available specialists:\n" + catalog,
         "parameters": {"type": "object", "properties": {
             "role": {"type": "string", "enum": allowed},
             "task": {"type": "string", "description": "Task with requirements and relevant input data"}},

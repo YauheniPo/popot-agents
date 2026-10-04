@@ -140,11 +140,17 @@ class DelegationService:
                               run=job.run if job else None)
                 self.grants[session_id] = grant
                 self.tokens[hashlib.sha256(grant.token.encode()).hexdigest()] = grant
-            allowed = self.roles[role].get("allowed_roles", [])
+            allowed = [target for target in self.roles[role].get("allowed_roles", [])
+                       if target not in grant.lineage]
+            if len(grant.lineage) > self.policy["max_depth"]:
+                allowed = []
             if not allowed:
                 return {}
             return {"AX_DELEGATION_URL": self.base_url, "AX_DELEGATION_TOKEN": grant.token,
-                    "AX_DELEGATION_ROLES": json.dumps(allowed)}
+                    "AX_DELEGATION_ROLES": json.dumps(allowed),
+                    "AX_DELEGATION_DESCRIPTIONS": json.dumps({target:
+                        self.roles[target].get("description", self.roles[target]["instructions"][:1000])
+                        for target in allowed}, ensure_ascii=False)}
 
     def revoke(self, session_id: str) -> None:
         with self.lock:
@@ -223,7 +229,8 @@ class DelegationService:
     def card(self, role: str) -> dict:
         if role not in self.roles:
             raise A2AError("unknown role")
-        return {"name": f"popot AX {role}", "description": self.roles[role]["instructions"],
+        return {"name": f"popot AX {role}", "description": self.roles[role].get(
+                    "description", self.roles[role]["instructions"]),
                 "version": "0.1.0", "supportedInterfaces": [{
                     "url": f"{self.base_url}/a2a/{role}", "protocolBinding": "JSONRPC",
                     "protocolVersion": "1.0"}],
