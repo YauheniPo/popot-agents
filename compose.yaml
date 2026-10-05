@@ -59,6 +59,7 @@ services:
       AGENT_WORKSPACE_DIR: /data/workspaces
       AGENT_WORKSPACE_HOST_DIR: ${HOME:?HOME is required}/.popot-agents/workspaces
       AGENT_WORKER_LOG_DIR: /data/worker-logs
+      COGNEE_API_URL: ${COGNEE_API_URL:-http://host.docker.internal:3001}
     ports:
       - "127.0.0.1:${API_PUBLISH_PORT:-8000}:8000"
     volumes:

@@ -6,12 +6,14 @@ import base64
 from contextlib import nullcontext
 import json
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit, urlunsplit
 
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
 from popot_agents.role_env import selected_role_env
@@ -74,13 +76,15 @@ class AxAgentRunner:
             "HARNESS_MODEL": self.model,
             "HARNESS_ROLE_JSON": json.dumps(role_config, ensure_ascii=False),
             "HARNESS_SESSION_MODE": "http",
+            "HARNESS_CHAT_ID": chat_id,
             "HARNESS_SOCKET_PATH": "/workspace/chat.sock",
             "PYTHONPATH": "/app",
             "HOME": "/workspace",
             "XDG_CACHE_HOME": "/workspace/.cache",
             "XDG_CONFIG_HOME": "/workspace/.config",
-            "HARNESS_TURN_TIMEOUT_SECONDS": str(role_config.get(
-                "timeout_seconds", RUNTIME["worker"]["default_timeout_seconds"])),
+            "HARNESS_TURN_TIMEOUT_SECONDS": str(max(RUNTIME["worker"]["min_timeout_seconds"], role_config.get(
+                "timeout_seconds", RUNTIME["worker"]["default_timeout_seconds"])
+                - RUNTIME["worker"]["response_margin_seconds"])),
         }
         if role_config.get("mcpServers") or set(role_config.get("tools", [])) & {
                 "bash", "git_clone", "read_file", "write_file", "download_file"}:
@@ -95,6 +99,20 @@ class AxAgentRunner:
             names = [name for name in role_config.get("env_names", [])
                      if name in RUNTIME["role_env_names"]]
             env.update(selected_role_env(names))
+            # Docker DNS names are not available inside AX's Substrate sandbox.
+            # Cognee also joins kind; resolve its kind-network address in the API.
+            if 'COGNEE_API_URL' in env:
+                memory_url = urlsplit(env['COGNEE_API_URL'])
+                if memory_url.hostname == 'cognee':
+                    try:
+                        memory_host = socket.gethostbyname('cognee')
+                    except socket.gaierror:
+                        # Memory is optional. Its tools will report the outage;
+                        # a stopped memory service must not block the main task.
+                        pass
+                    else:
+                        env['COGNEE_API_URL'] = urlunsplit(memory_url._replace(
+                            netloc=f"{memory_host}:{memory_url.port or 8000}"))
             env["HARNESS_TOOL_ENV_NAMES_JSON"] = json.dumps(names)
         except ValueError as exc:
             raise AgentConfigurationError(str(exc)) from exc
@@ -214,10 +232,10 @@ class AxAgentRunner:
         last_reason = None
         last_report = None
         while True:
-            if chat.is_alive(timeout_seconds=remaining(15)):
+            if chat.is_alive(timeout_seconds=remaining(AX_CONFIG["ax"]["probe_timeout_seconds"])):
                 return chat
             try:
-                phase, reason = self.task_status(task_name, timeout=remaining(15))
+                phase, reason = self.task_status(task_name, timeout=remaining(AX_CONFIG["ax"]["probe_timeout_seconds"]))
             except (AgentRunError, subprocess.TimeoutExpired, OSError):
                 phase, reason = None, None
             report = (phase, reason, chat.probe_issue)
@@ -266,7 +284,7 @@ class AxChat:
     probe_issue: str | None = None
     _close_lock: object = field(default_factory=threading.Lock, repr=False)
 
-    def is_alive(self, timeout_seconds: float = 15) -> bool:
+    def is_alive(self, timeout_seconds: float = AX_CONFIG["ax"]["probe_timeout_seconds"]) -> bool:
         if self.closed:
             return False
         try:
@@ -297,7 +315,7 @@ class AxChat:
     def restore(self, messages: list[dict[str, str]]) -> None:
         result = self.runner.remote(self.container_name,
                                     {"action": "restore", "messages": messages},
-                                    timeout=30)
+                                    timeout=AX_CONFIG["ax"]["restore_timeout_seconds"])
         if result.get("status") != "ok":
             raise AgentRunError(result.get("error", "AX chat worker could not restore history"))
 
@@ -309,7 +327,7 @@ class AxChat:
               if service else nullcontext()):
             result = self.runner.remote(self.container_name,
                                         {"action": "message", "message": message},
-                                        timeout=timeout + 10)
+                                        timeout=timeout + AX_CONFIG["ax"]["response_margin_seconds"])
         if isinstance(result.get("error"), str):
             raise AgentRunError(result["error"])
         if not isinstance(result.get("answer"), str):
@@ -325,7 +343,7 @@ class AxChat:
                 self.runner.delegation.revoke(self.container_name.removeprefix("popot-chat-"))
             try:
                 result = self.runner._run("delete", "task", self.container_name,
-                                          timeout=5, allow_failure=True)
+                                          timeout=AX_CONFIG["ax"]["delete_timeout_seconds"], allow_failure=True)
                 if result.returncode:
                     self._report_cleanup_failure(f"CLI exit {result.returncode}")
             except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError) as exc:

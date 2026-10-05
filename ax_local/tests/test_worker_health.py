@@ -23,7 +23,20 @@ def worker(p, ip=None):
 
 
 class WorkerHealthTests(unittest.TestCase):
-    def run_health(self, snapshots, *, fail_read=False, fail_delete=False, context="kind-popot-ax", replicas=1):
+    def test_pool_resources_follow_task_config_without_changing_selector(self):
+        from ax_local.cluster.worker_health import pool_resources_patch
+        pool = {'metadata': {'resourceVersion': '12'}, 'spec': {'template': {
+            'nodeSelector': {'ate.dev/substrate-version': 'pinned'},
+            'resources': {'limits': {'cpu': '1', 'memory': '1Gi'}}}}}
+        resources = {'requests': {'cpu': '500m', 'memory': '512Mi'},
+                     'limits': {'cpu': '2', 'memory': '1536Mi'}}
+        patch = pool_resources_patch(pool, resources)
+        self.assertEqual(patch, {'metadata': {'resourceVersion': '12'},
+                                'spec': {'template': {'resources': resources}}})
+        pool['spec']['template']['resources'] = resources
+        self.assertIsNone(pool_resources_patch(pool, resources))
+
+    def run_health(self, snapshots, *, fail_read=False, fail_delete=False, context="kind-popot-ax", replicas=1, resources=None):
         self.calls = []
         self.tick = 0
         self.index = 0
@@ -37,7 +50,8 @@ class WorkerHealthTests(unittest.TestCase):
             if "delete" in args:
                 return subprocess.CompletedProcess(args, 0, "{}")
             if "workerpools" in args:
-                data = {"items": [{"metadata": {"name": "counter"}, "spec": {"replicas": replicas}}]}
+                data = {"items": [{"metadata": {"name": "counter", "resourceVersion": "12"},
+                                  "spec": {"replicas": replicas, "template": {"resources": resources}}}]}
             elif "pods" in args:
                 data = {"items": pods}
             else:
@@ -50,7 +64,18 @@ class WorkerHealthTests(unittest.TestCase):
 
         ensure_workers(Path("kubeconfig"), Path("kubectl-ate"), context,
                        "ate-demo-counter", 10, run=run,
-                       clock=lambda: self.tick, sleep=sleep)
+                       clock=lambda: self.tick, sleep=sleep, resources=resources)
+
+    def test_waits_until_pod_resources_match_the_updated_pool(self):
+        resources = {'requests': {'cpu': '500m', 'memory': '512Mi'},
+                     'limits': {'cpu': '2', 'memory': '1536Mi'}}
+        old = pod()
+        old['spec'] = {'containers': [{'name': 'ateom', 'resources': {
+            'limits': {'cpu': '1', 'memory': '1Gi'}}}]}
+        new = pod('worker-new', 'uid-new', '10.0.0.4')
+        new['spec'] = {'containers': [{'name': 'ateom', 'resources': resources}]}
+        self.run_health([([old], [worker(old)]), ([new], [worker(new)])], resources=resources)
+        self.assertEqual(self.index, 2)
 
     def test_healthy_workers_are_not_restarted(self):
         p = pod()
@@ -143,7 +168,9 @@ class WorkerHealthMainTests(unittest.TestCase):
             ax.mkdir()
             (ax / "config.json").write_text(json.dumps({"ax": {
                 "context": "kind-popot-ax", "atespace": "ate-demo-counter",
-                "startup_timeout_seconds": 300}}))
+                "startup_timeout_seconds": 300, "task_resources": {
+                    "requests": {"cpu": "500m", "memory": "512Mi"},
+                    "limits": {"cpu": "2", "memory": "1536Mi"}}}}))
             cli = ax / ".local/bin/kubectl-ate"
             def run(args, **kw):
                 self.assertEqual(kw["cwd"], ax / ".local/src/substrate")
@@ -157,4 +184,6 @@ class WorkerHealthMainTests(unittest.TestCase):
                 worker_health.main()
             self.assertEqual(sum(c.args[0][0] == "go" for c in command.call_args_list), 1)
             ensure.assert_called_with(ax / ".local/kubeconfig", cli, "kind-popot-ax",
-                                      "ate-demo-counter", 300)
+                                      "ate-demo-counter", 300, resources={
+                                          "requests": {"cpu": "500m", "memory": "512Mi"},
+                                          "limits": {"cpu": "2", "memory": "1536Mi"}})

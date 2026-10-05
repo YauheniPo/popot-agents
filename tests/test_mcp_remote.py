@@ -103,6 +103,30 @@ class RemoteMCPTests(unittest.TestCase):
             self.assertNotIn('test-secret', str(raised.exception))
             self.assertTrue(raised.exception.__suppress_context__)
 
+    def test_nested_transport_errors_expose_cause_without_token(self):
+        # anyio's TaskGroup wraps HTTP transport failures, including on Python 3.10.
+        class TransportGroup(Exception):
+            def __init__(self, *errors):
+                super().__init__('unhandled errors in a TaskGroup')
+                self.exceptions = errors
+
+        async def fail(*args):
+            raise TransportGroup(TransportGroup(RuntimeError(
+                'HTTP 503 from upstream, Authorization: Bearer test-secret')))
+
+        with patch.dict(os.environ, {
+                'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]',
+                'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret'}):
+            for operation, target in (
+                    (lambda: mcp_client.discover_tools({'github': REMOTE}), '_discover_one'),
+                    (lambda: mcp_client.call_tool(REMOTE, 'get_file_contents', {}), '_call_one')):
+                with self.subTest(target=target), patch.object(mcp_client, target, side_effect=fail):
+                    with self.assertRaisesRegex(RuntimeError, 'HTTP 503') as raised:
+                        operation()
+                    self.assertIn('[REDACTED]', str(raised.exception))
+                    self.assertNotIn('test-secret', str(raised.exception))
+                    self.assertTrue(raised.exception.__suppress_context__)
+
     def test_remote_call_honors_remaining_deadline(self):
         closed = []
         async def wait(*args):

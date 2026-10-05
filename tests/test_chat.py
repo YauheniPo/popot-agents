@@ -306,7 +306,8 @@ class TaskSessionTests(unittest.TestCase):
             with patch("popot_agents.orchestrator.main.ChatServer") as server_class:
                 create_server({"test_agent": runner})
             handler_class = server_class.call_args.args[1]
-            self.assertEqual(server_class.call_args.args[3], 300)
+            from popot_agents.runtime_config import RUNTIME
+            self.assertEqual(server_class.call_args.args[3], RUNTIME['sessions']['default_idle_seconds'])
             server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
                                      last_prune=time.monotonic(), live_lock=threading.RLock(),
                                      session_lock=lambda _session_id: threading.RLock(),

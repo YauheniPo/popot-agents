@@ -6,23 +6,33 @@
     "atespace": "ate-demo-counter",
     "workspace_name": "popot-local",
     "task_resources": {
-      "requests": {"cpu": "250m", "memory": "256Mi"},
-      "limits": {"cpu": "1", "memory": "1Gi"}
+      "requests": {
+        "cpu": "500m",
+        "memory": "512Mi"
+      },
+      "limits": {
+        "cpu": "2",
+        "memory": "1536Mi"
+      }
     },
     "task_debug": true,
     "cli_timeout_seconds": 60,
-    "route_timeout_seconds": 330,
+    "route_timeout_seconds": 1920,
     "startup_timeout_seconds": 300,
     "startup_probe_interval_seconds": 3,
-    "session_backend": "postgres"
+    "session_backend": "postgres",
+    "probe_timeout_seconds": 15,
+    "restore_timeout_seconds": 30,
+    "response_margin_seconds": 10,
+    "delete_timeout_seconds": 5
   },
   "delegation": {
     "enabled": true,
     "port": 8005,
     "max_depth": 3,
     "max_calls_per_turn": 8,
-    "max_concurrent_tasks": 4,
-    "turn_timeout_seconds": 300,
+    "max_concurrent_tasks": 3,
+    "turn_timeout_seconds": 900,
     "poll_interval_seconds": 0.5
   },
   "proxy": {

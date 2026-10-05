@@ -17,6 +17,7 @@ if [[ ! -s "$LOCAL/kubeconfig" || ! -s "$LOCAL/kubeconfig-container" || \
   python3 "$ROOT/ax_local/cluster/router_timeout.py" \
     "$LOCAL/kubeconfig" "$ROOT/ax_local/config.json"
   python3 "$ROOT/ax_local/cluster/worker_health.py"
+  bash "$ROOT/memory/up.sh"
   docker compose --env-file "$ROOT/.env" -f "$ROOT/ax_local/compose.yaml" \
     up --build -d mcp-server
 else
@@ -33,6 +34,7 @@ else
   python3 "$ROOT/ax_local/cluster/substrate_cleanup.py" --apply
   python3 "$ROOT/ax_local/cluster/router_timeout.py" \
     "$LOCAL/kubeconfig" "$ROOT/ax_local/config.json"
+  bash "$ROOT/memory/up.sh"
   bash "$ROOT/ax_local/rebuild-worker.sh"
 fi
 

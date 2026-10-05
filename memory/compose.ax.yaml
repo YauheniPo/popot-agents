@@ -1,0 +1,11 @@
+# Optional overlay selected by up.sh when the local kind network exists.
+services:
+  cognee:
+    networks:
+      - default
+      - kind
+
+networks:
+  kind:
+    external: true
+    name: kind

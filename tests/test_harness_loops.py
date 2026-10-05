@@ -123,4 +123,5 @@ class CliLoopBudgetTests(unittest.TestCase):
     def test_docker_passes_cli_turn_budget(self):
         runner = DockerAgentRunner(image='example', session_mode='cli', timeout_seconds=180)
         command = runner._docker_command('popot-chat-test', True)
-        self.assertIn('HARNESS_TURN_TIMEOUT_SECONDS=175', command)
+        from popot_agents.runtime_config import RUNTIME
+        self.assertIn(f"HARNESS_TURN_TIMEOUT_SECONDS={180 - RUNTIME['worker']['response_margin_seconds']}", command)

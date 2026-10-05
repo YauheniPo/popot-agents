@@ -25,8 +25,9 @@ def run_harness(task: str) -> str:
         raise ValueError("HARNESS_MODEL is required by the command")
     role_config = json.loads(os.getenv("HARNESS_ROLE_JSON", "{}"))
     max_turns = role_config.get("max_tool_rounds", RUNTIME["model"]["default_max_tool_rounds"])
-    if type(max_turns) is not int or not 1 <= max_turns <= 20:
-        raise ValueError("max_tool_rounds must be between 1 and 20")
+    cap = RUNTIME['model']['max_tool_rounds']
+    if type(max_turns) is not int or not 1 <= max_turns <= cap:
+        raise ValueError(f"max_tool_rounds must be between 1 and {cap}")
     timeout = float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS",
                              str(RUNTIME["worker"]["default_timeout_seconds"])))
     if not math.isfinite(timeout) or timeout <= 0:

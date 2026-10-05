@@ -80,6 +80,20 @@ class RoleApiTests(unittest.TestCase):
         conn.close()
         return result
 
+    def test_role_name_is_derived_from_its_block_key(self):
+        path = Path(self.directory.name) / 'roles.json'
+        config = {'agent': 'nous', 'instructions': 'Review code', 'tools': []}
+        path.write_text(json.dumps({'reviewer': config}))
+        loaded = load_roles(path, {'nous': self.runner})
+        self.assertEqual(loaded['reviewer']['name'], 'reviewer')
+        self.assertNotIn('name', json.loads(path.read_text())['reviewer'])
+
+    def test_review_budget_fits_ax_and_leaves_room_for_final_answer(self):
+        roles = json.loads((Path(__file__).resolve().parents[1] / 'config/roles.json').read_text())
+        from popot_agents.runtime_config import RUNTIME
+        self.assertNotIn('timeout_seconds', roles['code_reviewer'])
+        self.assertGreaterEqual(RUNTIME['worker']['default_timeout_seconds'], 900)
+
     def test_role_selects_agent_and_tool_policy_for_task(self):
         status, result = self.request("POST", "/tasks", {"role": "analyst", "task": "2+3"})
         self.assertEqual(status, 200)
@@ -218,7 +232,7 @@ class FeatureTeamConfigTests(unittest.TestCase):
         self.assertIn("calculate", roles["data_analyst"]["tools"])
         self.assertEqual(roles["product_designer"]["tools"], [])
         self.assertEqual(roles["backend_engineer"]["env_names"],
-                         ["GITHUB_PERSONAL_ACCESS_TOKEN"])
+                         ["GITHUB_PERSONAL_ACCESS_TOKEN", "COGNEE_API_URL", "COGNEE_PASSWORD"])
 
     def test_demo_cron_role_has_daily_utc_time_task(self):
         config = Path(__file__).resolve().parents[1] / "config"

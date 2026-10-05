@@ -19,6 +19,10 @@ class UpScriptTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.ax = self.root / "ax_local"
         self.ax.mkdir()
+        memory = self.root / 'memory'
+        memory.mkdir()
+        (memory / 'up.sh').write_text(
+            '#!/usr/bin/env bash\nprintf "memory-up\\n" >> "$CALLS"\n')
         shutil.copyfile(SOURCE, self.ax / "up.sh")
         cluster = self.ax / "cluster"
         cluster.mkdir()
@@ -95,7 +99,8 @@ class UpScriptTests(unittest.TestCase):
         self.assertEqual(calls[0], "bootstrap.sh")
         self.assertIn("substrate-cleanup", calls)
         self.assertLess(calls.index("substrate-cleanup"), calls.index("worker-health"))
-        self.assertEqual(calls[-2], "worker-health")
+        self.assertLess(calls.index('worker-health'), calls.index('memory-up'))
+        self.assertEqual(calls[-2], 'memory-up')
         self.assertIn("compose --env-file", calls[-1])
         self.assertIn("up --build -d mcp-server", calls[-1])
         self.assertTrue(any("--kubeconfig=" in call and "--context=kind-popot-ax" in call

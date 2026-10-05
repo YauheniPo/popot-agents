@@ -6,6 +6,8 @@ import json
 import re
 from pathlib import Path
 
+from popot_agents.runtime_config import RUNTIME
+
 
 DEFAULT_PATH = Path(__file__).with_name("config.json")
 
@@ -24,7 +26,8 @@ def load_ax_config(path: str | Path | None = None) -> dict:
     if not isinstance(ax, dict) or set(ax) != {
             "context", "atespace", "workspace_name", "task_resources", "task_debug",
             "cli_timeout_seconds", "route_timeout_seconds", "startup_timeout_seconds",
-            "startup_probe_interval_seconds", "session_backend"}:
+            "startup_probe_interval_seconds", "session_backend", "probe_timeout_seconds",
+            "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds"}:
         raise ValueError("AX config has invalid ax settings")
     if not isinstance(ax["context"], str) or not re.fullmatch(r"kind-[a-z0-9-]+", ax["context"]):
         raise ValueError("AX config ax.context must name a local kind context")
@@ -40,11 +43,14 @@ def load_ax_config(path: str | Path | None = None) -> dict:
     if type(ax["task_debug"]) is not bool:
         raise ValueError("AX config ax.task_debug must be boolean")
     for key in ("cli_timeout_seconds", "route_timeout_seconds", "startup_timeout_seconds",
-                "startup_probe_interval_seconds"):
+                "startup_probe_interval_seconds", "probe_timeout_seconds",
+                "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds"):
         if type(ax[key]) is not int or ax[key] <= 0:
             raise ValueError(f"AX config ax.{key} must be positive")
     if ax["route_timeout_seconds"] > 3600:
         raise ValueError("AX config ax.route_timeout_seconds must not exceed 3600")
+    if ax['route_timeout_seconds'] <= RUNTIME['worker']['max_timeout_seconds'] + ax['response_margin_seconds']:
+        raise ValueError('AX config ax.route_timeout_seconds must exceed shared worker max timeout and response margin')
     if ax["session_backend"] not in ("postgres", "file"):
         raise ValueError("AX config ax.session_backend must be postgres or file")
     proxy = settings["proxy"]
@@ -66,7 +72,7 @@ def load_ax_config(path: str | Path | None = None) -> dict:
     if type(delegation["enabled"]) is not bool:
         raise ValueError("AX config delegation.enabled must be boolean")
     for key, maximum in {"port": 65535, "max_depth": 8, "max_calls_per_turn": 32,
-                         "max_concurrent_tasks": 16, "turn_timeout_seconds": 300}.items():
+                         "max_concurrent_tasks": 16, "turn_timeout_seconds": RUNTIME["worker"]["max_timeout_seconds"]}.items():
         if type(delegation[key]) is not int or not 1 <= delegation[key] <= maximum:
             raise ValueError(f"AX config delegation.{key} is out of range")
     interval = delegation["poll_interval_seconds"]
