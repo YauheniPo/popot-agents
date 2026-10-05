@@ -11,6 +11,7 @@ from unittest.mock import patch
 from popot_agents.tools import execute_tool
 from popot_agents.worker.http_harness import run_http
 from popot_agents.orchestrator.main import create_server, load_agents, load_roles
+from popot_agents.runtime_config import RUNTIME
 
 
 class FakeChat:
@@ -131,6 +132,66 @@ class RoleApiTests(unittest.TestCase):
 
 
 class FeatureTeamConfigTests(unittest.TestCase):
+    def test_role_can_select_only_runtime_allowed_env_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "roles.json"
+            role = {"agent": "nous", "instructions": "x", "tools": [],
+                    "env_names": ["GITHUB_TOKEN"]}
+            path.write_text(json.dumps({"chat": role}))
+            with patch.dict(RUNTIME, {"role_env_names": ["GITHUB_TOKEN"]}):
+                loaded = load_roles(path, {"nous": FakeRunner()})["chat"]
+            self.assertEqual(loaded["env_names"], ["GITHUB_TOKEN"])
+            with patch.dict(RUNTIME, {"role_env_names": []}):
+                with self.assertRaisesRegex(ValueError, "env_names"):
+                    load_roles(path, {"nous": FakeRunner()})
+
+    def test_role_cron_validates_schedules_and_tasks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "roles.json"
+            role = {"agent": "nous", "instructions": "x", "tools": [],
+                    "cron": [{"schedule": "0 9 * * 1-5", "task": "Daily report"}]}
+            path.write_text(json.dumps({"analyst": role}))
+            self.assertEqual(load_roles(path, {"nous": FakeRunner()})["analyst"]["cron"], role["cron"])
+            for value in ([], [{"schedule": "bad", "task": "x"}],
+                          [{"schedule": "* * * * *", "task": ""}],
+                          [{"schedule": "* * * * *", "task": "x", "extra": True}]):
+                with self.subTest(value=value):
+                    role["cron"] = value
+                    path.write_text(json.dumps({"analyst": role}))
+                    with self.assertRaisesRegex(ValueError, "cron"):
+                        load_roles(path, {"nous": FakeRunner()})
+
+    def test_role_allowed_roles_accepts_other_roles_and_defaults_to_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "roles.json"
+            roles = {
+                "chat": {"agent": "nous", "instructions": "x", "tools": [],
+                         "allowed_roles": ["analyst"]},
+                "analyst": {"agent": "nous", "instructions": "x", "tools": []},
+            }
+            path.write_text(json.dumps(roles))
+            loaded = load_roles(path, {"nous": FakeRunner()})
+            self.assertEqual(loaded["chat"]["allowed_roles"], ["analyst"])
+            self.assertEqual(loaded["analyst"].get("allowed_roles", []), [])
+            roles["chat"]["allowed_roles"] = []
+            path.write_text(json.dumps(roles))
+            self.assertEqual(load_roles(path, {"nous": FakeRunner()})["chat"]["allowed_roles"], [])
+
+    def test_role_allowed_roles_rejects_unknown_self_duplicate_and_invalid_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "roles.json"
+            roles = {
+                "chat": {"agent": "nous", "instructions": "x", "tools": []},
+                "analyst": {"agent": "nous", "instructions": "x", "tools": []},
+            }
+            for value in (None, "analyst", ["missing"], ["chat"],
+                          ["analyst", "analyst"], [1], [{}]):
+                with self.subTest(value=value):
+                    roles["chat"]["allowed_roles"] = value
+                    path.write_text(json.dumps(roles))
+                    with self.assertRaisesRegex(ValueError, "allowed_roles"):
+                        load_roles(path, {"nous": FakeRunner()})
+
     def test_role_ttl_accepts_zero_and_rejects_invalid_values(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "roles.json"
@@ -156,6 +217,17 @@ class FeatureTeamConfigTests(unittest.TestCase):
             self.assertGreater(len(roles[name]["instructions"]), 80, name)
         self.assertIn("calculate", roles["data_analyst"]["tools"])
         self.assertEqual(roles["product_designer"]["tools"], [])
+        self.assertEqual(roles["backend_engineer"]["env_names"],
+                         ["GITHUB_PERSONAL_ACCESS_TOKEN"])
+
+    def test_demo_cron_role_has_daily_utc_time_task(self):
+        config = Path(__file__).resolve().parents[1] / "config"
+        roles = load_roles(config / "roles.json", load_agents(config / "agents.json"))
+        demo = roles["cron_demo"]
+        self.assertEqual(demo["agent"], "openrouter")
+        self.assertEqual(demo["tools"], ["utc_time"])
+        self.assertEqual(demo["cron"], [{"schedule": "0 9 * * *",
+                                        "task": "Use utc_time and report the current UTC date and time."}])
 
 
 class ToolLoopTests(unittest.TestCase):

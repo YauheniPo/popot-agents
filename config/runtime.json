@@ -49,5 +49,7 @@
     "default_max_tool_rounds": 5,
     "temperature": null,
     "max_tokens": null
-  }
+  },
+  "role_env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
 }
+ 

@@ -33,6 +33,7 @@ if [[ "$(git -C "$LOCAL/src/ax" rev-parse HEAD)" != "$AX_COMMIT" ]]; then
   echo "Unexpected AX checkout; expected $AX_VERSION at $AX_COMMIT" >&2
   exit 1
 fi
+CONTROLLER_TOOLS_VERSION="$(python3 "$ROOT/ax_local/cluster/controller_tools.py" "$LOCAL/src/ax")"
 
 if [[ ! -d "$LOCAL/src/substrate/.git" ]]; then
   git clone --depth 1 --branch main https://github.com/agent-substrate/substrate.git "$LOCAL/src/substrate"
@@ -93,6 +94,7 @@ kubectl --context "kind-${CLUSTER}" apply -f "$LOCAL/src/ax/deploy/redis.yaml"
 kubectl --context "kind-${CLUSTER}" set env deployment/ax-controller -n ax-system \
   AX_SNAPSHOTS_BUCKET=gs://ate-snapshots/popot-ax/
 kubectl --context "kind-${CLUSTER}" rollout status deployment/ax-controller -n ax-system --timeout=300s
+printf '%s\n' "$CONTROLLER_TOOLS_VERSION" > "$LOCAL/controller-tools-version"
 kubectl --context "kind-${CLUSTER}" rollout status deployment/ax-server -n ax-system --timeout=300s
 
 IMAGE="$REGISTRY/popot-agent-ax:local"

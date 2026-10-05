@@ -6,6 +6,7 @@ RUN useradd --create-home --uid 10001 mcp
 WORKDIR /app
 COPY popot_agents/__init__.py popot_agents/mcp_server.py /app/popot_agents/
 COPY popot_agents/runtime_config.py /app/popot_agents/
+COPY popot_agents/role_env.py /app/popot_agents/
 COPY config/runtime.json /app/config/runtime.json
 USER mcp
 

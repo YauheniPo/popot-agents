@@ -224,7 +224,7 @@ service, not an individual user; the API has no client authentication.
 
 Roles live in the separate [config/roles.json](config/roles.json) file. Each role selects an
 `agent` profile from `config/agents.json` and defines instructions, built-in `tools`,
-`permissions`, and optional `mcpServers`. Set `AGENT_ROLES_FILE` to use another roles
+`permissions`, and optional `mcpServers` and `allowed_roles`. Set `AGENT_ROLES_FILE` to use another roles
 file. Rebuild the orchestrator image after editing it. Invalid agents or tool names fail at
 startup. Requests can select a configured role by name; they cannot define
 instructions or tools themselves.
@@ -262,10 +262,36 @@ its instructions/tools are saved with the chat and restored even if `config/role
 has changed. To switch roles, start a new chat. A mismatched `agent` or `role`
 on a request returns HTTP 409.
 
-Each request starts one selected specialist; this config does not automatically
-delegate work between roles. The backend worker starts with an empty workspace;
+`allowed_roles` lists the other roles an AX agent may call through `delegate_task`;
+for example, `"allowed_roles": ["backend_engineer", "qa_engineer"]` inside
+`tech_lead`. Omit the field or use `[]` to disable delegation for that role.
+Unknown roles, duplicates, and the role itself are rejected at startup.
+See [AX delegation](ax_local/README.md#делегирование-задач-между-ax-агентами)
+for runtime settings and a test request. The Docker orchestrator starts one
+selected specialist for each request. The backend worker starts with an empty workspace;
 provide a public repository URL to clone, or relevant code in the request.
 No company data source is mounted.
+
+To forward an operator-provided credential to one role, first allow its **name**
+in `config/runtime.json`, currently
+`"role_env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]`.
+Then select it in that role's `config/roles.json` entry with
+`"env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]`, and set
+`GITHUB_PERSONAL_ACCESS_TOKEN` in the orchestrator/AX
+API environment. Other roles do not receive it. Existing runtime variables
+remain available as before; shell and MCP tools receive their existing small
+baseline plus only names selected by the role and allowed by runtime config.
+Missing or empty selected values fail that role's startup. Keep values out of
+`roles.json`; role session records store names, not credential values. Reserved
+runtime variable names such as `HARNESS_*` and `AX_*` cannot be selected. Removing
+a name from the runtime allowlist also blocks it in previously saved sessions.
+AX v0.3.1 passes the selected values as literal Task environment values, so
+operators with access to AX Task specifications can see them. Docker container
+environment values are similarly visible to Docker administrators.
+
+AX roles can also define a `cron` list of `{ "schedule": "0 9 * * 1-5", "task": "..." }`
+entries. The AX API runs them in UTC as separate persisted sessions. See
+[AX scheduled tasks](ax_local/README.md#задачи-по-расписанию) for syntax and lifecycle.
 
 `calculate` supports basic `+`, `-`, `*`, `/` arithmetic and parentheses.
 `utc_time` returns the current UTC timestamp. Built-in tools run inside the

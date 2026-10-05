@@ -4,7 +4,13 @@ import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 from urllib import request
+
+# The tool runs with a stripped environment from /workspace. Resolve only our
+# installed code; do not import packages supplied by the writable workspace.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import MAX_TOOL_OUTPUT, WORKSPACE_ROOT, _public_url, workspace_path

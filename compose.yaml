@@ -29,6 +29,7 @@ services:
             - .dockerignore
             - popot_agents/__init__.py
             - popot_agents/runtime_config.py
+            - popot_agents/role_env.py
             - popot_agents/tools.py
             - popot_agents/worker/**
             - config/runtime.json
@@ -78,6 +79,7 @@ services:
             - .dockerignore
             - popot_agents/__init__.py
             - popot_agents/runtime_config.py
+            - popot_agents/role_env.py
             - popot_agents/tools.py
             - popot_agents/orchestrator/**
             - config/**
@@ -106,5 +108,6 @@ services:
             - .dockerignore
             - popot_agents/__init__.py
             - popot_agents/runtime_config.py
+            - popot_agents/role_env.py
             - popot_agents/mcp_server.py
             - config/runtime.json

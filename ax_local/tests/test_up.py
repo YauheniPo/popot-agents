@@ -67,6 +67,17 @@ class UpScriptTests(unittest.TestCase):
         return subprocess.run(["bash", str(self.ax / "up.sh")], env=self.env,
                               text=True, capture_output=True, check=False)
 
+    def prepare_local(self) -> None:
+        local = self.ax / ".local"
+        (local / "bin").mkdir(parents=True)
+        (local / "src/ax/.git").mkdir(parents=True)
+        for name in ("kubeconfig", "kubeconfig-container", "worker-image"):
+            (local / name).write_text("ready\n", encoding="utf-8")
+        for name in ("ax", "ko"):
+            binary = local / "bin" / name
+            binary.write_text("ready\n", encoding="utf-8")
+            binary.chmod(0o755)
+
     def test_first_run_bootstraps_then_starts_compose(self) -> None:
         result = self.run_up()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -78,13 +89,7 @@ class UpScriptTests(unittest.TestCase):
                             for call in calls if call.startswith("kubectl ")))
 
     def test_repeat_run_refreshes_worker_and_compose(self) -> None:
-        local = self.ax / ".local"
-        (local / "bin").mkdir(parents=True)
-        for name in ("kubeconfig", "kubeconfig-container", "worker-image"):
-            (local / name).write_text("ready\n", encoding="utf-8")
-        ax_binary = local / "bin" / "ax"
-        ax_binary.write_text("ready\n", encoding="utf-8")
-        ax_binary.chmod(0o755)
+        self.prepare_local()
         result = self.run_up()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text(encoding="utf-8").splitlines()
@@ -92,13 +97,7 @@ class UpScriptTests(unittest.TestCase):
         self.assertNotIn("bootstrap.sh", calls)
 
     def test_repeat_run_starts_stopped_local_registry(self) -> None:
-        local = self.ax / ".local"
-        (local / "bin").mkdir(parents=True)
-        for name in ("kubeconfig", "kubeconfig-container", "worker-image"):
-            (local / name).write_text("ready\n", encoding="utf-8")
-        ax_binary = local / "bin" / "ax"
-        ax_binary.write_text("ready\n", encoding="utf-8")
-        ax_binary.chmod(0o755)
+        self.prepare_local()
         self.env["DOCKER_STOPPED"] = "kind-registry"
         result = self.run_up()
         self.assertEqual(result.returncode, 0, result.stderr)

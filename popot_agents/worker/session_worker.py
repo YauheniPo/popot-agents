@@ -77,10 +77,10 @@ def answer_with_cli(messages: list[dict[str, str]], instructions: str = "") -> s
     return run_harness(prompt)
 
 
-def serve() -> None:
+def serve(*, extra_tools: dict | None = None) -> None:
     role_config = json.loads(os.getenv("HARNESS_ROLE_JSON", "{}"))
     if os.getenv("HARNESS_SESSION_MODE") == "http":
-        answer = lambda messages: run_http(messages, role_config)
+        answer = lambda messages: run_http(messages, role_config, extra_tools=extra_tools)
     else:
         answer = lambda messages: answer_with_cli(messages, role_config.get("instructions", ""))
     conversation = Conversation(answer)

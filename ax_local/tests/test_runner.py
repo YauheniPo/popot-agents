@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -6,9 +7,34 @@ from unittest.mock import patch
 from ax_local.config import AX_CONFIG
 from ax_local.api.ax_runner import AxAgentRunner, AxChat
 from popot_agents.orchestrator.main import AgentRunError
+from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_task_adds_only_selected_role_env_values(self):
+        with patch.dict(RUNTIME, {"role_env_names": ["GITHUB_TOKEN"]}), \
+             patch.dict(os.environ, {"GITHUB_TOKEN": "selected-secret", "OTHER_TOKEN": "other-secret"}):
+            manifest = self.runner.task_manifest("0123456789abcdef", {
+                "instructions": "x", "tools": [], "env_names": ["GITHUB_TOKEN"]})
+        env = {item["name"]: item["value"] for item in manifest["spec"]["env"]}
+        self.assertEqual(env["GITHUB_TOKEN"], "selected-secret")
+        self.assertNotIn("OTHER_TOKEN", env)
+        self.assertNotIn("selected-secret", env["HARNESS_ROLE_JSON"])
+        self.assertEqual(json.loads(env["HARNESS_TOOL_ENV_NAMES_JSON"]), ["GITHUB_TOKEN"])
+        with patch.dict(RUNTIME, {"role_env_names": []}), \
+             patch.dict(os.environ, {"GITHUB_TOKEN": "selected-secret"}):
+            revoked = self.runner.task_manifest("0123456789abcdef", {
+                "env_names": ["GITHUB_TOKEN"]})
+        self.assertNotIn("GITHUB_TOKEN", {item["name"] for item in revoked["spec"]["env"]})
+        revoked_env = {item["name"]: item["value"] for item in revoked["spec"]["env"]}
+        self.assertEqual(json.loads(revoked_env["HARNESS_TOOL_ENV_NAMES_JSON"]), [])
+
+    def test_task_rejects_missing_role_env_without_exposing_values(self):
+        with patch.dict(RUNTIME, {"role_env_names": ["GITHUB_TOKEN"]}), \
+             patch.dict(os.environ, {"GITHUB_TOKEN": ""}):
+            with self.assertRaisesRegex(Exception, "GITHUB_TOKEN"):
+                self.runner.task_manifest("0123456789abcdef", {"env_names": ["GITHUB_TOKEN"]})
+
     def setUp(self):
         self.runner = AxAgentRunner(
             image="localhost:5001/popot-agent-ax@sha256:" + "a" * 64,
@@ -31,6 +57,17 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(env["HARNESS_SESSION_MODE"], "http")
         self.assertEqual(json.loads(env["HARNESS_ROLE_JSON"])["tools"], ["calculate"])
         self.assertNotIn("OPENROUTER_API_KEY", json.dumps(manifest))
+
+    def test_only_tool_roles_request_privilege_drop_capabilities(self):
+        for config in ({"tools": ["bash"]}, {"tools": ["write_file"]},
+                       {"mcpServers": {"fetch": {}}}, {"tools": ["calculate"]}, {}):
+            with self.subTest(config=config):
+                manifest = self.runner.task_manifest("0123456789abcdef", config)
+                env = {item["name"]: item["value"] for item in manifest["spec"]["env"]}
+                if config.get("mcpServers") or set(config.get("tools", [])) & {"bash", "write_file"}:
+                    self.assertEqual(env["POPOT_TOOLS_UID"], "10001")
+                else:
+                    self.assertNotIn("POPOT_TOOLS_UID", env)
 
     def test_task_uses_proxy_capability_not_provider_key(self):
         runner = AxAgentRunner(
@@ -95,6 +132,18 @@ class AxRunnerTests(unittest.TestCase):
             with self.assertRaises(AgentRunError):
                 self.runner.start_chat("0123456789abcdef")
         run.assert_called_once()
+
+    def test_expired_parent_deadline_prevents_child_start(self):
+        with patch.object(self.runner, "_run") as run, \
+             patch("ax_local.api.ax_runner.time.monotonic", return_value=20):
+            with self.assertRaisesRegex(TimeoutError, "deadline"):
+                self.runner.start_chat("0123456789abcdef", deadline=10)
+        run.assert_not_called()
+
+    def test_ax_manifest_gives_harness_the_role_turn_budget(self):
+        manifest = self.runner.task_manifest("0123456789abcdef", {"timeout_seconds": 300})
+        env = {item["name"]: item["value"] for item in manifest["spec"]["env"]}
+        self.assertEqual(env["HARNESS_TURN_TIMEOUT_SECONDS"], "300")
 
     def test_existing_task_is_replaced_after_api_restart(self):
         present = subprocess.CompletedProcess([], 0, "", "")

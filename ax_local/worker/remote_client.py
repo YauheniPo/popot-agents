@@ -17,7 +17,7 @@ def call(encoded: str) -> dict:
         raise ValueError("request must be a JSON object")
     socket_path = os.getenv("HARNESS_SOCKET_PATH", "/workspace/chat.sock")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(180)
+        connection.settimeout(float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS", "180")) + 10)
         connection.connect(socket_path)
         connection.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         chunks = []

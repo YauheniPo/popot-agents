@@ -10,7 +10,8 @@ if [[ ! -f "$ROOT/.env" ]]; then
 fi
 
 if [[ ! -s "$LOCAL/kubeconfig" || ! -s "$LOCAL/kubeconfig-container" || \
-      ! -s "$LOCAL/worker-image" || ! -x "$LOCAL/bin/ax" ]]; then
+      ! -s "$LOCAL/worker-image" || ! -x "$LOCAL/bin/ax" || \
+      ! -d "$LOCAL/src/ax/.git" || ! -x "$LOCAL/bin/ko" ]]; then
   bash "$ROOT/ax_local/bootstrap.sh"
   python3 "$ROOT/ax_local/cluster/router_timeout.py" \
     "$LOCAL/kubeconfig" "$ROOT/ax_local/config.json"

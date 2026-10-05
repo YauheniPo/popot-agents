@@ -5,6 +5,8 @@ import os
 import re
 from pathlib import Path
 
+from popot_agents.role_env import validate_role_env_names
+
 
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "config" / "runtime.json"
 FIELDS = {
@@ -41,8 +43,12 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
     config_path = Path(path or os.getenv("POPOT_RUNTIME_CONFIG", DEFAULT_PATH))
     with config_path.open(encoding="utf-8") as file:
         settings = json.load(file)
-    if not isinstance(settings, dict) or set(settings) != set(FIELDS):
-        raise ValueError("runtime config must define sessions, worker, timeouts, limits, logging and model")
+    if not isinstance(settings, dict) or set(settings) != set(FIELDS) | {"role_env_names"}:
+        raise ValueError("runtime config must define sessions, worker, timeouts, limits, logging, model and role_env_names")
+    try:
+        validate_role_env_names(settings["role_env_names"])
+    except ValueError as exc:
+        raise ValueError("runtime config has invalid role_env_names") from exc
     for section, fields in FIELDS.items():
         values = settings[section]
         if not isinstance(values, dict) or set(values) != fields:

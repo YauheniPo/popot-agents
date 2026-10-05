@@ -107,6 +107,27 @@ class PostgresSessionStore:
             """, (SESSION_RETENTION,)).fetchall()
         return {row[0] for row in rows}
 
+    def expired_ids(self) -> set[str]:
+        with self._connect() as connection:
+            rows = connection.execute("""
+                SELECT session_id FROM agent_sessions
+                WHERE created_at <= now() - %s::interval
+                    AND (role_config->>'ttl_seconds' IS DISTINCT FROM '0')
+            """, (SESSION_RETENTION,)).fetchall()
+        return {row[0] for row in rows}
+
+    def delete_expired(self, session_id: str) -> bool:
+        if not self._valid_id(session_id):
+            return False
+        with self._connect() as connection:
+            rows = connection.execute("""
+                DELETE FROM agent_sessions
+                WHERE session_id = %s AND created_at <= now() - %s::interval
+                    AND (role_config->>'ttl_seconds' IS DISTINCT FROM '0')
+                RETURNING session_id
+            """, (session_id, SESSION_RETENTION)).fetchall()
+        return bool(rows)
+
     def delete(self, session_id: str) -> None:
         if not self._valid_id(session_id):
             return

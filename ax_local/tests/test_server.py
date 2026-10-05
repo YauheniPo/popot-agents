@@ -37,11 +37,17 @@ class AxServerTests(unittest.TestCase):
             "AX_LOCAL_SESSION_BACKEND": "file",
         }
         with patch.dict(os.environ, environment), patch("ax_local.api.server.create_server") as create:
-            make_server()
+            server = make_server()
         roles = create.call_args.kwargs["roles"]
         self.assertEqual(roles["backend_engineer"]["agent"], "openrouter")
         self.assertIn("bash", roles["backend_engineer"]["tools"])
         self.assertEqual(set(create.call_args.args[0]), {"openrouter"})
+        self.assertNotIn("allowed_roles", server.delegation.policy)
+        self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst"])
+        env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
+        import json
+        self.assertEqual(json.loads(env["AX_DELEGATION_ROLES"]), roles["backend_engineer"]["allowed_roles"])
+        self.assertIn("Available roles: qa_engineer, analyst", roles["backend_engineer"]["instructions"])
 
     def test_container_bind_host_is_configurable(self):
         environment = {

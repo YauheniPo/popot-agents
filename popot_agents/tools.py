@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.role_env import validate_role_env_names
 
 WORKSPACE_ROOT = Path(os.getenv("TOOL_WORKSPACE_ROOT", "/workspace"))
 MAX_TOOL_OUTPUT = RUNTIME["limits"]["tool_output_chars"]
@@ -71,9 +72,11 @@ _UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
 
 def safe_tool_env() -> dict[str, str]:
-    """Do not forward model credentials or harness configuration to child tools."""
+    """Forward baseline variables and only role-selected credentials to tools."""
+    names = validate_role_env_names(json.loads(os.getenv("HARNESS_TOOL_ENV_NAMES_JSON", "[]")))
     return ({key: value for key, value in os.environ.items()
-             if key in {"PATH", "LANG", "LC_ALL", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR"}}
+             if key in {"PATH", "LANG", "LC_ALL", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+             or key in names}
             | {"HOME": str(WORKSPACE_ROOT), "GIT_TERMINAL_PROMPT": "0"})
 
 
@@ -126,7 +129,8 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
     if os.geteuid() == 0:
         options.update(user=10001, group=10001)
     completed = subprocess.run(
-        [sys.executable, "-m", "popot_agents.worker.file_worker", action], **options)
+        [sys.executable, "-I", str(Path(__file__).parent / "worker" / "file_worker.py"),
+         action], **options)
     if completed.returncode != 0:
         raise RuntimeError(f"{action} failed: {completed.stderr.strip()[:300]}")
     return completed.stdout
