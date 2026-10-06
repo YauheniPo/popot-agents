@@ -36,7 +36,7 @@ returns HTTP 503; `/healthz` remains available. `timeouts` covers
 model, MCP, tool, Docker, and database calls. `limits` sets request, history,
 tool output, and file sizes. `logging` sets how much of an MCP request body is
 recorded and the worker log tail and file size limits. `model` sets the default
-tool-round limit and optional
+tool-round limit, `request_retries` (a non-negative integer; 0 disables retries), and optional
 `temperature`/`max_tokens`; `null` omits either model parameter from requests.
 The same file is copied into the orchestrator, worker, and MCP images. Its
 values are validated at startup, so an invalid setting prevents that service
@@ -53,6 +53,10 @@ profile may add `"resources": {"memory": "2g", "cpus": 2}` and
 `ttl_seconds`, `timeout_seconds`, and `max_tool_rounds` remain in
 [config/roles.json](config/roles.json). Roles without `ttl_seconds` inherit
 `sessions.default_idle_seconds`; all bundled roles currently inherit 300 seconds.
+All bundled roles also inherit `model.default_max_tool_rounds` (12) from runtime.
+To override it for one agent role, add `"max_tool_rounds": 20` to that role in
+`config/roles.json`. Removing the field restores inheritance. Both values must
+be integers from 1 to 20; zero does not mean unlimited.
 Provider credentials and deployment
 ports remain in `.env`; existing `AGENT_CHAT_IDLE_SECONDS` and
 `MCP_UPSTREAM_TIMEOUT_SECONDS` process environment variables override their
@@ -224,10 +228,38 @@ service, not an individual user; the API has no client authentication.
 
 Roles live in the separate [config/roles.json](config/roles.json) file. Each role selects an
 `agent` profile from `config/agents.json` and defines instructions, built-in `tools`,
-`permissions`, and optional `mcpServers` and `allowed_roles`. Set `AGENT_ROLES_FILE` to use another roles
+`permissions`, and optional `mcpServers`, `allowed_roles`, `description`, and `skills`. Set `AGENT_ROLES_FILE` to use another roles
 file. Rebuild the orchestrator image after editing it. Invalid agents or tool names fail at
 startup. Requests can select a configured role by name; they cannot define
 instructions or tools themselves.
+
+Each role's `skills` list selects directories relative to the repository's
+[`skills/`](skills/README.md) folder, for example:
+
+```json
+"skills": ["engineering/codebase-design", "engineering/tdd"]
+```
+
+An omitted field or `[]` disables skills for that role. At worker startup, the
+harness loads the selected `SKILL.md` files and their Markdown references into
+the role instructions. This works for HTTP and CLI harnesses in Docker and AX.
+The worker emits a `skills_loaded` event containing names and prompt size.
+Scripts are bundled but never executed by the loader; skills do not grant tools
+or change permissions. Unknown paths, duplicates, symlinks and oversized content
+fail validation. The total skill prompt budget is
+`limits.skill_prompt_bytes` in `config/runtime.json` (131072 bytes by default).
+
+The selected files are baked into the images. After changing skills, rebuild:
+
+```bash
+docker compose up --build -d worker-image orchestrator mcp-server
+```
+
+For the AX stack use `bash ax_local/rebuild-worker.sh`. Running chat workers keep
+their startup snapshot. A resumed session keeps its saved skill selection and,
+if its worker has stopped, loads those skills from the new worker image. Start a
+new session to use a changed role selection. The imported upstream version and
+file checksums are recorded in `skills/upstream.json`.
 
 The feature team roles are:
 
@@ -236,8 +268,9 @@ The feature team roles are:
 | `product_manager` | User problem, scope, stories, acceptance and success criteria | `calculate` |
 | `product_designer` | User journey, screen states, accessibility and UX copy | — |
 | `tech_lead` | Architecture, contracts, task split and engineering risks | `calculate` |
-| `backend_engineer` | Clone repositories, edit backend code, run commands and inspect Git | `bash`, `read_file`, `write_file`, `git_clone`, `download_file`, `calculate`; Fetch and Git MCP |
+| `backend_engineer` | Clone repositories, edit backend code, run commands and inspect Git | `bash`, `read_file`, `write_file`, `git_clone`, `download_file`, `calculate`; Fetch, Git and GitHub MCP |
 | `frontend_engineer` | UI components, state, API integration and accessibility | — |
+| `code_reviewer` | Independent review of correctness, regressions, security and requirements | GitHub MCP reads and inline PR review comments |
 | `qa_engineer` | Test scenarios, expected results and regression risks | — |
 | `data_analyst` | Metrics, events, funnels and experiments | `calculate`, `utc_time` |
 
@@ -304,7 +337,7 @@ write a tool call as plain text instead of invoking it. With the installed
 
 ### Backend workspace, permissions, and MCP
 
-`backend_engineer` uses the configured Nous model and a private host directory
+`backend_engineer` uses the configured OpenRouter model and a private host directory
 under `~/.popot-agents/workspaces/` with Docker Compose. Its `permissions` set a persistent workspace, shell access,
 and internet access. The role's `tools` list allows Bash, file reads/writes,
 public HTTPS Git clone, and HTTP(S) file downloads. `git_clone` puts a shallow
@@ -323,6 +356,148 @@ through stdio. Only the listed server tools are exposed to the model: `fetch`,
 `mcpServers` commands and tool allowlists in `config/roles.json`, then rebuild the
 worker image if the new server package is not installed. MCP commands are
 operator configuration; API requests cannot supply them.
+
+`backend_engineer` also connects to the [official remote GitHub MCP server](https://github.com/github/github-mcp-server#remote-github-mcp-server)
+using Streamable HTTP. Its config contains only the token variable name:
+
+```json
+"github": {
+  "url": "https://api.githubcopilot.com/mcp/",
+  "bearer_token_env": "GITHUB_PERSONAL_ACCESS_TOKEN",
+  "tools": ["get_me", "get_file_contents", "search_repositories", "list_branches", "create_branch", "create_or_update_file", "create_pull_request"]
+}
+```
+
+The worker reads the token from the role-selected environment; set it in `.env`.
+All bundled roles require repository changes to be published through a separate
+working branch and a pull request, including README-only changes and unprotected
+branches. Direct publication requires the user's explicit permission to work
+without a PR for that task. An edit URL or named branch selects the PR base; it
+does not waive this rule. Agents pass the policy and any explicit exception to
+delegates, report missing branch/PR permissions instead of writing directly,
+and return the verified PR URL. PRs remain open unless merging is explicitly
+authorized. This is an agent instruction, not a server-enforced write restriction;
+role permissions and repository protections still apply.
+
+The token must have access to the target repositories and the requested operations
+(e.g. Contents write for file updates and Pull requests write for creating PRs).
+HTTPS is required and the token name must be in the role's `env_names` and runtime
+allowlist. Token values do not belong in JSON config or instructions. GitHub files
+should be read with GitHub MCP instead of fetching `github.com/.../edit/...` pages. Resolve repository refs independently: a profile repository and
+an application repository can use different default branches. The agents can use
+`search_repositories` with `minimal_output=false`, verify the exact `full_name`,
+and read `default_branch` from repository metadata. That value supplies the base
+for a new branch/PR unless the user explicitly selects another existing branch.
+`list_branches` verifies branch existence; its order does not identify the default.
+For an existing PR, the reviewer uses its actual `base.ref`, `head.ref` and
+`head.sha`, which need not match the repository default. For a repository
+link without a ref, omit `ref` when reading. On a missing-ref error, inspect
+`list_branches` rather than guessing `main` or `master`; confirm a different write
+target with the user if the explicitly requested branch does not exist.
+
+MCP `isError` results are returned to the model as failed tool results so it can
+correct arguments or choose another permitted tool within the existing turn and
+round limits. MCP transport errors and tool timeouts still fail the turn;
+an uncertain tool write is not automatically retried.
+
+### Checking the GitHub token
+
+Run the read-only checks for `YauheniPo/YauheniPo` and `YauheniPo/popot-agents`:
+
+```bash
+python3 scripts/check_github_token.py
+```
+
+To reproduce the agent's GitHub MCP file-write operation, install the same MCP
+SDK version used by the worker if it is missing from your virtual environment:
+
+```bash
+python3 -m pip install "mcp==1.30.0"
+python3 scripts/check_github_token.py --check-write
+```
+
+The write probe reads `GITHUB_PERSONAL_ACCESS_TOKEN` from `.env` (or `--env-file`),
+resolves the profile repository's default branch, and creates a unique
+`popot-token-check-*` branch through the REST API. It calls the official GitHub
+MCP `create_or_update_file` tool with the current README SHA and UTF-8 plain text,
+appending a diagnostic HTML comment. It verifies the saved content and deletes
+the temporary branch. This creates a real commit and may trigger repository
+automation. The default branch is unchanged. The original agent's exact content
+was not available in its logs; this tests the same tool with diagnostic content.
+
+Failures report their stage and MCP error text with the token redacted. If branch
+creation fails, the MCP write has not been attempted. Writes are never retried.
+A cleanup failure returns a nonzero exit status and names the branch to remove;
+a process kill or ambiguous branch-creation timeout may also require manual
+cleanup. Success confirms this local token's write operation on the temporary
+branch, not permission to update a protected default branch, publish PR reviews,
+or which token a running AX worker received.
+
+### Harness execution loops
+
+Every HTTP harness invocation owns its message history, tool results, deadline
+and round counter. All HTTP provider profiles and AX workers use this loop:
+model → tool calls → results/errors → model → final answer. A failed tool does
+not discard successful results from other calls in the same round.
+
+Invalid JSON/object arguments, local input validation errors, completed file or
+clone failures and MCP `isError` results are fed back to the model. The model can
+correct arguments or choose another permitted step. Shell exit codes already
+return as tool output. Before repeating an operation with possible partial
+effects, the model is instructed to inspect its result. Unknown/disallowed tools,
+tool transport failures, tool timeouts and runtime configuration errors still stop
+the turn; the harness does not blindly replay uncertain writes.
+
+For completion requests only, `model.request_retries` permits bounded retries on
+socket timeouts and HTTP 502/503/504. Each attempt resends the same conversation
+for the current round, including previous tool results. Completed tool calls are
+not replayed by the retry loop. Attempts share the original turn deadline, with
+each socket timeout capped by the remaining budget. They do not consume another
+tool round. HTTP 400/401/403, malformed responses and other network errors fail
+immediately. Logs include `attempt` and `model_retry`. Retrying generation can
+incur another provider charge; it does not guarantee a successful response.
+
+For the local `git_clone` tool, `directory` is a new folder name inside the
+workspace (for example `popot-agents`), not `/workspace/popot-agents` or a nested
+path. Its schema exposes the naming constraints. Missing clone arguments,
+invalid directory names and existing destinations are returned as failed tool
+results so the model can correct them within the round/turn budget.
+
+Limits use existing settings: role `max_tool_rounds` (otherwise
+`config/runtime.json → model.default_max_tool_rounds`) and role/profile
+`timeout_seconds`. Recovery consumes the same budget as ordinary steps; each new
+turn starts a fresh budget. These limits bound attempts, not guarantee completion.
+
+The configured Claude CLI profiles own their native agentic loop; their commands
+pass `--max-turns {max_turns}` using the same round setting. See the
+[Claude CLI reference](https://code.claude.com/docs/en/cli-reference).
+The wrapper also enforces `HARNESS_TURN_TIMEOUT_SECONDS` for CLI execution and
+does not restart a failed CLI process. Other custom CLI commands must implement
+their own tool loop; they can use the `{max_turns}` placeholder. The orchestrator
+supplies the time budget for both HTTP and CLI workers.
+
+`code_reviewer` has code-review, diagnosing-bugs, codebase-design, TDD and handoff
+skills, with GitHub tools for reading files, commits and PRs and publishing inline
+review comments. The reviewer has no file-edit or merge tools. In AX, engineers
+are instructed to delegate changed code to it and address findings before claiming
+completion. Each allowed specialist's `description` is included in the delegation
+tool schema; existing roles without that field fall back to their instructions.
+Reviewers cannot access the parent's workspace: pass the diff, source context,
+requirements and test results, or a readable repository/ref/PR. This is a model
+instruction, not a server-enforced review gate. Docker harnesses expose the reviewer
+as a selectable role; agent-to-agent delegation currently requires AX.
+
+When given a PR, the reviewer checks its diff and existing comments, creates a
+pending review pinned to the head SHA, adds findings at the relevant file/line,
+and submits with `event=COMMENT`. It verifies publication and returns links.
+Without a PR it returns findings to the author. A changed head SHA or an existing
+pending review belonging to another run stops publication and is reported.
+The token needs **Pull requests: write** in addition to code read access.
+GitHub attributes comments to the account owning the token. Review submission is
+model-directed; approvals, merges and source edits are forbidden by its instructions.
+
+After these changes run `bash ax_local/up.sh` and start a new session
+(`"sessionId": ""`) to load the new tools and instructions.
 
 ```bash
 curl -sS http://127.0.0.1:8000/messages \
@@ -460,8 +635,8 @@ images that still contain the old flat Python files before using them with this
 version. `{task}` and `{model}` are replaced as individual arguments;
 without `{task}`, the worker sends the task on stdin. The CLI's stdout becomes
 the answer. A CLI can run multiple steps or use tools; the included HTTP harness
-makes at most five completion requests by default. `backend_engineer` allows
-up to twelve rounds via `max_tool_rounds` in its role config.
+uses the global `model.default_max_tool_rounds` limit from `config/runtime.json`.
+Any role can override it with its optional `max_tool_rounds` field.
 
 The `nous` HTTP profile uses a Nous Portal API key directly. This is separate
 from Hermes Agent's Portal integration, which uses OAuth and refreshes its own

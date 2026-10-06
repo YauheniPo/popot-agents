@@ -204,7 +204,9 @@ class DelegationTests(unittest.TestCase):
         self.policy["max_depth"] = 1
         failures = []
         def callback(chat, _):
-            token = self.service.worker_environment(chat.session_id, chat.config)["AX_DELEGATION_TOKEN"]
+            self.assertEqual(self.service.worker_environment(chat.session_id, chat.config), {})
+            # Even a caller holding a previously issued capability cannot bypass the depth limit.
+            token = self.service.grants[chat.session_id].token
             with self.assertRaisesRegex(A2AError, "depth limit"):
                 self.send(token=token, role="qa_engineer")
             failures.append("denied")
@@ -332,6 +334,17 @@ class DelegationTests(unittest.TestCase):
         config = self.service.prepare_config(self.parent, {"tools": []})
         self.assertEqual(config["_ax_role"], "tech_lead")
         self.assertEqual(config["timeout_seconds"], 300)
+
+    def test_catalog_uses_current_descriptions_and_excludes_ancestors(self):
+        import json
+        self.roles["qa_engineer"]["description"] = "Plan regression checks."
+        config = {**self.roles["backend_engineer"], "_ax_delegation": {
+            "root_session_id": self.parent, "lineage": ["tech_lead", "backend_engineer"]}}
+        env = self.service.worker_environment("2222222222222222", config)
+        self.assertEqual(json.loads(env["AX_DELEGATION_ROLES"]), ["qa_engineer"])
+        self.assertEqual(json.loads(env["AX_DELEGATION_DESCRIPTIONS"]),
+                         {"qa_engineer": "Plan regression checks."})
+        self.assertEqual(self.service.card("qa_engineer")["description"], "Plan regression checks.")
 
     def test_saved_role_settings_cannot_expand_current_delegation_permissions(self):
         parent = "1111111111111111"

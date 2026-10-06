@@ -11,10 +11,12 @@ fi
 
 if [[ ! -s "$LOCAL/kubeconfig" || ! -s "$LOCAL/kubeconfig-container" || \
       ! -s "$LOCAL/worker-image" || ! -x "$LOCAL/bin/ax" || \
-      ! -d "$LOCAL/src/ax/.git" || ! -x "$LOCAL/bin/ko" ]]; then
+      ! -d "$LOCAL/src/ax/.git" || ! -d "$LOCAL/src/substrate/.git" || ! -x "$LOCAL/bin/ko" ]]; then
   bash "$ROOT/ax_local/bootstrap.sh"
+  python3 "$ROOT/ax_local/cluster/substrate_cleanup.py" --apply
   python3 "$ROOT/ax_local/cluster/router_timeout.py" \
     "$LOCAL/kubeconfig" "$ROOT/ax_local/config.json"
+  python3 "$ROOT/ax_local/cluster/worker_health.py"
   docker compose --env-file "$ROOT/.env" -f "$ROOT/ax_local/compose.yaml" \
     up --build -d mcp-server
 else
@@ -28,6 +30,7 @@ else
       docker start "$container" >/dev/null
     fi
   done
+  python3 "$ROOT/ax_local/cluster/substrate_cleanup.py" --apply
   python3 "$ROOT/ax_local/cluster/router_timeout.py" \
     "$LOCAL/kubeconfig" "$ROOT/ax_local/config.json"
   bash "$ROOT/ax_local/rebuild-worker.sh"

@@ -9,7 +9,8 @@ from urllib import error, request
 from urllib.parse import urlsplit
 
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
-from popot_agents.tools import TOOL_SCHEMAS, execute_tool
+from popot_agents.skills import prepare_role_config
+from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool
 from . import mcp_client
 
 
@@ -27,13 +28,59 @@ def _trace_arguments(name: str, arguments: dict) -> dict:
         return {"path": arguments.get("path")}
     if name == "write_file":
         return {"path": arguments.get("path"),
-                "content_chars": len(arguments.get("content", ""))}
+                "content_chars": len(arguments["content"]) if isinstance(arguments.get("content"), str) else None}
     if name in {"git_clone", "download_file"}:
-        return {"url_host": urlsplit(arguments.get("url", "")).hostname,
+        try:
+            host = urlsplit(arguments.get("url", "")).hostname
+        except (ValueError, TypeError, AttributeError):
+            host = None
+        return {"url_host": host,
                 **{key: arguments.get(key) for key in ("directory", "path") if key in arguments}}
     if name == "bash":
-        return {"command_chars": len(arguments.get("command", ""))}
+        return {"command_chars": len(arguments["command"]) if isinstance(arguments.get("command"), str) else None}
     return {"argument_keys": sorted(arguments)}
+
+
+def _model_request(call, *, round_number, messages, schemas, remaining_seconds):
+    """Retry only completion generation; tools run after a complete response."""
+    attempts = 1 + RUNTIME["model"]["request_retries"]
+    for attempt in range(1, attempts + 1):
+        request_timeout = min(RUNTIME["timeouts"]["model_request_seconds"], remaining_seconds())
+        started_at = time.monotonic()
+        _trace("model_request", round=round_number, attempt=attempt, message_count=len(messages),
+               timeout_seconds=round(request_timeout, 3),
+               available_tools=[schema["function"]["name"] for schema in schemas])
+        print(f"LLM request started round={round_number} attempt={attempt}", file=sys.stderr, flush=True)
+        retryable = False
+        try:
+            with request.urlopen(call, timeout=request_timeout) as response:
+                result = json.load(response)
+        except error.HTTPError as exc:
+            code = exc.code
+            exc.close()
+            failure = f"model endpoint returned HTTP {code}"
+            retryable = code in {502, 503, 504}
+            _trace("model_http_error", round=round_number, attempt=attempt, status=code)
+        except (TimeoutError, error.URLError) as exc:
+            if isinstance(exc, TimeoutError) or isinstance(exc.reason, TimeoutError):
+                elapsed = time.monotonic() - started_at
+                _trace("model_timeout", round=round_number, attempt=attempt,
+                       elapsed_seconds=round(elapsed, 1), timeout_seconds=round(request_timeout, 3))
+                failure = (f"model request timed out (round={round_number}, "
+                           f"socket timeout={request_timeout:.1f}s, elapsed={elapsed:.1f}s, "
+                           f"attempt={attempt}/{attempts})")
+                retryable = True
+            else:
+                failure = "model endpoint is unreachable"
+        else:
+            print(f"LLM response received after {time.monotonic() - started_at:.1f}s",
+                  file=sys.stderr, flush=True)
+            return result
+        if not retryable or attempt == attempts:
+            raise RuntimeError(failure) from None
+        remaining = remaining_seconds()
+        _trace("model_retry", round=round_number, next_attempt=attempt + 1,
+               reason=failure, remaining_seconds=round(remaining, 3))
 
 
 def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
@@ -55,7 +102,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         return remaining
 
     messages = [{"role": "user", "content": task}] if isinstance(task, str) else list(task)
-    role_config = role_config or {}
+    role_config = prepare_role_config(role_config)
     instructions = role_config.get("instructions", "")
     allowed = role_config.get("tools", [])
     mcp_servers = role_config.get("mcpServers", {})
@@ -81,7 +128,6 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         headers["Authorization"] = f"Bearer {key}"
     for round_number in range(1, role_config.get("max_tool_rounds",
                                              RUNTIME["model"]["default_max_tool_rounds"]) + 1):
-        request_timeout = min(RUNTIME["timeouts"]["model_request_seconds"], remaining_seconds())
         body = {"model": model, "messages": messages}
         body.update(model_parameters)
         if schemas:
@@ -90,24 +136,8 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             f"{base_url}/chat/completions", data=json.dumps(body).encode("utf-8"),
             headers=headers, method="POST",
         )
-        started_at = time.monotonic()
-        _trace("model_request", round=round_number, message_count=len(messages),
-               available_tools=[schema["function"]["name"] for schema in schemas])
-        print(f"LLM request started round={round_number}",
-              file=sys.stderr, flush=True)
-        try:
-            with request.urlopen(call, timeout=request_timeout) as response:
-                result = json.load(response)
-        except error.HTTPError as exc:
-            print(f"LLM response HTTP {exc.code} after {time.monotonic() - started_at:.1f}s",
-                  file=sys.stderr, flush=True)
-            raise RuntimeError(f"model endpoint returned HTTP {exc.code}") from exc
-        except error.URLError as exc:
-            print(f"LLM request failed after {time.monotonic() - started_at:.1f}s",
-                  file=sys.stderr, flush=True)
-            raise RuntimeError("model endpoint is unreachable") from exc
-        print(f"LLM response received after {time.monotonic() - started_at:.1f}s",
-              file=sys.stderr, flush=True)
+        result = _model_request(call, round_number=round_number, messages=messages,
+                                schemas=schemas, remaining_seconds=remaining_seconds)
         remaining_seconds()
         try:
             message = result["choices"][0]["message"]
@@ -123,16 +153,24 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             for tool_call in calls:
                 remaining_seconds()
                 name = None
+                tool_started_at = time.monotonic()
                 try:
                     function = tool_call["function"]
                     name = function["name"]
-                    arguments = json.loads(function["arguments"])
+                    call_id = tool_call["id"]
+                    if not isinstance(name, str) or not isinstance(call_id, str) or not call_id:
+                        raise ValueError("tool name and call ID must be nonempty strings")
+                    if name not in extra_tools and name not in mcp_tools and name not in allowed:
+                        raise ValueError(f"tool is not allowed: {name}")
+                    try:
+                        arguments = json.loads(function["arguments"])
+                    except (json.JSONDecodeError, TypeError) as exc:
+                        raise ToolInputError("tool arguments must be valid JSON encoding an object") from exc
                     if not isinstance(arguments, dict):
-                        raise ValueError("tool arguments must be an object")
+                        raise ToolInputError("tool arguments must be an object")
                     _trace("tool_call", round=round_number, name=name,
                            call_id=tool_call["id"],
                            arguments=_trace_arguments(name, arguments))
-                    tool_started_at = time.monotonic()
                     if name in extra_tools:
                         output = extra_tools[name]["call"](
                             arguments, timeout_seconds=remaining_seconds(),
@@ -145,7 +183,15 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     else:
                         output = execute_tool(name, arguments, allowed,
                                               timeout_seconds=remaining_seconds())
-                    call_id = tool_call["id"]
+                except (ToolInputError, ToolExecutionError, mcp_client.MCPToolError) as exc:
+                    _trace("tool_error", round=round_number, name=name, call_id=call_id,
+                           error_type=type(exc).__name__, recoverable=True)
+                    output = json.dumps({
+                        "isError": True, "error": str(exc),
+                        "next_step": "Correct the arguments or choose another permitted step. "
+                                     "Inspect any partial effects before repeating a write. "
+                                     "Do not claim success without verification.",
+                    }, ensure_ascii=False)
                 except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
                     _trace("tool_error", round=round_number, name=name,
                            error_type=type(exc).__name__)

@@ -1,12 +1,52 @@
+import io
 import json
 import unittest
-from unittest.mock import patch
+from contextlib import redirect_stderr
+from urllib.error import URLError
+from unittest.mock import Mock, patch
 
 from ax_local.config import AX_CONFIG
-from ax_local.api.provider_proxy import dispatch_request, make_upstream_request, resolve_provider
+from ax_local.api.provider_proxy import dispatch_request, make_upstream_request, resolve_provider, start_proxy
+from popot_agents.runtime_config import RUNTIME
 
 
 class ProviderProxyTests(unittest.TestCase):
+    def test_timeout_is_logged_without_secrets_and_returns_gateway_timeout(self):
+        selected = resolve_provider('openrouter', 'example/model', self.profiles,
+                                    {'OPENROUTER_API_KEY': 'private-key'})
+        for failure in (TimeoutError('private-key'), URLError(TimeoutError('private-key'))):
+            with self.subTest(failure=type(failure).__name__), \
+                 patch('ax_local.api.provider_proxy.request.urlopen', side_effect=failure) as call, \
+                 redirect_stderr(io.StringIO()) as logs:
+                status, _ = dispatch_request(selected, 'capability', '/v1/chat/completions',
+                                             'Bearer capability', b'{"model":"example/model"}')
+                self.assertEqual(status, 504)
+                self.assertLess(call.call_args.kwargs['timeout'],
+                                RUNTIME['timeouts']['model_request_seconds'])
+                call.assert_called_once()
+                event = json.loads(logs.getvalue())
+                self.assertEqual(event['event'], 'model_upstream_timeout')
+                self.assertEqual(event['provider'], 'openrouter')
+                self.assertNotIn('private-key', logs.getvalue())
+                self.assertNotIn('capability', logs.getvalue())
+
+    def test_proxy_handles_disconnected_client_at_headers_or_body(self):
+        with patch('ax_local.api.provider_proxy.ThreadingHTTPServer') as server, \
+             patch('ax_local.api.provider_proxy.threading.Thread'):
+            start_proxy(Mock(), 'capability')
+        handler_class = server.call_args.args[1]
+        for stage in ('end_headers', 'write'):
+            with self.subTest(stage=stage):
+                handler = handler_class.__new__(handler_class)
+                handler.send_response = Mock()
+                handler.send_header = Mock()
+                handler.end_headers = Mock()
+                handler.wfile = Mock()
+                target = handler.end_headers if stage == 'end_headers' else handler.wfile.write
+                target.side_effect = BrokenPipeError()
+                handler._reply(504, b'{}')
+                self.assertTrue(handler.close_connection)
+
     def setUp(self):
         self.profiles = {
             "openrouter": {

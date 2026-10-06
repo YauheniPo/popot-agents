@@ -17,6 +17,15 @@ from popot_agents.role_env import validate_role_env_names
 
 WORKSPACE_ROOT = Path(os.getenv("TOOL_WORKSPACE_ROOT", "/workspace"))
 MAX_TOOL_OUTPUT = RUNTIME["limits"]["tool_output_chars"]
+CLONE_DIRECTORY_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}"
+
+
+class ToolInputError(ValueError):
+    """Correctable, safe-to-report rejection before a tool performs any action."""
+
+
+class ToolExecutionError(RuntimeError):
+    """A completed tool reported failure; inspect effects before choosing another step."""
 
 
 TOOL_SCHEMAS = {
@@ -59,7 +68,14 @@ TOOL_SCHEMAS.update({
                         {"path": {"type": "string"}, "content": {"type": "string"}},
                         ["path", "content"]),
     "git_clone": _tool("git_clone", "Clone a public HTTPS Git repository into the workspace.",
-                       {"url": {"type": "string"}, "directory": {"type": "string"}},
+                       {"url": {"type": "string"}, "directory": {
+                           "type": "string", "minLength": 1, "maxLength": 80,
+                           "pattern": "^" + CLONE_DIRECTORY_PATTERN + "$",
+                           "description": "New folder name inside the workspace, e.g. popot-agents. "
+                                          "Use only letters, digits, dots, underscores and hyphens; "
+                                          "start with a letter or digit. No absolute paths, slashes "
+                                          "or existing folders.",
+                       }},
                        ["url", "directory"]),
     "download_file": _tool("download_file", "Download a public HTTP(S) file into the workspace, within the configured size limit.",
                            {"url": {"type": "string"}, "path": {"type": "string"}},
@@ -82,21 +98,21 @@ def safe_tool_env() -> dict[str, str]:
 
 def workspace_path(path: str) -> Path:
     if not isinstance(path, str) or not path or len(path) > 300:
-        raise ValueError("path is required")
+        raise ToolInputError("path is required")
     root = WORKSPACE_ROOT.resolve()
     candidate = (root / path).resolve()
     if not candidate.is_relative_to(root) or candidate == root:
-        raise ValueError("path is outside workspace")
+        raise ToolInputError("path is outside workspace")
     return candidate
 
 
 def _public_url(value: str, https_only: bool = False) -> str:
     if not isinstance(value, str) or len(value) > 2000:
-        raise ValueError("valid URL is required")
+        raise ToolInputError("valid URL is required")
     parsed = urlsplit(value)
     schemes = {"https"} if https_only else {"http", "https"}
     if parsed.scheme not in schemes or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("public HTTPS URL is required" if https_only else "public HTTP(S) URL is required")
+        raise ToolInputError("public HTTPS URL is required" if https_only else "public HTTP(S) URL is required")
     return value
 
 
@@ -132,7 +148,8 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
         [sys.executable, "-I", str(Path(__file__).parent / "worker" / "file_worker.py"),
          action], **options)
     if completed.returncode != 0:
-        raise RuntimeError(f"{action} failed: {completed.stderr.strip()[:300]}")
+        raise ToolExecutionError(f"{action} failed with exit code {completed.returncode}; "
+                                 "check the path, file permissions and workspace state before retrying")
     return completed.stdout
 
 
@@ -144,9 +161,9 @@ def _evaluate(node):
     elif isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
         value = _UNARY[type(node.op)](_evaluate(node.operand))
     else:
-        raise ValueError("unsupported expression")
+        raise ToolInputError("unsupported expression")
     if not -1e12 <= value <= 1e12:
-        raise ValueError("result is out of range")
+        raise ToolInputError("result is out of range")
     return value
 
 
@@ -155,58 +172,63 @@ def execute_tool(name: str, arguments: dict, allowed: list[str],
     if name not in allowed or name not in TOOL_SCHEMAS:
         raise ValueError(f"tool is not allowed: {name}")
     if not isinstance(arguments, dict):
-        raise ValueError("tool arguments must be an object")
+        raise ToolInputError("tool arguments must be an object")
     if name == "bash":
         if set(arguments) != {"command"} or not isinstance(arguments["command"], str) \
                 or len(arguments["command"]) > 4000:
-            raise ValueError("bash requires a command up to 4000 characters")
+            raise ToolInputError("bash requires a command up to 4000 characters")
         timeout = RUNTIME["timeouts"]["tool_command_seconds"]
         return _run_command(["bash", "--noprofile", "--norc", "-c", arguments["command"]],
                             timeout=min(timeout, timeout_seconds) if timeout_seconds is not None else timeout)
     if name == "read_file":
         if set(arguments) != {"path"}:
-            raise ValueError("read_file requires path")
+            raise ToolInputError("read_file requires path")
         workspace_path(arguments["path"])
         return _file_action("read", arguments, timeout_seconds)
     if name == "write_file":
         if set(arguments) != {"path", "content"} or not isinstance(arguments["content"], str) \
                 or len(arguments["content"].encode("utf-8")) > RUNTIME["limits"]["write_file_bytes"]:
-            raise ValueError(f"write_file requires path and content up to {RUNTIME['limits']['write_file_bytes']} bytes")
+            raise ToolInputError(f"write_file requires path and content up to {RUNTIME['limits']['write_file_bytes']} bytes")
         workspace_path(arguments["path"])
         return _file_action("write", arguments, timeout_seconds)
     if name == "git_clone":
         if set(arguments) != {"url", "directory"}:
-            raise ValueError("git_clone requires url and directory")
+            raise ToolInputError("git_clone requires url and directory")
         url = _public_url(arguments["url"], https_only=True)
         directory = arguments["directory"]
-        if not isinstance(directory, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", directory):
-            raise ValueError("directory must be a simple name")
+        if not isinstance(directory, str) or not re.fullmatch(CLONE_DIRECTORY_PATTERN, directory):
+            raise ToolInputError(
+                "directory must be a simple name inside the workspace, e.g. popot-agents "
+                "(1-80 letters, digits, dots, underscores or hyphens; start with a letter or digit). "
+                "Do not pass an absolute path or slashes.")
         destination = workspace_path(directory)
         if destination.exists():
-            raise ValueError("clone destination already exists")
+            raise ToolInputError("clone destination already exists; use the existing checkout "
+                                 "or choose a different directory name")
         result = _run_command(["git", "clone", "--depth", "1", "--", url, str(destination)],
                               timeout=min(RUNTIME["timeouts"]["git_clone_seconds"], timeout_seconds)
                               if timeout_seconds is not None else RUNTIME["timeouts"]["git_clone_seconds"])
         if not result.startswith("exit_code=0\n"):
-            raise RuntimeError(result)
+            raise ToolExecutionError("git_clone failed; check repository access and inspect the "
+                                     "destination for a partial checkout before retrying")
         return f"cloned to {destination}\n{result}"
     if name == "download_file":
         if set(arguments) != {"url", "path"}:
-            raise ValueError("download_file requires url and path")
+            raise ToolInputError("download_file requires url and path")
         url = _public_url(arguments["url"])
         workspace_path(arguments["path"])
         return _file_action("download", {"url": url, "path": arguments["path"]}, timeout_seconds)
     if name == "utc_time":
         if arguments:
-            raise ValueError("utc_time takes no arguments")
+            raise ToolInputError("utc_time takes no arguments")
         return datetime.now(timezone.utc).isoformat()
     if set(arguments) != {"expression"} or not isinstance(arguments["expression"], str):
-        raise ValueError("calculate requires expression")
+        raise ToolInputError("calculate requires expression")
     expression = arguments["expression"]
     if len(expression) > 100:
-        raise ValueError("expression is too long")
+        raise ToolInputError("expression is too long")
     try:
         value = _evaluate(ast.parse(expression, mode="eval").body)
     except (SyntaxError, ZeroDivisionError, OverflowError, RecursionError) as exc:
-        raise ValueError("invalid arithmetic expression") from exc
+        raise ToolInputError("invalid arithmetic expression") from exc
     return str(value)

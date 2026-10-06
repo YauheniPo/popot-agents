@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMAGE="localhost:5001/popot-agent-ax:local"
 IMAGE_FILE="$ROOT/ax_local/.local/worker-image"
 
-for program in docker go; do
+for program in docker go python3 kubectl; do
   if ! command -v "$program" >/dev/null 2>&1; then
     echo "Missing prerequisite: $program" >&2
     exit 1
@@ -15,6 +15,7 @@ if [[ ! -f "$IMAGE_FILE" ]]; then
   echo "AX local cluster is not bootstrapped; run ax_local/bootstrap.sh first" >&2
   exit 1
 fi
+python3 "$ROOT/ax_local/cluster/worker_health.py"
 bash "$ROOT/ax_local/cluster/controller_tools.sh"
 
 docker build --platform "linux/$(go env GOARCH)" \

@@ -48,12 +48,14 @@ def load_ax_config(path: str | Path | None = None) -> dict:
     if ax["session_backend"] not in ("postgres", "file"):
         raise ValueError("AX config ax.session_backend must be postgres or file")
     proxy = settings["proxy"]
+    if isinstance(proxy, dict):
+        proxy.setdefault("response_margin_seconds", 5)
     if not isinstance(proxy, dict) or set(proxy) != {
-            "port", "max_request_bytes", "max_response_bytes"}:
+            "port", "max_request_bytes", "max_response_bytes", "response_margin_seconds"}:
         raise ValueError("AX config has invalid proxy settings")
     if type(proxy["port"]) is not int or not 1 <= proxy["port"] <= 65535:
         raise ValueError("AX config proxy.port must be a TCP port")
-    for key in ("max_request_bytes", "max_response_bytes"):
+    for key in ("max_request_bytes", "max_response_bytes", "response_margin_seconds"):
         if type(proxy[key]) is not int or proxy[key] <= 0:
             raise ValueError(f"AX config proxy.{key} must be positive")
     delegation = settings["delegation"]

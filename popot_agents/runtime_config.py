@@ -19,9 +19,9 @@ FIELDS = {
                  "docker_probe_seconds", "docker_restore_seconds", "docker_inspect_seconds",
                  "docker_remove_seconds", "postgres_connect_seconds"},
     "limits": {"request_bytes", "message_chars", "history_bytes", "socket_message_bytes", "tool_output_chars",
-               "write_file_bytes", "download_bytes"},
+               "write_file_bytes", "download_bytes", "skill_prompt_bytes"},
     "logging": {"mcp_body_max_bytes", "worker_log_tail_lines", "worker_log_max_bytes"},
-    "model": {"default_max_tool_rounds", "temperature", "max_tokens"},
+    "model": {"default_max_tool_rounds", "request_retries", "temperature", "max_tokens"},
 }
 
 
@@ -51,6 +51,8 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
         raise ValueError("runtime config has invalid role_env_names") from exc
     for section, fields in FIELDS.items():
         values = settings[section]
+        if section == "model" and isinstance(values, dict):
+            values.setdefault("request_retries", 1)
         if not isinstance(values, dict) or set(values) != fields:
             raise ValueError(f"runtime config has invalid {section} fields")
         for name, value in values.items():
@@ -63,6 +65,11 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
                 valid = value is None or (type(value) is int and value > 0)
             elif field == "model.default_max_tool_rounds":
                 valid = type(value) is int and 1 <= value <= 20
+            elif field == "model.request_retries":
+                if type(value) is not int or value < 0:
+                    raise ValueError("runtime config model.request_retries must be a non-negative integer "
+                                     "(0 disables retries)")
+                valid = True
             elif field in {"worker.cpus", "worker.startup_probe_interval_seconds"}:
                 valid = type(value) in (int, float) and value > 0
             else:

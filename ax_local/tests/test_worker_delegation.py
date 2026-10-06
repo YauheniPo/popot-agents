@@ -9,6 +9,21 @@ from popot_agents.worker.http_harness import run_http
 
 
 class WorkerDelegationTests(unittest.TestCase):
+    def test_tool_explains_each_allowed_specialist_and_handoff(self):
+        tools = make_tools({"AX_DELEGATION_URL": "http://api:8005",
+                            "AX_DELEGATION_TOKEN": "private-token",
+                            "AX_DELEGATION_ROLES": '["code_reviewer"]',
+                            "AX_DELEGATION_DESCRIPTIONS": json.dumps({
+                                "code_reviewer": "Review code for bugs and regressions.",
+                                "forbidden": "Hidden specialist."})})
+        schema = tools["delegate_task"]["schema"]["function"]
+        text = json.dumps(schema)
+        self.assertIn("Review code for bugs and regressions", text)
+        self.assertNotIn("Hidden specialist", text)
+        self.assertNotIn("private-token", text)
+        self.assertIn("diff", text)
+        self.assertEqual(schema["parameters"]["properties"]["role"]["enum"], ["code_reviewer"])
+
     def test_failed_task_preserves_child_stage_and_safe_reason(self):
         tools = make_tools({"AX_DELEGATION_URL": "http://api:8005",
                             "AX_DELEGATION_TOKEN": "test-capability",

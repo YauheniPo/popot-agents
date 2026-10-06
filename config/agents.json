@@ -30,7 +30,7 @@
     "image": "popot-agent-claude:local",
     "timeout_seconds": 180,
     "network": "bridge",
-    "command": ["claude", "--print", "--model", "{model}", "{task}"],
+    "command": ["claude", "--print", "--max-turns", "{max_turns}", "--model", "{model}", "{task}"],
     "environment": {"ANTHROPIC_BASE_URL": "https://ollama.com"},
     "env_names": ["OLLAMA_API_KEY"],
     "env_aliases": {"ANTHROPIC_AUTH_TOKEN": "OLLAMA_API_KEY"},
@@ -40,7 +40,7 @@
     "image": "popot-agent-claude:local",
     "timeout_seconds": 180,
     "network": "bridge",
-    "command": ["claude", "--print", "--model", "{model}", "{task}"],
+    "command": ["claude", "--print", "--max-turns", "{max_turns}", "--model", "{model}", "{task}"],
     "environment": {"ANTHROPIC_BASE_URL": "http://host.docker.internal:11434", "ANTHROPIC_AUTH_TOKEN": "ollama"},
     "model_env": "OLLAMA_CLAUDE_MODEL"
   },

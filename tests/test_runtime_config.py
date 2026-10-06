@@ -11,16 +11,33 @@ from unittest.mock import patch
 
 class RuntimeConfigTests(unittest.TestCase):
     def test_default_config_collects_runtime_limits_and_timeouts(self):
-        from popot_agents.runtime_config import load_runtime_config
+        from popot_agents.runtime_config import DEFAULT_PATH, load_runtime_config
 
+        declared = json.loads(DEFAULT_PATH.read_text())
+        settings = load_runtime_config(DEFAULT_PATH)
+        for section, values in declared.items():
+            if isinstance(values, dict):
+                for name, value in values.items():
+                    self.assertEqual(settings[section][name], value, f'{section}.{name}')
+            else:
+                self.assertEqual(settings[section], values)
+
+    def test_model_retry_config_validates_bounds_and_supports_old_configs(self):
+        from popot_agents.runtime_config import load_runtime_config
         settings = load_runtime_config()
-        self.assertEqual(settings["sessions"]["retention_days"], 7)
-        self.assertEqual(settings["sessions"]["default_idle_seconds"], 300)
-        self.assertEqual(settings["worker"]["memory"], "1g")
-        self.assertEqual(settings["timeouts"]["model_request_seconds"], 45)
-        self.assertEqual(settings["limits"]["request_bytes"], 65536)
-        self.assertEqual(settings["logging"]["mcp_body_max_bytes"], 65536)
-        self.assertEqual(settings["role_env_names"], ["GITHUB_PERSONAL_ACCESS_TOKEN"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'runtime.json'
+            settings['model'].pop('request_retries', None)
+            path.write_text(json.dumps(settings))
+            self.assertEqual(load_runtime_config(path)['model']['request_retries'], 1)
+            for value in (0, 1, 3, 4, 10, 100, -1, True, 1.5, "10"):
+                settings['model']['request_retries'] = value
+                path.write_text(json.dumps(settings))
+                if type(value) is int and value >= 0:
+                    self.assertEqual(load_runtime_config(path)['model']['request_retries'], value)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'request_retries'):
+                        load_runtime_config(path)
 
     def test_custom_config_is_loaded_and_bad_values_are_rejected(self):
         from popot_agents.runtime_config import load_runtime_config
@@ -98,6 +115,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), [77777, 14, 22222, 90])
 
     def test_agent_profile_can_override_resources_and_model_parameters(self):
+        from popot_agents.runtime_config import RUNTIME
         from popot_agents.orchestrator.main import DockerAgentRunner
         from popot_agents.worker.http_harness import run_http
 
@@ -124,7 +142,8 @@ class RuntimeConfigTests(unittest.TestCase):
             self.assertEqual(run_http("hello"), "ok")
         self.assertEqual(calls[0][0]["temperature"], 0.3)
         self.assertEqual(calls[0][0]["max_tokens"], 512)
-        self.assertEqual(calls[0][1], 45)
+        self.assertGreater(calls[0][1], 0)
+        self.assertLessEqual(calls[0][1], RUNTIME['timeouts']['model_request_seconds'])
 
     def test_model_parameters_cannot_override_conversation_payload(self):
         from popot_agents.worker.http_harness import run_http
