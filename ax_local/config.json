@@ -24,7 +24,8 @@
     "probe_timeout_seconds": 15,
     "restore_timeout_seconds": 30,
     "response_margin_seconds": 10,
-    "delete_timeout_seconds": 5
+    "delete_timeout_seconds": 5,
+    "suspend_retention_seconds": 7200
   },
   "delegation": {
     "enabled": true,

@@ -1,7 +1,8 @@
-"""Adapt pinned local AX templates to run Popot tools as UID/GID 10001.
+"""Adapt pinned local AX templates for Popot tool isolation and session snapshots.
 
 AX v0.3.1 has no Task securityContext. Its Substrate templates start as UID 0
 without SETUID/SETGID; our tool-enabled image needs those two to drop privileges.
+Its default DATA snapshots omit process memory; Popot sessions opt into FULL.
 """
 
 import argparse
@@ -25,17 +26,38 @@ func popotToolSecurityContext(image string, env map[string]string) *ateapipb.Sec
 }
 
 '''
-VERSION = hashlib.sha256((AX_COMMIT + HELPER + SECURITY).encode()).hexdigest()
+SNAPSHOT_HELPER = '''// popotSnapshotScope preserves live session memory only for opted-in Popot images.
+func popotSnapshotScope(image string, env map[string]string) ateapipb.SnapshotContentScope {
+	if env["POPOT_SESSION_SNAPSHOT"] == "full" && strings.HasPrefix(image, "localhost:5001/popot-agent-ax@sha256:") {
+		return ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
+	}
+	return ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+}
+
+'''
+PAUSE = '\t\t\tOnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,'
+COMMIT = '\t\t\tOnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,'
+SNAPSHOT_SCOPE = 'popotSnapshotScope(image, envMap)'
+VERSION = hashlib.sha256((AX_COMMIT + HELPER + SECURITY + SNAPSHOT_HELPER + SNAPSHOT_SCOPE).encode()).hexdigest()
 
 
 def patched_source(source: str) -> str:
     if "func popotToolSecurityContext(" in source:
         if source.count(HELPER) != 1 or source.count(SECURITY) != 1:
             raise ValueError("Local AX tool-user patch has unexpected changes; inspect the checkout")
+    else:
+        if source.count(MARKER) != 1 or source.count(CONTAINER) != 1:
+            raise ValueError("Local AX template source differs from the pinned version; inspect the checkout")
+        source = source.replace(MARKER, HELPER + MARKER, 1).replace(CONTAINER, SECURITY + CONTAINER, 1)
+    if "func popotSnapshotScope(" in source:
+        if source.count(SNAPSHOT_HELPER) != 1 or source.count(SNAPSHOT_SCOPE) != 2:
+            raise ValueError("Local AX snapshot patch has unexpected changes; inspect the checkout")
         return source
-    if source.count(MARKER) != 1 or source.count(CONTAINER) != 1:
-        raise ValueError("Local AX template source differs from the pinned version; inspect the checkout")
-    return source.replace(MARKER, HELPER + MARKER, 1).replace(CONTAINER, SECURITY + CONTAINER, 1)
+    if source.count(MARKER) != 1 or source.count(PAUSE) != 1 or source.count(COMMIT) != 1:
+        raise ValueError("Local AX snapshot source differs from the pinned version; inspect the checkout")
+    return (source.replace(MARKER, SNAPSHOT_HELPER + MARKER, 1)
+            .replace(PAUSE, PAUSE.replace('ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA', SNAPSHOT_SCOPE), 1)
+            .replace(COMMIT, COMMIT.replace('ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA', SNAPSHOT_SCOPE), 1))
 
 
 def main() -> None:

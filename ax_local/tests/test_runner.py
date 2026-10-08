@@ -114,6 +114,11 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["spec"]["resources"], ax["task_resources"])
         self.assertEqual(manifest["spec"]["debug"], ax["task_debug"])
 
+    def test_task_requests_full_session_snapshots(self):
+        manifest = self.runner.task_manifest('0123456789abcdef')
+        env = {item['name']: item['value'] for item in manifest['spec']['env']}
+        self.assertEqual(env.get('POPOT_SESSION_SNAPSHOT'), 'full')
+
     def test_requires_local_context_and_digest_image(self):
         with self.assertRaises(ValueError):
             AxAgentRunner(image="worker:latest", model="x", base_url="http://localhost:1/v1")

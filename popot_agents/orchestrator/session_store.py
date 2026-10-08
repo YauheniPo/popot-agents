@@ -33,7 +33,8 @@ class SessionStore:
 
     @staticmethod
     def expires_at(saved: dict) -> datetime | None:
-        if (saved.get("roleConfig") or {}).get("ttl_seconds") == 0:
+        if (saved.get("roleConfig") or {}).get("ttl_seconds") == 0 \
+                or (saved.get("roleConfig") or {}).get("_retain_history") is True:
             return None
         # Older session files have only updatedAt; use it when creation is unknown.
         created = datetime.fromisoformat(saved.get("createdAt", saved["updatedAt"]))

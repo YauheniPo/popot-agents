@@ -88,6 +88,15 @@ Shared turn settings are defined only in `config/runtime.json`:
 Both Docker and AX use these shared values. AX-specific CLI, route, startup,
 probe, restore, response and deletion timeouts remain together under `ax` in
 `ax_local/config.json`; delegation and proxy policies stay in that same file.
+AX user sessions suspend after each saved answer and automatically resume on
+the next message with the same `sessionId`. `ax.suspend_retention_seconds`
+defaults to 7200 seconds and overrides the role's worker idle lifetime in AX.
+After two hours without continuation, AX deletes the task; a later message
+restores the saved conversation in a new worker. New AX session histories stay
+available until explicit chat deletion. Successful snapshot resume preserves
+the sandbox; a failed resume or recreation after deletion restores the
+transcript in a new worker. See
+[AX session lifecycle](ax_local/README.md#suspend-и-продолжение-сессии).
 Role-specific timeouts are overrides in `config/roles.json`, not shared defaults.
 With the current settings, every bundled role gets 900 seconds, the harness gets 885,
 and it reserves up to 120 seconds for its final answer. Changing the shared
