@@ -2,6 +2,7 @@
 
 import io
 import json
+import subprocess
 import tempfile
 import threading
 import time
@@ -12,6 +13,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ax_local.api.delegation import A2AError, DelegationService, start_a2a_server
+from ax_local.api.ax_runner import AxAgentRunner, AxChat
+from ax_local.tests.test_worker_queue import wait_for
 from popot_agents.orchestrator.main import create_server
 from popot_agents.orchestrator.session_store import SessionStore
 
@@ -61,7 +64,7 @@ class DelegationTests(unittest.TestCase):
         self.roles["tech_lead"]["allowed_roles"] = ["backend_engineer"]
         self.roles["backend_engineer"]["allowed_roles"] = ["qa_engineer", "tech_lead"]
         self.policy = {"enabled": True, "port": 8005, "max_depth": 2,
-                       "max_calls_per_turn": 4, "max_concurrent_tasks": 2,
+                       "max_calls_per_turn": 4,
                        "turn_timeout_seconds": 300, "poll_interval_seconds": 0.01}
         self.store = SessionStore(self.temporary.name)
         self.service = DelegationService(self.roles, self.policy, self.runner, self.store,
@@ -136,20 +139,34 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(nested[0]["status"]["state"], "TASK_STATE_COMPLETED")
         self.assertTrue(all(chat.closed for chat in self.runner.chats))
 
-    def test_child_capacity_rejects_without_queueing(self):
-        release = threading.Event()
-        self.runner.callback = lambda *_: release.wait(1)
-        try:
-            with self.service.turn(self.parent, 5):
-                one = self.send(message_id="one")
-                two = self.send(message_id="two")
-                with self.assertRaisesRegex(A2AError, "busy"):
-                    self.send(message_id="three")
-                release.set()
-                self.wait_task(one["id"])
-                self.wait_task(two["id"])
-        finally:
-            release.set()
+    def test_children_wait_in_shared_worker_queue_without_separate_capacity_rejection(self):
+        runner = AxAgentRunner('localhost:5001/popot-agent-ax@sha256:' + 'a' * 64,
+                               'unused', 'http://localhost:1/v1')
+        runner.delegation = self.service
+        self.service.runner = runner
+        leases = [runner.worker_queue.acquire(f'occupied-{index}') for index in range(10)]
+        def cli(*args, **_kwargs):
+            return subprocess.CompletedProcess([], 1 if args[0] == 'get' else 0, '',
+                                               'NotFound' if args[0] == 'get' else '')
+        with patch.object(runner, '_run', side_effect=cli) as run, \
+             patch.object(runner, '_wait_for_chat', side_effect=lambda chat, *_args: chat), \
+             patch.object(AxChat, 'send', return_value={'answer': 'child result'}):
+            try:
+                with self.service.turn(self.parent, 5):
+                    tasks = [self.send(message_id=f'child-{index}') for index in range(4)]
+                    wait_for(lambda: runner.worker_queue.status()['queued'] == 4)
+                    self.assertEqual(runner.worker_queue.status()['active'], 10)
+                    run.assert_not_called()
+                    runner.worker_queue.release('occupied-0', leases[0])
+                    for task in tasks:
+                        result = self.wait_task(task['id'])
+                        self.assertEqual(result['status']['state'], 'TASK_STATE_COMPLETED')
+                    wait_for(lambda: not self.service.jobs)
+                    self.assertEqual(runner.worker_queue.status()['active'], 9)
+                    self.assertEqual(runner.worker_queue.status()['queued'], 0)
+            finally:
+                runner.shutdown_worker_queue()
+                self.service.close()
 
     def test_failures_are_persisted_and_do_not_leak_exception_secrets(self):
         self.runner.callback = lambda *_: (_ for _ in ()).throw(RuntimeError("private-key"))

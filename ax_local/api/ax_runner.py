@@ -20,12 +20,14 @@ from popot_agents.role_env import selected_role_env
 from popot_agents.runtime_config import RUNTIME
 from ..config import AX_CONFIG
 from ..worker.remote_client import RESPONSE_PREFIX
+from .worker_queue import WorkerQueue
 
 
 class AxAgentRunner:
     session_mode = "http"
     network = "bridge"
     retain_session_history = True
+    queues_worker_start = True
 
     def __init__(self, image: str, model: str, base_url: str,
                  context: str = AX_CONFIG["ax"]["context"],
@@ -42,6 +44,10 @@ class AxAgentRunner:
         self.context = context
         self.proxy_token = proxy_token
         self.delegation = None
+        self.worker_queue = WorkerQueue(AX_CONFIG['ax']['max_workers'],
+                                        AX_CONFIG['ax']['worker_queue_timeout_seconds'])
+        self._cleanup_pending = {}
+        self._cleanup_lock = threading.RLock()
 
     def _run(self, *args: str, input: str | None = None,
              timeout: int = AX_CONFIG["ax"]["cli_timeout_seconds"],
@@ -182,6 +188,23 @@ class AxAgentRunner:
 
     def start_chat(self, chat_id: str, role_config: dict | None = None,
                    *, deadline: float | None = None, cancel_event=None) -> AxChat:
+        if not re.fullmatch(r"[0-9a-f]{16}", chat_id):
+            raise ValueError("invalid session ID")
+        task_name = f"popot-chat-{chat_id}"
+        lease = self.worker_queue.acquire(task_name, deadline=deadline, cancel_event=cancel_event)
+        try:
+            return self._start_reserved_chat(chat_id, role_config, lease,
+                                             deadline=deadline, cancel_event=cancel_event)
+        except Exception:
+            # If cleanup was not confirmed, maintenance still owns this lease.
+            with self._cleanup_lock:
+                pending = task_name in self._cleanup_pending
+            if not pending:
+                self.worker_queue.release(task_name, lease)
+            raise
+
+    def _start_reserved_chat(self, chat_id, role_config, lease,
+                             *, deadline=None, cancel_event=None) -> AxChat:
         if self.delegation:
             role_config = self.delegation.prepare_config(chat_id, role_config)
         task_name = f"popot-chat-{chat_id}"
@@ -205,6 +228,7 @@ class AxAgentRunner:
                 self._run("delete", "task", task_name,
                           timeout=remaining(AX_CONFIG["ax"]["cli_timeout_seconds"]))
             except subprocess.TimeoutExpired as exc:
+                self._defer_cleanup(task_name, lease)
                 # No model turn has started. Do not report this as an agent timeout
                 # or create a replacement while the previous actor may still exist.
                 raise AgentRunError(
@@ -212,9 +236,13 @@ class AxAgentRunner:
                     "session restart blocked before worker startup. "
                     "Check AX task status and ax-controller logs for cleanup errors."
                 ) from None
+            except (AgentRunError, AgentConfigurationError, OSError):
+                self._defer_cleanup(task_name, lease)
+                raise
         chat = AxChat(self, task_name,
                       (role_config or {}).get("timeout_seconds",
-                                              RUNTIME["worker"]["default_timeout_seconds"]))
+                                              RUNTIME["worker"]["default_timeout_seconds"]),
+                      slot_token=lease)
         try:
             self._run("apply", "-f", "-", input=json.dumps(self.workspace_manifest()),
                       timeout=remaining(AX_CONFIG["ax"]["cli_timeout_seconds"]))
@@ -281,6 +309,56 @@ class AxAgentRunner:
             raise ValueError("invalid AX session ID")
         AxChat(self, f"popot-chat-{session_id}", 1).close()
 
+    def _defer_cleanup(self, task_name, lease) -> None:
+        with self._cleanup_lock:
+            self._cleanup_pending[task_name] = lease
+
+    def _release_worker(self, task_name, lease) -> None:
+        with self._cleanup_lock:
+            if lease is None or self._cleanup_pending.get(task_name) is lease:
+                self._cleanup_pending.pop(task_name, None)
+        self.worker_queue.release(task_name, lease)
+
+    def _delete_worker(self, task_name, lease):
+        # Serialize retries with explicit close operations. A copied cleanup
+        # entry must never issue a late delete against a replacement worker.
+        with self._cleanup_lock:
+            try:
+                result = self._run('delete', 'task', task_name,
+                                   timeout=AX_CONFIG['ax']['delete_timeout_seconds'], allow_failure=True)
+            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError):
+                self._defer_cleanup(task_name, lease)
+                raise
+            if result.returncode and 'NotFound' not in result.stderr:
+                self._defer_cleanup(task_name, lease)
+            else:
+                self._release_worker(task_name, lease)
+            return result
+
+    def maintenance(self) -> None:
+        with self._cleanup_lock:
+            pending = tuple(self._cleanup_pending.items())
+        for task_name, lease in pending:
+            with self._cleanup_lock:
+                if task_name not in self._cleanup_pending or self._cleanup_pending[task_name] is not lease:
+                    continue
+                try:
+                    self._delete_worker(task_name, lease)
+                except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError):
+                    pass  # Keep capacity reserved until AX confirms deletion.
+
+    def shutdown_worker_queue(self) -> None:
+        self.worker_queue.close()
+
+    def recover_workers(self) -> None:
+        """Remove previous-process Tasks before accepting requests with a new proxy token."""
+        result = self._run('get', 'tasks')
+        names = [line.split()[0] for line in result.stdout.splitlines()
+                 if line.split() and re.fullmatch(r'popot-chat-[0-9a-f]{16}', line.split()[0])]
+        for name in names:
+            # Failure blocks startup, so an orphan cannot bypass the new limit.
+            self._run('delete', 'task', name)
+
 
 @dataclass
 class AxChat:
@@ -291,6 +369,7 @@ class AxChat:
     closed: bool = False
     suspended: bool = False
     probe_issue: str | None = None
+    slot_token: object = field(default=None, repr=False)
     _close_lock: object = field(default_factory=threading.RLock, repr=False)
 
     @property
@@ -425,9 +504,8 @@ class AxChat:
             if self.runner.delegation:
                 self.runner.delegation.revoke(self.container_name.removeprefix("popot-chat-"))
             try:
-                result = self.runner._run("delete", "task", self.container_name,
-                                          timeout=AX_CONFIG["ax"]["delete_timeout_seconds"], allow_failure=True)
-                if result.returncode:
+                result = self.runner._delete_worker(self.container_name, self.slot_token)
+                if result.returncode and 'NotFound' not in result.stderr:
                     self._report_cleanup_failure(f"CLI exit {result.returncode}")
             except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError) as exc:
                 self._report_cleanup_failure(type(exc).__name__)

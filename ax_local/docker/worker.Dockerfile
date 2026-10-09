@@ -11,6 +11,7 @@ RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax-task-runner ./cmd/ax-task-runner
 
 FROM python:3.12-slim
+LABEL com.popot.project="popot-agents"
 RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir mcp==1.30.0 mcp-server-fetch==2026.8.18 mcp-server-git==2026.8.18

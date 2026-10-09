@@ -97,14 +97,20 @@ available until explicit chat deletion. Successful snapshot resume preserves
 the sandbox; a failed resume or recreation after deletion restores the
 transcript in a new worker. See
 [AX session lifecycle](ax_local/README.md#suspend-и-продолжение-сессии).
+AX limits each API process to 10 created workers, including suspended sessions.
+New worker starts wait in FIFO order for up to 3600 seconds; continuation of an
+existing worker does not acquire another slot. The shared MCP upstream budget
+is 7200 seconds to cover queueing, startup and the model turn. See
+[AX worker queue](ax_local/README.md#лимит-worker-и-очередь-запуска).
 Role-specific timeouts are overrides in `config/roles.json`, not shared defaults.
 With the current settings, every bundled role gets 900 seconds, the harness gets 885,
 and it reserves up to 120 seconds for its final answer. Changing the shared
 maximum also changes role validation and the AX delegation timeout cap.
 AX route timeout must exceed the shared maximum task timeout plus its response margin.
 The default worker has 2 CPUs, 1536 MiB RAM, 256 process slots and a 512 MiB
-workspace tmpfs. Three concurrent workers can consume 4.5 GiB RAM plus service
-overhead; this leaves headroom for Cognee on an 8 GiB Docker VM. AX tasks use
+workspace tmpfs. The Docker API admits three concurrent requests; three workers
+can consume 4.5 GiB RAM plus service overhead; this leaves headroom for Cognee
+on an 8 GiB Docker VM. AX tasks use
 the same CPU/RAM limits. Model requests allow 120 seconds; MCP tool calls allow
 120 seconds; shell commands and clones allow 180 seconds. Upstream transport
 budgets cover the 1800-second role override cap. Larger limits provide room for
@@ -298,7 +304,7 @@ The worker emits a `skills_loaded` event containing names and prompt size.
 Scripts are bundled but never executed by the loader; skills do not grant tools
 or change permissions. Unknown paths, duplicates, symlinks and oversized content
 fail validation. The total skill prompt budget is
-`limits.skill_prompt_bytes` in `config/runtime.json` (131072 bytes by default).
+`limits.skill_prompt_bytes` in `config/runtime.json` (currently 262144 bytes).
 
 The selected files are baked into the images. After changing skills, rebuild:
 
@@ -316,6 +322,7 @@ The feature team roles are:
 
 | Role | Responsibility | Built-in tools |
 | --- | --- | --- |
+| `planner` | Discuss requests, draft versioned specs, delegate execution and decide acceptance or rework from specialist evidence | `calculate`, `read_file`, `write_file`; Cognee memory |
 | `product_manager` | User problem, scope, stories, acceptance and success criteria | `calculate` |
 | `product_designer` | User journey, screen states, accessibility and UX copy | — |
 | `tech_lead` | Architecture, contracts, task split and engineering risks | `calculate` |
@@ -350,6 +357,12 @@ on a request returns HTTP 409.
 for example, `"allowed_roles": ["backend_engineer", "qa_engineer"]` inside
 `tech_lead`. Omit the field or use `[]` to disable delegation for that role.
 Unknown roles, duplicates, and the role itself are rejected at startup.
+Start an AX session with `role: "planner"` for discussion, specifications and
+execution coordination. The planner passes spec text, task IDs and acceptance
+criteria to specialist workers, receives their answers, requests review/QA and
+records acceptance, rework or blocker decisions. Continue using the returned
+`sessionId` to preserve the specification and decisions. See
+[AX planner](ax_local/README.md#планировщик-и-спецификации).
 See [AX delegation](ax_local/README.md#делегирование-задач-между-ax-агентами)
 for runtime settings and a test request. The Docker orchestrator starts one
 selected specialist for each request. The backend worker starts with an empty workspace;

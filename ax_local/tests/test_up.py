@@ -37,6 +37,10 @@ class UpScriptTests(unittest.TestCase):
             "assert sys.argv[1:] == ['--apply']\n"
             "with Path(os.environ['CALLS']).open('a') as f: f.write('substrate-cleanup\\n')\n"
             "raise SystemExit(int(os.environ.get('CLEANUP_FAIL', '0')))\n")
+        (cluster / 'deployment_cleanup.py').write_text(
+            "import os\nfrom pathlib import Path\n"
+            "with Path(os.environ['CALLS']).open('a') as f: f.write('deployment-cleanup\\n')\n"
+            "raise SystemExit(int(os.environ.get('DEPLOYMENT_CLEANUP_FAIL', '0')))\n")
         (self.ax / "config.json").write_text(
             json.dumps({"ax": {"context": "kind-popot-ax",
                                "route_timeout_seconds": 330}}), encoding="utf-8")
@@ -100,9 +104,10 @@ class UpScriptTests(unittest.TestCase):
         self.assertIn("substrate-cleanup", calls)
         self.assertLess(calls.index("substrate-cleanup"), calls.index("worker-health"))
         self.assertLess(calls.index('worker-health'), calls.index('memory-up'))
-        self.assertEqual(calls[-2], 'memory-up')
-        self.assertIn("compose --env-file", calls[-1])
-        self.assertIn("up --build -d mcp-server", calls[-1])
+        self.assertEqual(calls[-3], 'memory-up')
+        self.assertIn("compose --env-file", calls[-2])
+        self.assertIn("up --build -d --wait --wait-timeout 300 mcp-server", calls[-2])
+        self.assertEqual(calls[-1], 'deployment-cleanup')
         self.assertTrue(any("--kubeconfig=" in call and "--context=kind-popot-ax" in call
                             for call in calls if call.startswith("kubectl ")))
 
@@ -117,7 +122,7 @@ class UpScriptTests(unittest.TestCase):
         result = self.run_up()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(calls[-1], "rebuild-worker.sh")
+        self.assertEqual(calls[-2:], ["rebuild-worker.sh", 'deployment-cleanup'])
         self.assertIn("substrate-cleanup", calls)
         self.assertNotIn("bootstrap.sh", calls)
 
@@ -142,7 +147,7 @@ class UpScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text(encoding="utf-8").splitlines()
         self.assertIn("docker start kind-registry", calls)
-        self.assertEqual(calls[-1], "rebuild-worker.sh")
+        self.assertEqual(calls[-2:], ["rebuild-worker.sh", 'deployment-cleanup'])
 
     def test_rebuild_checks_workers_before_starting_api(self):
         self.prepare_local()
@@ -159,13 +164,19 @@ class UpScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text().splitlines()
         self.assertIn("worker-health", calls)
-        self.assertIn("up --build --force-recreate -d mcp-server", calls[-1])
+        self.assertIn("up --build --force-recreate -d --wait --wait-timeout 300 mcp-server", calls[-2])
+        self.assertEqual(calls[-1], 'deployment-cleanup')
         self.calls.write_text("")
         self.env["HEALTH_FAIL"] = "1"
         result = subprocess.run(["bash", str(self.ax / "rebuild-worker.sh")], env=self.env,
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.calls.read_text().splitlines(), ["worker-health"])
+
+    def test_cleanup_failure_is_visible_as_failed_up(self):
+        self.prepare_local()
+        self.env['DEPLOYMENT_CLEANUP_FAIL'] = '1'
+        self.assertNotEqual(self.run_up().returncode, 0)
 
 
 if __name__ == "__main__":

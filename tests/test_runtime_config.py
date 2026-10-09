@@ -29,6 +29,15 @@ class RuntimeConfigTests(unittest.TestCase):
         compose = Path(__file__).resolve().parents[1] / 'ax_local/compose.yaml'
         self.assertNotIn('MCP_UPSTREAM_TIMEOUT_SECONDS:', compose.read_text())
 
+    def test_mcp_transport_covers_ax_queue_startup_and_model_turn(self):
+        from popot_agents.runtime_config import RUNTIME
+        from ax_local.config import AX_CONFIG
+        ax = AX_CONFIG['ax']
+        required = (ax['worker_queue_timeout_seconds'] + ax['startup_timeout_seconds']
+                    + RUNTIME['worker']['max_timeout_seconds'] + 3 * ax['cli_timeout_seconds']
+                    + ax['restore_timeout_seconds'] + ax['response_margin_seconds'])
+        self.assertGreater(RUNTIME['timeouts']['mcp_upstream_seconds'], required)
+
     def test_shared_worker_budget_applies_to_docker_and_ax(self):
         from popot_agents.runtime_config import RUNTIME
         from popot_agents.orchestrator.main import DockerAgentRunner

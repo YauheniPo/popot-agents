@@ -25,15 +25,21 @@ def load_ax_config(path: str | Path | None = None) -> dict:
     ax = settings["ax"]
     if isinstance(ax, dict):
         ax.setdefault("suspend_retention_seconds", 7200)
+        ax.setdefault("max_workers", 10)
+        ax.setdefault("worker_queue_timeout_seconds", 3600)
+        ax.setdefault("worker_pool_name", "popot-workers")
     if not isinstance(ax, dict) or set(ax) != {
             "context", "atespace", "workspace_name", "task_resources", "task_debug",
             "cli_timeout_seconds", "route_timeout_seconds", "startup_timeout_seconds",
             "startup_probe_interval_seconds", "session_backend", "probe_timeout_seconds",
             "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds",
-            "suspend_retention_seconds"}:
+            "suspend_retention_seconds", "max_workers", "worker_queue_timeout_seconds", "worker_pool_name"}:
         raise ValueError("AX config has invalid ax settings")
     if not isinstance(ax["context"], str) or not re.fullmatch(r"kind-[a-z0-9-]+", ax["context"]):
         raise ValueError("AX config ax.context must name a local kind context")
+    if not isinstance(ax['worker_pool_name'], str) or not re.fullmatch(
+            r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', ax['worker_pool_name']):
+        raise ValueError('AX config ax.worker_pool_name must be a Kubernetes DNS label')
     if not all(isinstance(ax[key], str) and re.fullmatch(r"[a-z0-9-]+", ax[key])
                for key in ("atespace", "workspace_name")):
         raise ValueError("AX config has invalid atespace or workspace name")
@@ -48,7 +54,7 @@ def load_ax_config(path: str | Path | None = None) -> dict:
     for key in ("cli_timeout_seconds", "route_timeout_seconds", "startup_timeout_seconds",
                 "startup_probe_interval_seconds", "probe_timeout_seconds",
                 "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds",
-                "suspend_retention_seconds"):
+                "suspend_retention_seconds", "max_workers", "worker_queue_timeout_seconds"):
         if type(ax[key]) is not int or ax[key] <= 0:
             raise ValueError(f"AX config ax.{key} must be positive")
     if ax["route_timeout_seconds"] > 3600:
@@ -69,14 +75,17 @@ def load_ax_config(path: str | Path | None = None) -> dict:
         if type(proxy[key]) is not int or proxy[key] <= 0:
             raise ValueError(f"AX config proxy.{key} must be positive")
     delegation = settings["delegation"]
+    if isinstance(delegation, dict):
+        # Legacy configs remain loadable; worker admission now uses ax.max_workers.
+        delegation.pop("max_concurrent_tasks", None)
     if not isinstance(delegation, dict) or set(delegation) != {
-            "enabled", "port", "max_depth", "max_calls_per_turn", "max_concurrent_tasks",
+            "enabled", "port", "max_depth", "max_calls_per_turn",
             "turn_timeout_seconds", "poll_interval_seconds"}:
         raise ValueError("AX config has invalid delegation settings")
     if type(delegation["enabled"]) is not bool:
         raise ValueError("AX config delegation.enabled must be boolean")
     for key, maximum in {"port": 65535, "max_depth": 8, "max_calls_per_turn": 32,
-                         "max_concurrent_tasks": 16, "turn_timeout_seconds": RUNTIME["worker"]["max_timeout_seconds"]}.items():
+                         "turn_timeout_seconds": RUNTIME["worker"]["max_timeout_seconds"]}.items():
         if type(delegation[key]) is not int or not 1 <= delegation[key] <= maximum:
             raise ValueError(f"AX config delegation.{key} is out of range")
     interval = delegation["poll_interval_seconds"]

@@ -107,6 +107,8 @@ if [[ ! "$IMAGE_DIGEST" =~ ^localhost:5001/popot-agent-ax@sha256:[0-9a-f]{64}$ ]
 fi
 printf '%s\n' "$IMAGE_DIGEST" > "$LOCAL/worker-image"
 
+python3 "$ROOT/ax_local/cluster/worker_health.py"
+
 "$LOCAL/bin/ax" --context="kind-${CLUSTER}" --atespace="$ATESPACE" get tasks
 echo "AX local worker image: $IMAGE_DIGEST"
 echo "AX cluster and worker image prepared"

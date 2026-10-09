@@ -203,6 +203,7 @@ class AxRunnerTests(unittest.TestCase):
         error = subprocess.TimeoutExpired(["ax"], 2)
         with patch.dict(AX_CONFIG["ax"], {"cli_timeout_seconds": 17}), \
              patch.object(self.runner, "_run", side_effect=[present, error]) as run, \
+             patch.object(self.runner.worker_queue, "clock", return_value=8), \
              patch("ax_local.api.ax_runner.time.monotonic", return_value=8):
             with self.assertRaises(AgentRunError):
                 self.runner.start_chat("0123456789abcdef", deadline=10)

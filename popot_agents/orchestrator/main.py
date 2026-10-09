@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,6 +56,10 @@ class AgentRunError(Exception):
 
 class AgentConfigurationError(Exception):
     """A selected agent profile needs operator configuration."""
+
+
+class WorkerCapacityTimeout(AgentRunError):
+    """No worker slot became available before the admission deadline."""
 
 
 class DockerAgentRunner:
@@ -602,7 +607,9 @@ class ChatServer(ThreadingHTTPServer):
         self.store = store if store is not None else SessionStore(session_dir)
         self.live: dict[str, ChatRecord] = {}
         self.live_lock = threading.RLock()
-        self.session_locks = [threading.RLock() for _ in range(64)]
+        self.session_locks = weakref.WeakValueDictionary()
+        self.session_locks_guard = threading.Lock()
+        self.worker_managers = ()
         self.task_slots = threading.BoundedSemaphore(RUNTIME["worker"]["max_concurrent_tasks"])
         self.pending_expired: set[str] = set()
         self.idle_seconds = idle_seconds
@@ -610,9 +617,18 @@ class ChatServer(ThreadingHTTPServer):
         super().__init__(address, handler)
 
     def session_lock(self, session_id: str):
-        return self.session_locks[hash(session_id) % len(self.session_locks)]
+        # Waiting for worker capacity can take an hour. Unrelated sessions must
+        # not share a striped lock while a request owns its session in the queue.
+        with self.session_locks_guard:
+            lock = self.session_locks.get(session_id)
+            if lock is None:
+                lock = threading.RLock()
+                self.session_locks[session_id] = lock
+            return lock
 
     def service_actions(self) -> None:
+        for manager in getattr(self, "worker_managers", ()):
+            manager.maintenance()
         now = time.monotonic()
         if now - self.last_prune >= RUNTIME["sessions"]["prune_interval_seconds"]:
             self.last_prune = now
@@ -663,6 +679,9 @@ class ChatServer(ThreadingHTTPServer):
                 lock.release()
 
     def server_close(self) -> None:
+        # Wake queued requests before ThreadingHTTPServer joins their threads.
+        for manager in getattr(self, "worker_managers", ()):
+            manager.shutdown_worker_queue()
         super().server_close()
         with self.live_lock:
             records = list(self.live.values())
@@ -681,6 +700,8 @@ def create_server(
     store=None,
 ) -> ChatServer:
     roles = roles or {}
+    queued_admission = bool(agents) and all(
+        getattr(runner, "queues_worker_start", False) for runner in agents.values())
     class Handler(BaseHTTPRequestHandler):
         def _log_request(self, body) -> None:
             self._request_id = uuid.uuid4().hex[:12]
@@ -979,7 +1000,10 @@ def create_server(
             payload = self._read_payload()
             if payload is None:
                 return
-            if not self.server.task_slots.acquire(blocking=False):
+            acquired = False
+            if not queued_admission:
+                acquired = self.server.task_slots.acquire(blocking=False)
+            if not queued_admission and not acquired:
                 self._reply(503, {"error": "orchestrator is busy; retry later"})
                 return
             try:
@@ -993,6 +1017,8 @@ def create_server(
                 self._reply(503, {"error": "Docker CLI is not installed"})
             except AgentConfigurationError as exc:
                 self._reply(503, {"error": str(exc)})
+            except WorkerCapacityTimeout as exc:
+                self._reply(503, {"error": str(exc)})
             except AgentRunError as exc:
                 self._reply(502, {"error": str(exc)})
             except (BrokenPipeError, ConnectionResetError):
@@ -1000,7 +1026,8 @@ def create_server(
             except OSError:
                 self._reply(500, {"error": "session storage failed"})
             finally:
-                self.server.task_slots.release()
+                if acquired:
+                    self.server.task_slots.release()
 
         def do_DELETE(self) -> None:
             self._log_request(None)
@@ -1035,7 +1062,11 @@ def create_server(
             self._reply(200, {"status": "closed"})
 
     directory = session_dir or PROJECT_ROOT / ".sessions"
-    return ChatServer((host, port), Handler, directory, idle_seconds, store)
+    server = ChatServer((host, port), Handler, directory, idle_seconds, store)
+    server.worker_managers = tuple({id(runner): runner for runner in agents.values()
+        if getattr(runner, "queues_worker_start", False)
+        and hasattr(runner, "shutdown_worker_queue")}.values())
+    return server
 
 
 def main() -> None:

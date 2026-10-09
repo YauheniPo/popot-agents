@@ -19,7 +19,7 @@ if [[ ! -s "$LOCAL/kubeconfig" || ! -s "$LOCAL/kubeconfig-container" || \
   python3 "$ROOT/ax_local/cluster/worker_health.py"
   bash "$ROOT/memory/up.sh"
   docker compose --env-file "$ROOT/.env" -f "$ROOT/ax_local/compose.yaml" \
-    up --build -d mcp-server
+    up --build -d --wait --wait-timeout 300 mcp-server
 else
   CLUSTER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["context"].removeprefix("kind-"))' "$ROOT/ax_local/config.json")"
   for container in kind-registry "${CLUSTER}-control-plane"; do
@@ -37,5 +37,7 @@ else
   bash "$ROOT/memory/up.sh"
   bash "$ROOT/ax_local/rebuild-worker.sh"
 fi
+
+python3 "$ROOT/ax_local/cluster/deployment_cleanup.py"
 
 echo "AX MCP endpoint: http://127.0.0.1:${AX_MCP_PUBLISH_PORT:-8003}/mcp"

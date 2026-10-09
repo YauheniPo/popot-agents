@@ -4,6 +4,7 @@
   "ax": {
     "context": "kind-popot-ax",
     "atespace": "ate-demo-counter",
+    "worker_pool_name": "popot-workers",
     "workspace_name": "popot-local",
     "task_resources": {
       "requests": {
@@ -25,14 +26,15 @@
     "restore_timeout_seconds": 30,
     "response_margin_seconds": 10,
     "delete_timeout_seconds": 5,
-    "suspend_retention_seconds": 7200
+    "suspend_retention_seconds": 7200,
+    "max_workers": 10,
+    "worker_queue_timeout_seconds": 3600
   },
   "delegation": {
     "enabled": true,
     "port": 8005,
-    "max_depth": 3,
+    "max_depth": 5,
     "max_calls_per_turn": 8,
-    "max_concurrent_tasks": 3,
     "turn_timeout_seconds": 900,
     "poll_interval_seconds": 0.5
   },

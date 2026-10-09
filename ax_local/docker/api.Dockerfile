@@ -11,6 +11,7 @@ RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax ./cmd/ax
 
 FROM python:3.12-slim
+LABEL com.popot.project="popot-agents"
 ARG TARGETARCH
 ARG KUBECTL_VERSION=v1.35.3
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
