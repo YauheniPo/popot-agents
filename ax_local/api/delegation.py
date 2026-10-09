@@ -1,4 +1,4 @@
-"""Local A2A 1.0 JSON-RPC task adapter with per-actor delegation authority.
+"""AX delegation policy and execution with per-actor authority.
 
 Child sessions use the existing session store and AX runner. No provider keys
 or delegation capabilities are persisted in transcripts or role configuration.
@@ -17,7 +17,6 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
@@ -288,8 +287,8 @@ class DelegationService:
         if not task or len(task) > RUNTIME["limits"]["message_chars"]:
             raise A2AError("task is empty or too long")
         configuration = params.get("configuration", {})
-        if not isinstance(configuration, dict) or configuration.get("blocking", False) is not False:
-            raise A2AError("use nonblocking submission and GetTask polling")
+        if not isinstance(configuration, dict):
+            raise A2AError("configuration must be an object")
         fingerprint = hashlib.sha256((role + "\n" + task).encode()).hexdigest()
         with self.lock:
             self._authorized(grant.token, role)
@@ -418,67 +417,6 @@ class DelegationService:
             self.tokens.clear()
 
 
-def start_a2a_server(service: DelegationService, host: str, port: int) -> ThreadingHTTPServer:
-    class Handler(BaseHTTPRequestHandler):
-        def reply(self, status, body):
-            encoded = json.dumps(body, ensure_ascii=False).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            try:
-                self.wfile.write(encoded)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-
-        def do_GET(self):
-            match = re.fullmatch(r"/a2a/([a-z][a-z0-9_]*)/\.well-known/agent-card\.json", self.path)
-            if not match or match[1] not in service.roles:
-                self.reply(404, {})
-                return
-            self.reply(200, service.card(match[1]))
-
-        def do_POST(self):
-            match = re.fullmatch(r"/a2a/([a-z][a-z0-9_]*)", self.path)
-            if not match:
-                self.reply(404, {})
-                return
-            authorization = self.headers.get("Authorization", "")
-            token = authorization[7:] if authorization.startswith("Bearer ") else ""
-            try:
-                service._authorized(token, match[1])
-            except A2AError:
-                self.reply(403, {})
-                return
-            request_id = None
-            try:
-                self.connection.settimeout(5)
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= RUNTIME["limits"]["request_bytes"]:
-                    raise A2AError("invalid request size", -32600)
-                body = json.loads(self.rfile.read(length))
-                if not isinstance(body, dict) or body.get("jsonrpc") != "2.0" \
-                        or type(body.get("id")) not in {str, int}:
-                    raise A2AError("JSON-RPC request with id is required", -32600)
-                request_id = body["id"]
-                if self.headers.get("A2A-Version") != "1.0":
-                    raise A2AError("only A2A-Version 1.0 is supported", -32009)
-                result = service.dispatch(token, match[1], body.get("method"), body.get("params", {}))
-                self.reply(200, {"jsonrpc": "2.0", "id": request_id, "result": result})
-            except A2AError as exc:
-                self.reply(200, {"jsonrpc": "2.0", "id": request_id,
-                                 "error": {"code": exc.code, "message": str(exc)}})
-            except (ValueError, TypeError):
-                self.reply(200, {"jsonrpc": "2.0", "id": request_id,
-                                 "error": {"code": -32700, "message": "invalid JSON request"}})
-            except OSError:
-                self.reply(200, {"jsonrpc": "2.0", "id": request_id,
-                                 "error": {"code": -32603, "message": "delegation storage unavailable"}})
-
-        def log_message(self, *_args):
-            pass
-
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
+def start_a2a_server(service: DelegationService, host: str, port: int):
+    from .a2a_sdk import A2AServer
+    return A2AServer(service, host, port)

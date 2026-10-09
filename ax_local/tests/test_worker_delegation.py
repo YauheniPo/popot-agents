@@ -4,8 +4,11 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
+import httpx
+
 from ax_local.worker.delegation import make_tools
 from popot_agents.worker.http_harness import run_http
+from popot_agents.runtime_config import RUNTIME
 
 
 class WorkerDelegationTests(unittest.TestCase):
@@ -30,12 +33,14 @@ class WorkerDelegationTests(unittest.TestCase):
                             "AX_DELEGATION_ROLES": '["backend_engineer"]'})
         failure = {"stage": "worker_message", "code": "mcp_discovery_failed",
                    "error_type": "AgentRunError"}
-        task = {"id": "0123456789abcdef", "status": {"state": "TASK_STATE_FAILED",
-                "message": {"parts": [{"text": "MCP server fetch failed during discovery"}]}},
+        task = {"id": "0123456789abcdef", "contextId": "parent-context",
+                "status": {"state": "TASK_STATE_FAILED",
+                "message": {"messageId": "failure", "role": "ROLE_AGENT",
+                            "parts": [{"text": "MCP server fetch failed during discovery"}]}},
                 "metadata": {"failure": failure}}
-        response = io.BytesIO(json.dumps({"jsonrpc": "2.0", "id": 1,
-                                         "result": {"task": task}}).encode())
-        with patch("ax_local.worker.delegation.request.urlopen", return_value=response):
+        response = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
+                                             "result": {"task": task}})
+        with patch("httpx.AsyncHTTPTransport.handle_async_request", return_value=response):
             result = json.loads(tools["delegate_task"]["call"](
                 {"role": "backend_engineer", "task": "delegate onward"},
                 timeout_seconds=5, call_id="call-1"))
@@ -43,6 +48,31 @@ class WorkerDelegationTests(unittest.TestCase):
         self.assertEqual(result["role"], "backend_engineer")
         self.assertEqual(result["error"], "MCP server fetch failed during discovery")
         self.assertEqual(result["failure"], failure)
+
+    def test_sdk_rejects_incomplete_task_response_without_claiming_success(self):
+        tools = make_tools({"AX_DELEGATION_URL": "http://api:8005",
+                            "AX_DELEGATION_TOKEN": "test-capability",
+                            "AX_DELEGATION_ROLES": '["qa_engineer"]'})
+        response = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
+                                             "result": {"task": {"status": {"state": "TASK_STATE_COMPLETED"}}}})
+        with patch("httpx.AsyncHTTPTransport.handle_async_request", return_value=response):
+            result = json.loads(tools["delegate_task"]["call"](
+                {"role": "qa_engineer", "task": "check"}, timeout_seconds=2, call_id="invalid"))
+        self.assertIn("error", result)
+        self.assertNotIn("answer", result)
+        self.assertNotIn("test-capability", json.dumps(result))
+
+    def test_response_size_limit_applies_before_sdk_json_parsing(self):
+        tools = make_tools({"AX_DELEGATION_URL": "http://api:8005",
+                            "AX_DELEGATION_TOKEN": "test-capability",
+                            "AX_DELEGATION_ROLES": '["qa_engineer"]'})
+        response = httpx.Response(200, content=b"x" * 4200)
+        with patch("httpx.AsyncHTTPTransport.handle_async_request", return_value=response), \
+             patch.dict(RUNTIME["limits"], {"history_bytes": 16}):
+            result = json.loads(tools["delegate_task"]["call"](
+                {"role": "qa_engineer", "task": "check"}, timeout_seconds=2, call_id="large"))
+        self.assertIn("resource limit", result["error"])
+        self.assertTrue(response.is_closed)
 
     def test_only_ax_workers_with_allowed_roles_get_delegation_tool(self):
         self.assertEqual(make_tools({}), {})

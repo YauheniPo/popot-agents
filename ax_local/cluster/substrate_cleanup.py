@@ -14,7 +14,12 @@ from pathlib import Path
 import re
 import subprocess
 
-PIN = "672533541dbfcd29084e4de2475267088bda3651"
+if __package__:
+    from .build_versions import BUILD_VERSIONS
+else:
+    from build_versions import BUILD_VERSIONS
+
+PIN = BUILD_VERSIONS['SUBSTRATE_COMMIT']
 START = '\tif _, err := client.TerminateWorkload(ctx, &ateompb.TerminateWorkloadRequest{'
 END = '\n\t// Deregister after teardown succeeds'
 GUARD = '''\talreadyReset := false

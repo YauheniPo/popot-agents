@@ -135,6 +135,8 @@ def main() -> None:
         server.cron.recover_interrupted()
         server.cron.start()
     except Exception:
+        if a2a:
+            a2a.server_close()
         if "server" in locals():
             if hasattr(server, "cron"):
                 server.cron.close()

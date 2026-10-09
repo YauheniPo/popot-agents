@@ -39,5 +39,6 @@ else
 fi
 
 python3 "$ROOT/ax_local/cluster/deployment_cleanup.py"
+python3 "$ROOT/ax_local/cluster/resource_monitoring.py" install
 
 echo "AX MCP endpoint: http://127.0.0.1:${AX_MCP_PUBLISH_PORT:-8003}/mcp"

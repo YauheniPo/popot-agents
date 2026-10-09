@@ -10,12 +10,14 @@ import time
 from pathlib import Path
 
 if __package__:
+    from .build_versions import BUILD_VERSIONS
     from .worker_pool import ensure_named_pool
 else:
+    from build_versions import BUILD_VERSIONS
     from worker_pool import ensure_named_pool
 
 
-SUBSTRATE_COMMIT = "672533541dbfcd29084e4de2475267088bda3651"
+SUBSTRATE_COMMIT = BUILD_VERSIONS['SUBSTRATE_COMMIT']
 WORKER_LABEL = "ate.dev/worker-pool"
 
 

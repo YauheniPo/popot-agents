@@ -1,12 +1,20 @@
 """Expose allowed AX roles as a bounded A2A delegation tool to the model."""
 
+import asyncio
 import hashlib
 import json
 import os
 import time
-import uuid
-from urllib import error, request
 from urllib.parse import urlsplit
+
+import httpx
+from google.protobuf.json_format import MessageToDict, ParseError
+from a2a.client.client import ClientCallContext
+from a2a.client.errors import A2AClientError
+from a2a.client.transports.jsonrpc import JsonRpcTransport
+from a2a.types import a2a_pb2 as types
+from a2a.utils.errors import A2AError as SDKError
+from a2a.utils.proto_utils import validate_proto_required_fields
 
 from popot_agents.runtime_config import RUNTIME
 
@@ -48,64 +56,95 @@ def make_tools(environ: dict | None = None) -> dict:
         endpoint = url.rstrip("/") + "/a2a/" + arguments["role"]
         task_id = None
 
-        def rpc(method, params, *, cleanup=False):
-            remaining = 2 if cleanup else deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("delegation deadline exceeded")
-            body = {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": method, "params": params}
-            call = request.Request(endpoint, data=json.dumps(body).encode(), headers={
-                "Content-Type": "application/json", "A2A-Version": "1.0",
-                "Authorization": "Bearer " + token}, method="POST")
-            with request.urlopen(call, timeout=min(5, remaining)) as response:
-                raw = response.read(RUNTIME["limits"]["history_bytes"] + 4096)
-                result = json.loads(raw)
-            if "error" in result:
-                raise ValueError(result["error"].get("message", "A2A request rejected"))
-            return result["result"]
+        async def execute():
+            nonlocal task_id
+            headers = {"A2A-Version": "1.0", "Authorization": "Bearer " + token,
+                       "Accept-Encoding": "identity"}
+            async with httpx.AsyncClient(headers=headers, trust_env=False,
+                                         transport=BoundedHTTPTransport()) as client:
+                transport = JsonRpcTransport(client, types.AgentCard(), endpoint)
 
-        try:
-            params = {"message": {
-                "messageId": hashlib.sha256(call_id.encode()).hexdigest(), "role": "ROLE_USER",
-                "parts": [{"text": arguments["task"]}]},
-                "configuration": {"blocking": False}}
-            try:
-                task = rpc("SendMessage", params)["task"]
-            except (error.URLError, OSError):
-                # A response can be lost after task creation. Reuse the message ID.
-                task = rpc("SendMessage", params)["task"]
-            task_id = task["id"]
-            while task["status"]["state"] in {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("delegation deadline exceeded")
-                time.sleep(min(poll_interval, remaining))
-                task = rpc("GetTask", {"id": task_id})
-            state = task["status"]["state"]
-            result = {"sessionId": task_id, "role": arguments["role"], "state": state}
-            if state == "TASK_STATE_COMPLETED":
-                answer = "\n".join(part["text"] for artifact in task.get("artifacts", [])
-                                   for part in artifact.get("parts", []) if "text" in part)
-                limit = RUNTIME["limits"]["tool_output_chars"]
-                result.update(answer=answer[:limit], truncated=len(answer) > limit)
-            else:
-                message = task["status"].get("message", {})
-                reason = "\n".join(part["text"] for part in message.get("parts", [])
-                                   if isinstance(part, dict) and isinstance(part.get("text"), str))
-                result["error"] = reason[:500] or "delegated task did not complete successfully"
-                failure = task.get("metadata", {}).get("failure")
-                if isinstance(failure, dict):
-                    result["failure"] = {key: value[:100] for key, value in failure.items()
-                                         if key in {"stage", "code", "error_type"}
-                                         and isinstance(value, str)}
-            return json.dumps(result, ensure_ascii=False)
-        except (ValueError, KeyError, TypeError, error.URLError, OSError) as exc:
-            if task_id:
+                async def invoke(operation, *, cleanup=False):
+                    remaining = 2 if cleanup else deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("delegation deadline exceeded")
+                    context = ClientCallContext(timeout=min(5, remaining))
+                    response = await asyncio.wait_for(operation(context), timeout=min(5, remaining))
+                    validate_proto_required_fields(response)
+                    return response
+
+                params = types.SendMessageRequest(
+                    message=types.Message(message_id=hashlib.sha256(call_id.encode()).hexdigest(),
+                                          role=types.ROLE_USER,
+                                          parts=[types.Part(text=arguments["task"])]),
+                    configuration=types.SendMessageConfiguration(return_immediately=True))
                 try:
-                    rpc("CancelTask", {"id": task_id}, cleanup=True)
-                except (ValueError, KeyError, TypeError, error.URLError, OSError):
-                    pass
-            issue = (str(exc)[:300] if type(exc) is ValueError
-                     else "delegation failed or exceeded the turn deadline")
-            return json.dumps({"sessionId": task_id, "role": arguments["role"], "error": issue})
+                    try:
+                        response = await invoke(lambda ctx: transport.send_message(params, context=ctx))
+                    except (A2AClientError, asyncio.TimeoutError) as exc:
+                        # Only retry transport failures; the message ID deduplicates side effects.
+                        if not isinstance(exc, asyncio.TimeoutError) and not isinstance(
+                                exc.__cause__, httpx.RequestError):
+                            raise
+                        response = await invoke(lambda ctx: transport.send_message(params, context=ctx))
+                    if not response.HasField("task"):
+                        raise ValueError("delegation did not return a task")
+                    task = response.task
+                    task_id = task.id
+                    while task.status.state in {types.TASK_STATE_SUBMITTED, types.TASK_STATE_WORKING}:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("delegation deadline exceeded")
+                        await asyncio.sleep(min(poll_interval, remaining))
+                        task = await invoke(lambda ctx: transport.get_task(
+                            types.GetTaskRequest(id=task_id), context=ctx))
+                    result = {"sessionId": task_id, "role": arguments["role"],
+                              "state": types.TaskState.Name(task.status.state)}
+                    if task.status.state == types.TASK_STATE_COMPLETED:
+                        answer = "\n".join(part.text for artifact in task.artifacts
+                                           for part in artifact.parts if part.HasField("text"))
+                        limit = RUNTIME["limits"]["tool_output_chars"]
+                        result.update(answer=answer[:limit], truncated=len(answer) > limit)
+                    else:
+                        reason = "\n".join(part.text for part in task.status.message.parts
+                                           if part.HasField("text"))
+                        result["error"] = reason[:500] or "delegated task did not complete successfully"
+                        failure = MessageToDict(task).get("metadata", {}).get("failure")
+                        if isinstance(failure, dict):
+                            result["failure"] = {key: value[:100] for key, value in failure.items()
+                                                 if key in {"stage", "code", "error_type"}
+                                                 and isinstance(value, str)}
+                    return json.dumps(result, ensure_ascii=False)
+                except (ValueError, KeyError, TypeError, OSError, asyncio.TimeoutError, ParseError, SDKError) as exc:
+                    if task_id:
+                        try:
+                            await invoke(lambda ctx: transport.cancel_task(
+                                types.CancelTaskRequest(id=task_id), context=ctx), cleanup=True)
+                        except (ValueError, OSError, asyncio.TimeoutError, ParseError, SDKError):
+                            pass
+                    issue = (str(exc)[:300] if type(exc) is ValueError or
+                             isinstance(exc, SDKError) and not isinstance(exc, A2AClientError)
+                             else "delegation failed or exceeded the turn deadline")
+                    return json.dumps({"sessionId": task_id, "role": arguments["role"], "error": issue})
+
+        return asyncio.run(execute())
 
     return {"delegate_task": {"schema": schema, "call": delegate}}
+
+
+class BoundedHTTPTransport(httpx.AsyncHTTPTransport):
+    """Bound responses before the SDK parses JSON; retain its transport and models."""
+
+    async def handle_async_request(self, request):
+        response = await super().handle_async_request(request)
+        try:
+            content = bytearray()
+            async for chunk in response.aiter_bytes():
+                content.extend(chunk)
+                if len(content) > RUNTIME["limits"]["history_bytes"] + 4096:
+                    raise ValueError("A2A response exceeds the resource limit")
+            return httpx.Response(response.status_code, headers={key: value
+                for key, value in response.headers.items()
+                if key.lower() not in {"content-encoding", "content-length"}}, content=bytes(content))
+        finally:
+            await response.aclose()

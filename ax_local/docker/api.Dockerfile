@@ -2,11 +2,11 @@ FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS ax-cli
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG AX_VERSION=v0.3.1
-ARG AX_COMMIT=e70162a34037c221fe6fadefd98308c05a4ad8f3
-RUN git clone --depth 1 --branch "$AX_VERSION" https://github.com/google/ax.git /src/ax
+COPY ax_local/docker/versions.env /build-versions.env
+RUN . /build-versions.env \
+    && git clone --depth 1 --branch "$AX_VERSION" https://github.com/google/ax.git /src/ax \
+    && test "$(git -C /src/ax rev-parse HEAD)" = "$AX_COMMIT"
 WORKDIR /src/ax
-RUN test "$(git rev-parse HEAD)" = "$AX_COMMIT"
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax ./cmd/ax
 
@@ -23,7 +23,7 @@ RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETA
     && printf '%s  %s\n' "$(cat /tmp/kubectl.sha256)" /usr/local/bin/kubectl | sha256sum -c - \
     && chmod +x /usr/local/bin/kubectl \
     && rm /tmp/kubectl.sha256
-RUN pip install --no-cache-dir 'psycopg[binary]==3.3.6'
+RUN pip install --no-cache-dir 'psycopg[binary]==3.3.6' 'a2a-sdk[http-server]==1.2.2' 'uvicorn==0.42.0'
 COPY --from=ax-cli /ax /usr/local/bin/ax
 WORKDIR /app
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/

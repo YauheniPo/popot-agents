@@ -4,6 +4,7 @@ import os
 
 from popot_agents.worker.session_worker import serve
 from .delegation import make_tools
+from .process_metrics import ProcessMetrics
 
 
 def main() -> None:
@@ -20,10 +21,11 @@ def main() -> None:
         # create files without letting it remove files owned by root.
         os.chmod("/workspace", 0o1777)
     tools = make_tools()
-    if tools:
-        serve(extra_tools=tools)
-    else:
-        serve()
+    with ProcessMetrics.from_env():
+        if tools:
+            serve(extra_tools=tools)
+        else:
+            serve()
 
 
 if __name__ == "__main__":
