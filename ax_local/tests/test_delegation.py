@@ -18,6 +18,7 @@ from ax_local.api.ax_runner import AxAgentRunner, AxChat
 from ax_local.tests.test_worker_queue import wait_for
 from popot_agents.orchestrator.main import create_server
 from popot_agents.orchestrator.session_store import SessionStore
+from popot_agents.progress import emit_progress, observe_progress
 
 
 class FakeChat:
@@ -68,7 +69,7 @@ class DelegationTests(unittest.TestCase):
                        "max_calls_per_turn": 4,
                        "turn_timeout_seconds": 300, "poll_interval_seconds": 0.01}
         self.store = SessionStore(self.temporary.name)
-        self.service = DelegationService(self.roles, self.policy, self.runner, self.store,
+        self.service = DelegationService(self.roles, self.policy, {"test": self.runner}, self.store,
                                          "http://127.0.0.1:8005")
         self.runner.delegation = self.service
         self.addCleanup(self.service.close)
@@ -103,6 +104,88 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(saved["messages"][-1]["content"], "child result: implement")
         self.assertTrue(self.runner.chats[0].closed)
         self.assertNotIn(self.token, str(saved))
+
+    def test_child_uses_its_role_profile_instead_of_the_parent_provider(self):
+        child_runner = FakeRunner()
+        child_runner.delegation = self.service
+        self.service.runners['child_provider'] = child_runner
+        self.roles['backend_engineer']['agent'] = 'child_provider'
+        with self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertEqual(task['status']['state'], 'TASK_STATE_COMPLETED')
+        self.assertEqual(self.runner.chats, [])
+        self.assertEqual(len(child_runner.chats), 1)
+        self.assertTrue(child_runner.chats[0].closed)
+        self.assertEqual(self.store.get(task['id'])['agent'], 'child_provider')
+
+    def test_nested_child_progress_reaches_parent_before_final_answer_via_a2a(self):
+        from ax_local.worker.delegation import make_tools
+        received, completed = [], threading.Event()
+        server = start_a2a_server(self.service, '127.0.0.1', 0)
+        self.addCleanup(server.server_close)
+
+        def delegate(session_id, config, role):
+            env = self.service.worker_environment(session_id, config)
+            env['AX_DELEGATION_POLL_SECONDS'] = '0.01'
+            tools = make_tools(env)
+            return json.loads(tools['delegate_task']['call'](
+                {'role': role, 'task': 'inspect'}, timeout_seconds=5, call_id=session_id + '-inspect'))
+
+        def notify(message):
+            received.append(message)
+            if json.loads(message).get('agent_role') == 'qa_engineer' and json.loads(message).get('name') == 'mcp__github__pull_request_read':
+                completed.set()
+
+        def callback(chat, _):
+            emit_progress('model_request')
+            if chat.config['_ax_role'] == 'backend_engineer':
+                result = delegate(chat.session_id, chat.config, 'qa_engineer')
+                self.assertEqual(result.get('state'), 'TASK_STATE_COMPLETED', result)
+            else:
+                emit_progress('tool_call', name='mcp__github__pull_request_read',
+                              arguments={'token': 'PRIVATE'})
+                if not completed.wait(2):
+                    raise RuntimeError('child progress was not received before completion')
+
+        self.runner.callback = callback
+        with self.service.turn(self.parent, 10), observe_progress(notify):
+            result = delegate(self.parent, self.roles['tech_lead'], 'backend_engineer')
+        self.assertTrue(completed.is_set(), received)
+        self.assertEqual(result.get('state'), 'TASK_STATE_COMPLETED', result)
+        self.assertEqual(sum(json.loads(m).get('agent_role') == 'qa_engineer' and json.loads(m).get('name') == 'mcp__github__pull_request_read' for m in received), 1)
+        self.assertIn({'event': 'model_request', 'agent_role': 'backend_engineer'}, [json.loads(m) for m in received])
+        self.assertNotIn('PRIVATE', json.dumps(received))
+        wait_for(lambda: not self.service.jobs)
+        self.assertTrue(all(chat.closed for chat in self.runner.chats))
+
+    def test_child_activity_is_bounded_and_cannot_be_read_by_another_parent(self):
+        ready, finish = threading.Event(), threading.Event()
+        self.addCleanup(finish.set)
+        def callback(*_):
+            for _ in range(100):
+                emit_progress('model_request')
+                emit_progress('tool_call', name='read_file', arguments={'path': 'app.py', 'token': 'PRIVATE'})
+            ready.set()
+            finish.wait(3)
+        self.runner.callback = callback
+        other = '1111111111111111'
+        other_env = self.service.worker_environment(other, self.roles['tech_lead'])
+        with self.service.turn(self.parent, 5), self.service.turn(other, 5):
+            task_id = self.send()['id']
+            self.assertTrue(ready.wait(2))
+            task = self.service.dispatch(self.token, 'backend_engineer', 'GetTask', {'id': task_id})
+            activity = task['metadata'].get('activity', [])
+            self.assertEqual(len(activity), 64)
+            self.assertTrue(all(json.loads(a['message']).get('agent_role') == 'backend_engineer' for a in activity))
+            self.assertEqual([a['seq'] for a in activity], sorted(set(a['seq'] for a in activity)))
+            with self.assertRaises(A2AError):
+                self.service.dispatch(other_env['AX_DELEGATION_TOKEN'], 'backend_engineer',
+                                      'GetTask', {'id': task_id})
+            finish.set()
+            task = self.wait_task(task_id)
+            self.assertEqual(task['status']['state'], 'TASK_STATE_COMPLETED')
+            self.assertIn('activity', task['metadata'])
+            self.assertNotIn('PRIVATE', json.dumps(task))
 
     def test_denies_unavailable_role_even_if_request_claims_other_parent(self):
         with self.service.turn(self.parent, 5), self.assertRaisesRegex(A2AError, "not allowed"):
@@ -144,7 +227,7 @@ class DelegationTests(unittest.TestCase):
         runner = AxAgentRunner('localhost:5001/popot-agent-ax@sha256:' + 'a' * 64,
                                'unused', 'http://localhost:1/v1')
         runner.delegation = self.service
-        self.service.runner = runner
+        self.service.runners = {"test": runner}
         leases = [runner.worker_queue.acquire(f'occupied-{index}') for index in range(10)]
         def cli(*args, **_kwargs):
             return subprocess.CompletedProcess([], 1 if args[0] == 'get' else 0, '',
@@ -389,6 +472,42 @@ class DelegationTests(unittest.TestCase):
         result = json.loads(output)
         self.assertEqual(result["answer"], "child result: actual HTTP")
         self.assertEqual(result["state"], "TASK_STATE_COMPLETED")
+
+    def test_harness_routes_pr_comment_followup_through_actual_a2a(self):
+        import os
+        from ax_local.worker.delegation import make_tools
+        from popot_agents.worker.http_harness import run_http
+        self.roles['code_reviewer'] = {'agent': 'test', 'instructions': 'review', 'tools': [],
+                                       '_ax_role': 'code_reviewer', 'allowed_roles': []}
+        self.roles['backend_engineer']['allowed_roles'].append('code_reviewer')
+        parent = '1111111111111111'
+        environment = self.service.worker_environment(parent, self.roles['backend_engineer'])
+        server = start_a2a_server(self.service, '127.0.0.1', 0)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        tools = make_tools({**environment,
+                           'AX_DELEGATION_URL': f'http://127.0.0.1:{server.server_port}',
+                           'AX_DELEGATION_POLL_SECONDS': '0.01'})
+        pr = 'https://github.com/example/project/pull/70'
+        history = [{'role': 'user', 'content': 'Review ' + pr + '; do not merge.'},
+                   {'role': 'assistant', 'content': 'Old unverified findings.'},
+                   {'role': 'user', 'content': 'оставь комментарии в PR'}]
+        with self.service.turn(parent, 5), \
+             patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1',
+                                     'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen') as parent_model, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http(history, self.roles['backend_engineer'], extra_tools=tools)
+        parent_model.assert_not_called()
+        self.assertEqual(len(self.runner.chats), 1)
+        child = self.runner.chats[0]
+        self.assertTrue(child.closed)
+        saved = self.store.get(child.session_id)
+        self.assertEqual(saved['role'], 'code_reviewer')
+        self.assertEqual(saved['roleConfig']['_ax_delegation']['parent_session_id'], parent)
+        self.assertIn(pr, saved['messages'][0]['content'])
+        self.assertIn('do not merge', saved['messages'][0]['content'])
+        self.assertIn(child.session_id, answer)
 
     def test_worker_retries_lost_submission_response_without_duplicate_actor(self):
         import json

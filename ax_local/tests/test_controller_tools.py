@@ -31,7 +31,8 @@ class ControllerSetupTests(unittest.TestCase):
             shutil.copyfile(source / name, scripts / name)
         (scripts.parent / 'docker').mkdir()
         shutil.copyfile(source.parent / 'docker/versions.env', scripts.parent / 'docker/versions.env')
-        (self.root / "ax_local/config.json").write_text(
+        (self.root / "config").mkdir()
+        (self.root / "config/runtime.json").write_text(
             '{"ax":{"context":"kind-popot-ax"}}', encoding="utf-8")
         client = self.local / "src/ax/internal/substrate/client.go"
         client.parent.mkdir(parents=True)

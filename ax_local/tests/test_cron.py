@@ -45,6 +45,27 @@ class FakeRunner:
 
 
 class CronTests(unittest.TestCase):
+    def test_each_scheduled_role_uses_its_own_profile(self):
+        runners = {name: FakeRunner() for name in ('openrouter', 'ollama')}
+        roles = {name + '_role': {
+            'agent': name, 'instructions': '', 'tools': [],
+            'cron': [{'schedule': '* * * * *', 'task': name + ' report'}],
+        } for name in runners}
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(directory)
+            scheduler = CronScheduler(roles, runners, store)
+            try:
+                scheduler.run_due(datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc))
+                scheduler.wait_for_jobs()
+                for name, runner in runners.items():
+                    self.assertEqual(len(runner.calls), 1)
+                    session_id, config = runner.calls[0]
+                    self.assertEqual(config['agent'], name)
+                    self.assertEqual(store.get(session_id)['agent'], name)
+                    self.assertTrue(runner.chats[0].closed)
+            finally:
+                scheduler.close()
+
     def test_distinct_schedules_are_admitted_without_separate_capacity_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(directory)
@@ -54,7 +75,7 @@ class CronTests(unittest.TestCase):
             roles = {'analyst': {'agent': 'openrouter', 'instructions': 'Analyze', 'tools': [],
                                 'cron': [{'schedule': '* * * * *', 'task': f'report {index}'}
                                          for index in range(4)]}}
-            scheduler = CronScheduler(roles, runner, store)
+            scheduler = CronScheduler(roles, {"openrouter": runner}, store)
             def cli(*args, **_kwargs):
                 return subprocess.CompletedProcess([], 1 if args[0] == 'get' else 0, '',
                                                    'NotFound' if args[0] == 'get' else '')
@@ -106,7 +127,7 @@ class CronTests(unittest.TestCase):
             runner = FakeRunner()
             roles = {"analyst": {"agent": "openrouter", "instructions": "Analyze", "tools": [],
                                  "cron": [{"schedule": "* * * * *", "task": "report"}]}}
-            scheduler = CronScheduler(roles, runner, store)
+            scheduler = CronScheduler(roles, {"openrouter": runner}, store)
             now = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
             scheduler.run_due(now)
             scheduler.wait_for_jobs()
@@ -120,7 +141,7 @@ class CronTests(unittest.TestCase):
             self.assertEqual(saved["roleConfig"]["_ax_cron"]["scheduled_at"], "2026-10-01T10:00:00+00:00")
             self.assertNotIn("cron", runner.calls[0][1])
             scheduler.close()
-            restarted = CronScheduler(roles, FakeRunner(), store)
+            restarted = CronScheduler(roles, {"openrouter": FakeRunner()}, store)
             restarted.run_due(now)
             self.assertEqual(len(store.list_chats()), 1)
             restarted.close()
@@ -141,7 +162,7 @@ class CronTests(unittest.TestCase):
             runner = FailingRunner()
             roles = {"analyst": {"agent": "openrouter", "instructions": "Analyze", "tools": [],
                                  "cron": [{"schedule": "* * * * *", "task": "report"}]}}
-            scheduler = CronScheduler(roles, runner, store)
+            scheduler = CronScheduler(roles, {"openrouter": runner}, store)
             scheduler.run_due(datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc))
             scheduler.wait_for_jobs()
             saved = store.list_chats()[0]
@@ -166,7 +187,7 @@ class CronTests(unittest.TestCase):
             runner.start_chat = lambda session_id, config, **kwargs: BlockingChat()
             roles = {"analyst": {"agent": "openrouter", "instructions": "Analyze", "tools": [],
                                  "cron": [{"schedule": "* * * * *", "task": "report"}]}}
-            scheduler = CronScheduler(roles, runner, store)
+            scheduler = CronScheduler(roles, {"openrouter": runner}, store)
             with patch("popot_agents.orchestrator.main.ChatServer") as server_class:
                 create_server({"openrouter": runner})
             handler_class = server_class.call_args.args[1]

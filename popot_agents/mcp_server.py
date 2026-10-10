@@ -1,12 +1,15 @@
 """MCP tools that call the existing orchestrator HTTP API."""
 
 import json
+import asyncio
+from collections import deque
 import os
 import sys
 import uuid
 from urllib import error, parse, request
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.progress import is_progress_message
 
 MAX_LOG_BODY_BYTES = RUNTIME["logging"]["mcp_body_max_bytes"]
 SECRET_NAMES = {"authorization", "proxy-authorization", "cookie", "set-cookie",
@@ -207,8 +210,68 @@ class OrchestratorClient:
         return self._request("GET", "/chats/" + parse.quote(session_id, safe=""))
 
 
+async def stream_call(client, path, payload, context):
+    """Stream short actions using HTTPX, already supplied by the MCP SDK.
+
+    Cancelling the MCP call closes its HTTP stream; agent work follows the
+    orchestrator's existing disconnect policy and is never automatically retried.
+    """
+    import httpx
+    activity = deque(maxlen=20)
+    counter = 0
+    try:
+        async with httpx.AsyncClient(timeout=client.timeout_seconds, trust_env=False) as http:
+            async with http.stream('POST', client.base_url + path, json=payload,
+                                   headers={'Accept': 'application/x-ndjson',
+                                            'User-Agent': 'popot-agents-mcp/1'}) as response:
+                if not response.headers.get('content-type', '').startswith('application/x-ndjson'):
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > 8 * 1024 * 1024:
+                            raise ValueError('response too large')
+                    result = json.loads(body)
+                    if not isinstance(result, dict):
+                        raise ValueError('invalid response')
+                    if response.status_code >= 400:
+                        raise RuntimeError(f'orchestrator HTTP {response.status_code}: {result.get("error", "request failed")}')
+                    return result
+                pending = b''
+                async for chunk in response.aiter_bytes():
+                    pending += chunk
+                    if len(pending) > 8 * 1024 * 1024:
+                        raise ValueError('response too large')
+                    while b'\n' in pending:
+                        line, pending = pending.split(b'\n', 1)
+                        item = json.loads(line)
+                        if not isinstance(item, dict):
+                            raise ValueError('invalid response')
+                        if item.get('type') == 'progress':
+                            message = item.get('message')
+                            if is_progress_message(message):
+                                activity.append(message)
+                                counter += 1
+                                try:
+                                    await asyncio.wait_for(context.report_progress(counter, message=message), timeout=2)
+                                except Exception:
+                                    pass  # Reporting must not replace or repeat the task result.
+                        elif item.get('type') == 'result':
+                            result = item.get('result')
+                            status = item.get('status')
+                            if not isinstance(result, dict) or not isinstance(status, int):
+                                raise ValueError('invalid result')
+                            if status >= 400:
+                                raise RuntimeError(f'orchestrator HTTP {status}: {result.get("error", "request failed")}')
+                            return {**result, 'activity': list(activity)}
+                raise ValueError('stream ended without a result')
+    except (httpx.HTTPError, TimeoutError) as exc:
+        raise RuntimeError('orchestrator is unavailable or timed out') from exc
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError('orchestrator returned invalid progress stream') from exc
+
+
 def main() -> None:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP, Context
     from mcp.server.transport_security import TransportSecuritySettings
 
     class LoggedFastMCP(FastMCP):
@@ -235,7 +298,7 @@ def main() -> None:
         host=os.getenv("MCP_HOST", "127.0.0.1"),
         port=int(os.getenv("MCP_PORT", "8001")),
         stateless_http=True,
-        json_response=True,
+        json_response=False,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=["127.0.0.1:*", "localhost:*"],
@@ -244,8 +307,9 @@ def main() -> None:
     )
 
     @server.tool()
-    def run_task(task: str, role: str | None = None, agent: str | None = None,
-                 sessionId: str | None = None, session_id: str | None = None) -> dict:
+    async def run_task(task: str, role: str | None = None, agent: str | None = None,
+                       sessionId: str | None = None, session_id: str | None = None,
+                       ctx: Context = None) -> dict:
         """Start a task with role (use chat for general questions) or agent. For a follow-up,
         pass the returned sessionId or session_id instead. If the role is unclear, ask the user.
         """
@@ -253,16 +317,39 @@ def main() -> None:
         session_id = _normalized_session_id(session_id)
         if sessionId is not None and session_id is not None and sessionId != session_id:
             raise ValueError("sessionId and session_id must match")
-        return client.run_task(task, role=role, agent=agent,
-                               session_id=sessionId if sessionId is not None else session_id)
+        selected = sessionId if sessionId is not None else session_id
+        if ctx is None:
+            return await asyncio.to_thread(client.run_task, task, role=role, agent=agent, session_id=selected)
+        _require_target(role, agent, selected)
+        payload = {'message' if selected else 'task': task}
+        if selected:
+            payload['sessionId'] = selected
+        if role is not None:
+            payload['role'] = role
+        if agent is not None:
+            payload['agent'] = agent
+        return await asyncio.wait_for(stream_call(client, '/messages' if selected else '/tasks', payload, ctx),
+                                      timeout=client.timeout_seconds)
 
     @server.tool()
-    def send_message(message: str, session_id: str | None = None,
-                     role: str | None = None, agent: str | None = None) -> dict:
+    async def send_message(message: str, session_id: str | None = None,
+                           role: str | None = None, agent: str | None = None,
+                           ctx: Context = None) -> dict:
         """Continue a chat with its returned session_id. For a new chat, use run_task;
         if starting here, provide role or agent. Ask the user when the role is unclear.
         """
-        return client.send_message(message, session_id=session_id, role=role, agent=agent)
+        selected = _normalized_session_id(session_id)
+        if ctx is None:
+            return await asyncio.to_thread(client.send_message, message, session_id=selected, role=role, agent=agent)
+        _require_target(role, agent, selected)
+        payload = {'message': message}
+        if selected:
+            payload['sessionId'] = selected
+        if role is not None:
+            payload['role'] = role
+        if agent is not None:
+            payload['agent'] = agent
+        return await asyncio.wait_for(stream_call(client, '/messages', payload, ctx), timeout=client.timeout_seconds)
 
     @server.tool()
     def list_chats() -> dict:

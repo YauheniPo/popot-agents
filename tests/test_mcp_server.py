@@ -168,7 +168,7 @@ class GatewayTests(unittest.TestCase):
 
             def tool(self):
                 def register(function):
-                    self.tools[function.__name__] = function
+                    self.tools[function.__name__] = (lambda *args, **kwargs: asyncio.run(function(*args, **kwargs))) if asyncio.iscoroutinefunction(function) else function
                     return function
                 return register
 
@@ -186,6 +186,7 @@ class GatewayTests(unittest.TestCase):
 
         fastmcp = types.ModuleType("mcp.server.fastmcp")
         fastmcp.FastMCP = FakeFastMCP
+        fastmcp.Context = type('Context', (), {})
         security = types.ModuleType("mcp.server.transport_security")
         security.TransportSecuritySettings = lambda **settings: settings
         with patch.dict(sys.modules, {

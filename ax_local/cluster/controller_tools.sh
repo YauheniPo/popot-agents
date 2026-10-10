@@ -21,7 +21,7 @@ if [[ ! -x "$LOCAL/bin/ko" || ! -s "$LOCAL/kubeconfig" ]]; then
 fi
 export PATH="$LOCAL/bin:$PATH"
 export KUBECONFIG="$LOCAL/kubeconfig"
-CONTEXT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["context"])' "$ROOT/ax_local/config.json")"
+CONTEXT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["context"])' "$ROOT/config/runtime.json")"
 if [[ "$CONTEXT" != kind-* || "$(kubectl config current-context)" != "$CONTEXT" ]]; then
   echo "Refusing to update a controller outside the configured local kind context" >&2
   exit 1

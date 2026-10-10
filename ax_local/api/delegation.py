@@ -16,10 +16,12 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from collections import deque
 from dataclasses import dataclass, field
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
+from popot_agents.progress import emit_progress, observe_progress, scoped_progress
 
 ACTIVE = {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
 
@@ -83,12 +85,14 @@ class Job:
     chat: object = None
     thread: threading.Thread | None = None
     lock: object = field(default_factory=threading.RLock)
+    activity: deque = field(default_factory=lambda: deque(maxlen=64))
+    activity_seq: int = 0
 
 
 class DelegationService:
-    def __init__(self, roles: dict, policy: dict, runner, store, base_url: str):
+    def __init__(self, roles: dict, policy: dict, runners: dict, store, base_url: str):
         self.roles, self.policy = roles, policy
-        self.runner, self.store = runner, store
+        self.runners, self.store = runners, store
         self.base_url = base_url.rstrip("/")
         self.lock = threading.RLock()
         self.grants: dict[str, Grant] = {}
@@ -106,7 +110,9 @@ class DelegationService:
             config = saved.get("roleConfig") or {}
             meta = config.get("_ax_delegation")
             if meta and meta.get("state") in ACTIVE:
-                self.runner.close_session(saved["sessionId"])
+                # Task deletion is independent of the old provider, which may
+                # no longer be configured after a restart.
+                next(iter(self.runners.values())).close_session(saved["sessionId"])
                 meta.update(state="TASK_STATE_FAILED", error="AX API restarted during delegation")
                 self.store.save(saved["sessionId"], saved["agent"], saved["messages"],
                                 saved["role"], config)
@@ -339,6 +345,7 @@ class DelegationService:
                 failure = None
             meta = job.config["_ax_delegation"]
             meta["state"] = state
+            meta['activity'] = list(job.activity)
             for key, value in (("error", error), ("failure", failure), ("answer", answer)):
                 if value is not None:
                     meta[key] = value
@@ -356,16 +363,34 @@ class DelegationService:
                               **({"failure": failure, "reason": error} if failure else {})}),
                   file=sys.stderr, flush=True)
 
+    def _record_progress(self, job: Job, message: str):
+        message = scoped_progress(job.config['_ax_role'], message)
+        if message is None:
+            return
+        with job.lock:
+            if job.canceled.is_set() or job.run.canceled.is_set():
+                return
+            job.activity_seq += 1
+            job.activity.append({'seq': job.activity_seq, 'message': message})
+
     def _execute(self, job: Job):
+        # Each child owns its observer; parent clients read only their authorized
+        # Task's bounded activity through the existing A2A polling transport.
+        with observe_progress(lambda message: self._record_progress(job, message)):
+            self._execute_observed(job)
+
+    def _execute_observed(self, job: Job):
         answer, issue, failure = None, None, None
         state = "TASK_STATE_FAILED"
         stage = "worker_startup"
         try:
             self._remaining(job)
             self._save(job, "TASK_STATE_WORKING")
-            job.chat = self.runner.start_chat(job.session_id, job.config,
-                                               deadline=job.deadline, cancel_event=job.canceled)
+            runner = self.runners[job.config['agent']]
+            job.chat = runner.start_chat(job.session_id, job.config,
+                                         deadline=job.deadline, cancel_event=job.canceled)
             stage = "worker_message"
+            emit_progress('turn_started')
             answer = job.chat.send(job.task, timeout_seconds=self._remaining(job))["answer"]
             self._remaining(job)
             state = "TASK_STATE_COMPLETED"
@@ -379,6 +404,7 @@ class DelegationService:
                     job.chat.close()
                 if job.canceled.is_set() or job.run.canceled.is_set():
                     state, answer, issue = "TASK_STATE_CANCELED", None, "delegation canceled"
+                emit_progress('completed' if state == 'TASK_STATE_COMPLETED' else 'failed')
                 self._save(job, state, answer if state == "TASK_STATE_COMPLETED" else None,
                            issue, failure)
             finally:
@@ -386,13 +412,20 @@ class DelegationService:
                 with self.lock:
                     self.jobs.pop(job.session_id, None)
 
-    @staticmethod
-    def _task(saved: dict) -> dict:
+    def _task(self, saved: dict) -> dict:
         meta = saved["roleConfig"]["_ax_delegation"]
         task = {"id": saved["sessionId"], "contextId": meta["root_session_id"],
                 "status": {"state": meta["state"], "timestamp": saved["updatedAt"]},
                 "metadata": {"sessionId": saved["sessionId"], "role": saved["role"],
                              "parentSessionId": meta["parent_session_id"]}}
+        activity = meta.get('activity', [])
+        with self.lock:
+            job = self.jobs.get(saved['sessionId'])
+        if job:
+            with job.lock:
+                activity = list(job.activity)
+        if activity:
+            task['metadata']['activity'] = activity
         if meta.get("error"):
             task["status"]["message"] = {"messageId": saved["sessionId"] + "-error",
                 "role": "ROLE_AGENT", "parts": [{"text": meta["error"]}]}

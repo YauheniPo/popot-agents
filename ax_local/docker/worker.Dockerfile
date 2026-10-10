@@ -21,6 +21,7 @@ COPY --from=ax-runner /src/ax/cmd/ax-task-runner/antigravity_bootstrap.py /usr/l
 WORKDIR /app
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/
+COPY popot_agents/progress.py /app/popot_agents/
 COPY skills /app/skills
 COPY popot_agents/worker /app/popot_agents/worker
 COPY ax_local/__init__.py /app/ax_local/

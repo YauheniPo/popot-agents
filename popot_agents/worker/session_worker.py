@@ -10,6 +10,7 @@ import time
 from .agent_worker import run_harness
 from .http_harness import run_http
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.progress import trace_event, observe_progress
 from popot_agents.skills import prepare_role_config
 
 
@@ -18,8 +19,7 @@ MAX_HISTORY_BYTES = RUNTIME["limits"]["history_bytes"]
 
 
 def _trace(event: str, **fields) -> None:
-    print(json.dumps({"event": event, **fields}, ensure_ascii=False),
-          file=sys.stderr, flush=True)
+    trace_event(event, **fields)
 
 
 class Conversation:
@@ -95,7 +95,14 @@ def serve(*, extra_tools: dict | None = None) -> None:
                 if payload.get("action") == "ping":
                     result = {"status": "ok"}
                 elif payload.get("action") == "message":
-                    result = {"answer": conversation.ask(payload.get("message"))}
+                    def notify(message):
+                        try:
+                            self.wfile.write((json.dumps({'progress': message}, ensure_ascii=False) + '\n').encode())
+                            self.wfile.flush()
+                        except OSError:
+                            pass  # A disconnected observer must not stop agent work.
+                    with observe_progress(notify if payload.get('progress') is True else None):
+                        result = {"answer": conversation.ask(payload.get("message"))}
                 elif payload.get("action") == "restore":
                     conversation.restore(payload.get("messages"))
                     _trace("session_restored", turns=len(conversation.messages) // 2)

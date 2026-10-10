@@ -6,7 +6,7 @@ import socket
 import unittest
 from unittest.mock import patch
 
-from ax_local.config import AX_CONFIG
+from popot_agents.runtime_config import AX_CONFIG
 from ax_local.api.ax_runner import AxAgentRunner, AxChat
 from popot_agents.orchestrator.main import AgentRunError
 from popot_agents.runtime_config import RUNTIME
@@ -127,7 +127,7 @@ class AxRunnerTests(unittest.TestCase):
         self.assertNotIn("private-provider-key", json.dumps(manifest))
 
     def test_ax_manifest_uses_configured_workspace_and_resources(self):
-        ax = AX_CONFIG["ax"]
+        ax = AX_CONFIG
         self.assertEqual(self.runner.workspace_manifest()["metadata"]["name"],
                          ax["workspace_name"])
         manifest = self.runner.task_manifest("0123456789abcdef")
@@ -194,7 +194,7 @@ class AxRunnerTests(unittest.TestCase):
         manifest = self.runner.task_manifest("0123456789abcdef", {"timeout_seconds": 300})
         env = {item["name"]: item["value"] for item in manifest["spec"]["env"]}
         from popot_agents.runtime_config import RUNTIME
-        self.assertEqual(env["HARNESS_TURN_TIMEOUT_SECONDS"], str(300 - RUNTIME['worker']['response_margin_seconds']))
+        self.assertEqual(env["HARNESS_TURN_TIMEOUT_SECONDS"], str(300 - RUNTIME['timeouts']['turn_response_margin_seconds']))
 
     def test_existing_task_is_replaced_after_api_restart(self):
         present = subprocess.CompletedProcess([], 0, "", "")
@@ -210,7 +210,7 @@ class AxRunnerTests(unittest.TestCase):
         present = subprocess.CompletedProcess([], 0, "", "")
         error = subprocess.TimeoutExpired(["ax", "private-command-value"], 17,
                                           stderr="private-stderr-value")
-        with patch.dict(AX_CONFIG["ax"], {"cli_timeout_seconds": 17}), \
+        with patch.dict(AX_CONFIG, {"cli_timeout_seconds": 17}), \
              patch.object(self.runner, "_run", side_effect=[present, error]) as run:
             with self.assertRaisesRegex(AgentRunError, "deleting previous AX task") as caught:
                 self.runner.start_chat("0123456789abcdef")
@@ -222,7 +222,7 @@ class AxRunnerTests(unittest.TestCase):
     def test_cleanup_uses_remaining_parent_budget(self):
         present = subprocess.CompletedProcess([], 0, "", "")
         error = subprocess.TimeoutExpired(["ax"], 2)
-        with patch.dict(AX_CONFIG["ax"], {"cli_timeout_seconds": 17}), \
+        with patch.dict(AX_CONFIG, {"cli_timeout_seconds": 17}), \
              patch.object(self.runner, "_run", side_effect=[present, error]) as run, \
              patch.object(self.runner.worker_queue, "clock", return_value=8), \
              patch("ax_local.api.ax_runner.time.monotonic", return_value=8):

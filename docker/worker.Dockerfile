@@ -10,6 +10,7 @@ COPY popot_agents/__init__.py popot_agents/tools.py /app/popot_agents/
 COPY popot_agents/runtime_config.py /app/popot_agents/
 COPY popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/
+COPY popot_agents/progress.py /app/popot_agents/
 COPY skills /app/skills
 COPY popot_agents/worker /app/popot_agents/worker
 COPY config/runtime.json /app/config/runtime.json

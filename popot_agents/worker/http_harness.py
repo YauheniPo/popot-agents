@@ -9,15 +9,17 @@ from urllib import error, request
 from urllib.parse import urlsplit
 
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
+from popot_agents.progress import trace_event, trace_output
 from popot_agents.skills import prepare_role_config
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool
 from . import mcp_client
+from .delegation_policy import (available_roles, completed_answer, delegation_instructions,
+                                handoff_task, required_specialist)
 from .turn_memory import TurnMemory, parse_summary
 
 
 def _trace(event: str, **fields) -> None:
-    print(json.dumps({"event": event, **fields}, ensure_ascii=False),
-          file=sys.stderr, flush=True)
+    trace_event(event, **fields)
 
 
 def _trace_arguments(name: str, arguments: dict) -> dict:
@@ -55,7 +57,7 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
         _trace("model_request", round=round_number, attempt=attempt, message_count=len(messages),
                timeout_seconds=round(request_timeout, 3),
                available_tools=[schema["function"]["name"] for schema in schemas])
-        print(f"LLM request started round={round_number} attempt={attempt}", file=sys.stderr, flush=True)
+        trace_output(f"LLM request started round={round_number} attempt={attempt}")
         retryable = False
         try:
             with request.urlopen(call, timeout=request_timeout) as response:
@@ -78,8 +80,7 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
             else:
                 failure = "model endpoint is unreachable"
         else:
-            print(f"LLM response received after {time.monotonic() - started_at:.1f}s",
-                  file=sys.stderr, flush=True)
+            trace_output(f"LLM response received after {time.monotonic() - started_at:.1f}s")
             return result
         if retryable and not final:
             remaining_seconds()  # Preserve the reserved final-answer budget, even on the last attempt.
@@ -112,7 +113,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     if not base_url.startswith(("http://", "https://")) or not model:
         raise ValueError("HARNESS_BASE_URL and HARNESS_MODEL are required")
     turn_timeout = float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS",
-                                   str(RUNTIME["worker"]["default_timeout_seconds"])))
+                                   str(RUNTIME["timeouts"]["turn_seconds"])))
     if turn_timeout <= 0:
         raise ValueError("HARNESS_TURN_TIMEOUT_SECONDS must be positive")
     deadline = time.monotonic() + turn_timeout
@@ -124,6 +125,25 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         return remaining
 
     messages = [{"role": "user", "content": task}] if isinstance(task, str) else list(task)
+    user_context = list(messages)
+    extra_tools = extra_tools or {}
+    specialist = required_specialist(user_context, role_config)
+    if specialist:
+        if specialist not in available_roles(extra_tools):
+            raise RuntimeError(f'delegation to {specialist} is unavailable for this session')
+        call_id = uuid.uuid4().hex + ':required-delegation'
+        arguments = {'role': specialist, 'task': handoff_task(
+            user_context[-1]['content'], user_context, role_config)}
+        _trace('delegation_routed', role=specialist)
+        _trace('tool_call', round=0, name='delegate_task', call_id=call_id,
+               arguments={'role': specialist})
+        output = extra_tools['delegate_task']['call'](
+            arguments, timeout_seconds=remaining_seconds(), call_id=call_id)
+        _trace('tool_result', round=0, name='delegate_task', call_id=call_id,
+               output_chars=len(output))
+        memory.observe(call_id, 'delegate_task', arguments, output)
+        remaining_seconds()
+        return completed_answer(output, specialist)
     instructions = role_config.get("instructions", "")
     allowed = role_config.get("tools", [])
     mcp_servers = role_config.get("mcpServers", {})
@@ -133,11 +153,14 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     mcp_tools.pop('mcp__cognee__remember', None)
     schemas = [TOOL_SCHEMAS[name] for name in allowed]
     schemas.extend(item["schema"] for item in mcp_tools.values())
-    extra_tools = extra_tools or {}
     turn_id = uuid.uuid4().hex
+    failed_delegations = {}
     schemas.extend(item["schema"] for item in extra_tools.values())
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
+    delegation_prompt = delegation_instructions(role_config, extra_tools)
+    if delegation_prompt:
+        messages.append({'role': 'system', 'content': delegation_prompt})
     if 'cognee' in mcp_servers:
         messages.insert(0, {'role': 'system', 'content':
             'The runtime recalls project memory before this task and captures useful evidence '
@@ -226,6 +249,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             raise RuntimeError("model endpoint returned no answer") from exc
         calls = message.get("tool_calls") or []
         _trace("model_response", round=round_number, tool_calls=len(calls))
+        reasoning_fields = {name: message[name] for name in
+                            ('reasoning', 'reasoning_content', 'reasoning_details') if message.get(name)}
+        if reasoning_fields:
+            # Trace a redacted copy; preserve provider blocks unchanged in the
+            # assistant message sent back after tool execution.
+            _trace('assistant_reasoning', round=round_number, **reasoning_fields)
         if calls and forced_final:
             _trace('turn_partial', reason='final_model_requested_tools', round=round_number)
             return partial_answer()
@@ -258,9 +287,23 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                            call_id=tool_call["id"],
                            arguments=_trace_arguments(name, arguments))
                     if name in extra_tools:
+                        if name == 'delegate_task':
+                            if arguments.get('role') not in available_roles(extra_tools):
+                                raise ToolInputError('delegate_task requires an available specialist role')
+                            if not isinstance(arguments.get('task'), str) or not arguments['task'].strip():
+                                raise ToolInputError('delegate_task requires a nonempty task')
+                            arguments = {**arguments, 'task': handoff_task(
+                                arguments['task'], user_context, role_config)}
                         output = extra_tools[name]["call"](
                             arguments, timeout_seconds=work_seconds(),
                             call_id=turn_id + ":" + tool_call["id"])
+                        if name == 'delegate_task':
+                            try:
+                                completed_answer(output, arguments['role'])
+                            except RuntimeError as exc:
+                                failed_delegations[arguments['role']] = str(exc)
+                            else:
+                                failed_delegations.pop(arguments['role'], None)
                     elif name in mcp_tools:
                         selected = mcp_tools[name]
                         if selected['server'] == 'cognee':
@@ -311,6 +354,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             return partial_answer()
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError("model endpoint returned an empty answer")
+        if failed_delegations and not forced_final:
+            raise RuntimeError('; '.join(failed_delegations.values()))
         _trace("assistant_answer", round=round_number, content=answer.strip())
         remaining_seconds()
         if forced_final:

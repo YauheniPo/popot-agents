@@ -17,6 +17,7 @@ from a2a.utils.errors import A2AError as SDKError
 from a2a.utils.proto_utils import validate_proto_required_fields
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.progress import forward_progress, is_progress_message
 
 
 def make_tools(environ: dict | None = None) -> dict:
@@ -51,10 +52,26 @@ def make_tools(environ: dict | None = None) -> dict:
                 or arguments["role"] not in allowed or not isinstance(arguments["task"], str) \
                 or not arguments["task"].strip() \
                 or len(arguments["task"]) > RUNTIME["limits"]["message_chars"]:
-            return json.dumps({"error": "delegate_task requires an allowed role and a nonempty task"})
+            return json.dumps({"isError": True,
+                               "error": "delegate_task requires an allowed role and a nonempty task"})
         deadline = time.monotonic() + timeout_seconds
         endpoint = url.rstrip("/") + "/a2a/" + arguments["role"]
         task_id = None
+        progress_seq = 0
+
+        def forward_task_progress(task):
+            nonlocal progress_seq
+            activity = MessageToDict(task).get('metadata', {}).get('activity', [])
+            if not isinstance(activity, list):
+                return
+            for item in activity[:64]:
+                if not isinstance(item, dict):
+                    continue
+                seq, message = item.get('seq'), item.get('message')
+                if isinstance(seq, (int, float)) and progress_seq < seq <= 2**53 \
+                        and seq == int(seq) and is_progress_message(message):
+                    progress_seq = int(seq)
+                    forward_progress(message)
 
         async def execute():
             nonlocal task_id
@@ -91,6 +108,7 @@ def make_tools(environ: dict | None = None) -> dict:
                         raise ValueError("delegation did not return a task")
                     task = response.task
                     task_id = task.id
+                    forward_task_progress(task)
                     while task.status.state in {types.TASK_STATE_SUBMITTED, types.TASK_STATE_WORKING}:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
@@ -98,6 +116,7 @@ def make_tools(environ: dict | None = None) -> dict:
                         await asyncio.sleep(min(poll_interval, remaining))
                         task = await invoke(lambda ctx: transport.get_task(
                             types.GetTaskRequest(id=task_id), context=ctx))
+                        forward_task_progress(task)
                     result = {"sessionId": task_id, "role": arguments["role"],
                               "state": types.TaskState.Name(task.status.state)}
                     if task.status.state == types.TASK_STATE_COMPLETED:
@@ -105,10 +124,14 @@ def make_tools(environ: dict | None = None) -> dict:
                                            for part in artifact.parts if part.HasField("text"))
                         limit = RUNTIME["limits"]["tool_output_chars"]
                         result.update(answer=answer[:limit], truncated=len(answer) > limit)
+                        if not answer.strip() or result['truncated']:
+                            result.update(isError=True, error='delegated answer is empty or truncated; '
+                                          'inspect the child session before repeating external actions')
                     else:
                         reason = "\n".join(part.text for part in task.status.message.parts
                                            if part.HasField("text"))
                         result["error"] = reason[:500] or "delegated task did not complete successfully"
+                        result['isError'] = True
                         failure = MessageToDict(task).get("metadata", {}).get("failure")
                         if isinstance(failure, dict):
                             result["failure"] = {key: value[:100] for key, value in failure.items()
@@ -125,7 +148,8 @@ def make_tools(environ: dict | None = None) -> dict:
                     issue = (str(exc)[:300] if type(exc) is ValueError or
                              isinstance(exc, SDKError) and not isinstance(exc, A2AClientError)
                              else "delegation failed or exceeded the turn deadline")
-                    return json.dumps({"sessionId": task_id, "role": arguments["role"], "error": issue})
+                    return json.dumps({"sessionId": task_id, "role": arguments["role"],
+                                       "isError": True, "error": issue})
 
         return asyncio.run(execute())
 

@@ -12,8 +12,8 @@ for program in docker git go kubectl python3; do
     exit 1
   fi
 done
-CLUSTER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["context"].removeprefix("kind-"))' "$ROOT/ax_local/config.json")"
-ATESPACE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["atespace"])' "$ROOT/ax_local/config.json")"
+CLUSTER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["context"].removeprefix("kind-"))' "$ROOT/config/runtime.json")"
+ATESPACE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["atespace"])' "$ROOT/config/runtime.json")"
 docker info >/dev/null
 mkdir -p "$LOCAL/src" "$LOCAL/bin"
 if [[ ! -x "$LOCAL/bin/ko" ]]; then

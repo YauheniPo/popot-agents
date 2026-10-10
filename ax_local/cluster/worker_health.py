@@ -154,7 +154,7 @@ def ensure_workers(kubeconfig: Path, cli: Path, context: str, namespace: str,
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     local = root / ".local"
-    config = json.loads((root / "config.json").read_text())["ax"]
+    config = json.loads((root.parent / "config/runtime.json").read_text())["ax"]
     # Serialize concurrent up/rebuild invocations. No persistent success marker:
     # every launch must compare today's pod IPs against the actual registry.
     local.mkdir(exist_ok=True)
@@ -174,7 +174,7 @@ def main() -> None:
                            cwd=source, check=True, timeout=300)
             stamp.write_text(head + "\n")
         ensure_named_pool(local / 'kubeconfig', cli, config['context'], config['atespace'],
-                          config.get('worker_pool_name', 'popot-workers'), config['startup_timeout_seconds'])
+                          config['worker_pool_name'], config['startup_timeout_seconds'])
         ensure_workers(local / "kubeconfig", cli, config["context"], config["atespace"],
                        config["startup_timeout_seconds"], resources=config['task_resources'])
 

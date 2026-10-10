@@ -11,26 +11,12 @@ import sys
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import safe_tool_env
+from popot_agents.progress import trace_event, redact_text as scrub
 from .cognee_memory import CogneeMemory
 
 
 def trace(event: str, **fields) -> None:
-    print(json.dumps({'event': event, **fields}), file=sys.stderr, flush=True)
-
-
-def scrub(text: str) -> str:
-    for name, value in os.environ.items():
-        if len(value) >= 4 and re.search(r'(TOKEN|PASSWORD|SECRET|_KEY)$', name):
-            text = text.replace(value, '[REDACTED]')
-    text = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----',
-                  '[REDACTED]', text, flags=re.S)
-    text = re.sub(r'\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,})',
-                  '[REDACTED]', text)
-    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)(?:"[^"]*"|\x27[^\x27]*\x27|[^\s,;]+)',
-                  r'\1[REDACTED]', text)
-    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1[REDACTED]', text)
-    text = re.sub(r'(https?://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text)
-    return text
+    trace_event(event, **fields)
 
 
 def project_dataset(messages: list[dict]) -> str | None:

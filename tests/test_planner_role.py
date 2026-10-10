@@ -6,7 +6,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 from ax_local.api.delegation import A2AError, DelegationService, start_a2a_server
-from ax_local.config import AX_CONFIG
+from popot_agents.runtime_config import AX_CONFIG
 from ax_local.worker.delegation import make_tools
 from ax_local.tests import test_delegation as delegation_tests
 from popot_agents.orchestrator.main import create_server, load_agents, load_roles
@@ -60,7 +60,7 @@ class PlannerRoleTests(unittest.TestCase):
         self.assertNotIn('GITHUB_PERSONAL_ACCESS_TOKEN', planner['env_names'])
         with tempfile.TemporaryDirectory() as directory:
             runner = delegation_tests.FakeRunner()
-            service = DelegationService(roles, AX_CONFIG['delegation'], runner,
+            service = DelegationService(roles, AX_CONFIG['delegation'], {config['agent']: runner for config in roles.values()},
                                          SessionStore(directory), 'http://127.0.0.1:8005')
             try:
                 env = service.worker_environment('0123456789abcdef', planner)
@@ -102,7 +102,7 @@ class PlannerRoleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, redirect_stderr(io.StringIO()):
             store = SessionStore(directory)
             runner = Runner()
-            service = DelegationService(roles, AX_CONFIG['delegation'], runner, store, 'http://127.0.0.1:8005')
+            service = DelegationService(roles, AX_CONFIG['delegation'], {config['agent']: runner for config in roles.values()}, store, 'http://127.0.0.1:8005')
             runner.delegation = service
             server = start_a2a_server(service, '127.0.0.1', 0)
             parent = '0123456789abcdef'

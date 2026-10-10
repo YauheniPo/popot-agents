@@ -176,9 +176,10 @@ class WorkerHealthMainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             ax = Path(temp).resolve() / "ax_local"
             ax.mkdir()
-            (ax / "config.json").write_text(json.dumps({"ax": {
+            (ax.parent / "config").mkdir()
+            (ax.parent / "config/runtime.json").write_text(json.dumps({"ax": {
                 "context": "kind-popot-ax", "atespace": "ate-demo-counter",
-                "startup_timeout_seconds": 300, "task_resources": {
+                "worker_pool_name": "popot-workers", "startup_timeout_seconds": 300, "task_resources": {
                     "requests": {"cpu": "500m", "memory": "512Mi"},
                     "limits": {"cpu": "2", "memory": "1536Mi"}}}}))
             cli = ax / ".local/bin/kubectl-ate"

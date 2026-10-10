@@ -92,7 +92,7 @@ class RoleApiTests(unittest.TestCase):
         roles = json.loads((Path(__file__).resolve().parents[1] / 'config/roles.json').read_text())
         from popot_agents.runtime_config import RUNTIME
         self.assertNotIn('timeout_seconds', roles['code_reviewer'])
-        self.assertGreaterEqual(RUNTIME['worker']['default_timeout_seconds'], 900)
+        self.assertGreaterEqual(RUNTIME['timeouts']['turn_seconds'], 900)
 
     def test_role_selects_agent_and_tool_policy_for_task(self):
         status, result = self.request("POST", "/tasks", {"role": "analyst", "task": "2+3"})
