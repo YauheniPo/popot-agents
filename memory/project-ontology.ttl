@@ -1,0 +1,27 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix p: <urn:popot:knowledge:> .
+
+# A small closed vocabulary for project memory. Dates, anonymous quantities,
+# provider names and tool-call identifiers belong in provenance, not entities.
+p:Project a owl:Class ; rdfs:label "project" ;
+    rdfs:comment "Named software project or repository" .
+p:Software a owl:Class ; rdfs:label "software" ;
+    rdfs:comment "Named application, service, library or framework" .
+p:File a owl:Class ; rdfs:label "file" ;
+    rdfs:comment "Source code or configuration file name or path" .
+p:PullRequest a owl:Class ; rdfs:label "pull_request" ;
+    rdfs:comment "Pull request reference with its prefix, such as PR #70, not a bare number" .
+p:Configuration a owl:Class ; rdfs:label "configuration" ;
+    rdfs:comment "Named configuration setting or constant, including its value where present" .
+p:Concept a owl:Class ; rdfs:label "concept" ;
+    rdfs:comment "Named engineering concept, mechanism or algorithm such as rate limiting" .
+
+p:uses a owl:ObjectProperty ; rdfs:label "uses" ;
+    rdfs:comment "Project, service or file uses a named component or mechanism" .
+p:partOf a owl:ObjectProperty ; rdfs:label "part_of" ;
+    rdfs:comment "File or component belongs to a project or service" .
+p:modifies a owl:ObjectProperty ; rdfs:label "modifies" ;
+    rdfs:comment "Pull request changes a file, setting or component" .
+p:configures a owl:ObjectProperty ; rdfs:label "configures" ;
+    rdfs:comment "Named configuration setting controls a service or mechanism" .

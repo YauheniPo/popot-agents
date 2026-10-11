@@ -21,7 +21,7 @@ if [[ ! -x "$LOCAL/bin/ko" || ! -s "$LOCAL/kubeconfig" ]]; then
 fi
 export PATH="$LOCAL/bin:$PATH"
 export KUBECONFIG="$LOCAL/kubeconfig"
-CONTEXT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["context"])' "$ROOT/config/runtime.json")"
+CONTEXT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["context"])' "$ROOT/ax_local/config.json")"
 if [[ "$CONTEXT" != kind-* || "$(kubectl config current-context)" != "$CONTEXT" ]]; then
   echo "Refusing to update a controller outside the configured local kind context" >&2
   exit 1
@@ -29,7 +29,7 @@ fi
 VERSION="$(python3 "$PATCHER" "$LOCAL/src/ax")"
 export KO_DOCKER_REPO="localhost:5001"
 export KO_DEFAULTPLATFORMS="linux/$(go env GOARCH)"
-echo "Rebuilding local AX controller for UID 10001 tools and full session snapshots"
+echo "Rebuilding local AX controller for UID 10001 tools and DATA/FULL session snapshots"
 (cd "$LOCAL/src/ax" && ko apply -f deploy/ax-controller.yaml)
 kubectl --context "$CONTEXT" set env deployment/ax-controller -n ax-system \
   AX_SNAPSHOTS_BUCKET=gs://ate-snapshots/popot-ax/

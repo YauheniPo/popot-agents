@@ -35,6 +35,42 @@ class _NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
+def memory_document(data: str, dataset_name: str) -> tuple[str, dict]:
+    """Keep provenance in Cognee metadata, outside the entity extraction text.
+
+    Accept the existing turn record and the earlier diagnostic-note format so
+    old callers and migration use exactly the same ingestion contract.
+    """
+    try:
+        record = json.loads(data)
+    except ValueError:
+        record = None
+    if isinstance(record, dict) and 'memories' in record:
+        items = record['memories']
+        if not isinstance(items, list) or not items:
+            raise ValueError('memory record must contain nonempty memories')
+        statements = []
+        for item in items:
+            if (not isinstance(item, dict) or item.get('kind') not in
+                    {'decision', 'constraint', 'fact', 'fix', 'check'}
+                    or not isinstance(item.get('text'), str) or not item['text'].strip()):
+                raise ValueError('memory record contains an invalid statement')
+            statements.append(item['kind'].capitalize() + ': ' + item['text'].strip())
+        text = '\n\n'.join(statements)
+    elif isinstance(record, dict) and isinstance(record.get('note'), str) and record['note'].strip():
+        text = record['note'].strip()
+    else:
+        text = data.strip()
+        record = {'text': data}
+    if record.get('project') not in (None, dataset_name):
+        raise ValueError('memory record project must match dataset_name')
+    # A short display title; the complete statements remain in the document.
+    title = ' '.join(text.split())
+    title = title[:117].rstrip() + '…' if len(title) > 120 else title
+    metadata = {'popot_memory': {'version': 2, 'title': title, 'record': record}}
+    return text, metadata
+
+
 class CogneeMemory:
     def __init__(self, api_url: str, password: str, timeout: float = RUNTIME["timeouts"]["memory_tool_request_seconds"]):
         parsed = parse.urlsplit(api_url)
@@ -93,16 +129,22 @@ class CogneeMemory:
     def session_event(self, event: dict):
         return self._request('/api/v1/popot/session', json.dumps(event).encode())
 
-    def remember(self, data: str, dataset_name: str = 'popot-agents'):
+    def remember(self, data: str, dataset_name: str = 'popot-agents', *, run_in_background: bool = True):
         data, dataset_name = self._text(data), self._dataset(dataset_name)
+        text, metadata = memory_document(data, dataset_name)
+        title = metadata['popot_memory']['title']
         boundary = 'popot-' + uuid.uuid4().hex
-        filename = 'memory_' + hashlib.sha256(data.encode()).hexdigest() + '.txt'
+        slug = re.sub(r'[^a-zA-Z0-9_-]+', '-', title).strip('-')[:60] or 'note'
+        filename = 'memory_' + slug + '-' + hashlib.sha256(data.encode()).hexdigest()[:16] + '.txt'
         parts = []
-        for name, value in {'datasetName': dataset_name, 'run_in_background': 'true',
-                            'self_improvement': 'false'}.items():
+        for name, value in {'datasetName': dataset_name,
+                            'run_in_background': str(run_in_background).lower(),
+                            'self_improvement': 'false',
+                            'labels': json.dumps([title], ensure_ascii=False),
+                            'external_metadata': json.dumps([metadata], ensure_ascii=False)}.items():
             parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="data"; filename="{filename}"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n'.encode())
-        parts.extend([data.encode(), f'\r\n--{boundary}--\r\n'.encode()])
+        parts.extend([text.encode(), f'\r\n--{boundary}--\r\n'.encode()])
         return self._request('/api/v1/remember', b''.join(parts),
                              f'multipart/form-data; boundary={boundary}')
 

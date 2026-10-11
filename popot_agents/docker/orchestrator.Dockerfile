@@ -13,6 +13,7 @@ COPY popot_agents/progress.py /app/popot_agents/
 COPY skills /app/skills
 COPY popot_agents/orchestrator /app/popot_agents/orchestrator
 COPY config /app/config
+COPY popot_agents/config.json /app/popot_agents/config.json
 
 ENV API_HOST=0.0.0.0 API_PORT=8000
 EXPOSE 8000

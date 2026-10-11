@@ -69,8 +69,7 @@ class SubstrateCleanupTests(unittest.TestCase):
             root = Path(directory).resolve()
             script = root / 'ax_local/cluster/substrate_cleanup.py'
             script.parent.mkdir(parents=True)
-            (root / 'config').mkdir()
-            (root / 'config/runtime.json').write_text(json.dumps({'ax': {'context': 'kind-test'}}))
+            (root / 'ax_local/config.json').write_text(json.dumps({'context': 'kind-test'}))
             local = root / 'ax_local/.local'
             (local / 'bin').mkdir(parents=True)
             (local / 'bin/ko').touch()
@@ -86,7 +85,7 @@ class SubstrateCleanupTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs['env']['KUBECONFIG'], str(local / 'kubeconfig'))
 
     def test_non_kind_configuration_prevents_all_commands(self):
-        with patch.object(substrate_cleanup.json, 'loads', return_value={'ax': {'context': 'production'}}), \
+        with patch.object(substrate_cleanup.json, 'loads', return_value={'context': 'production'}), \
              patch('sys.argv', ['substrate_cleanup.py', '--apply']), \
              patch.object(substrate_cleanup.subprocess, 'run') as run:
             with self.assertRaisesRegex(ValueError, 'local kind'):
@@ -102,8 +101,7 @@ class SubstrateCleanupTests(unittest.TestCase):
                 shutil.copyfile(substrate_cleanup.__file__, script)
                 shutil.copytree(Path(substrate_cleanup.__file__).with_name('cleanup_go'),
                                 script.with_name('cleanup_go'))
-                (root / 'config').mkdir()
-                (root / 'config/runtime.json').write_text(json.dumps({'ax': {'context': 'kind-test'}}))
+                (root / 'ax_local/config.json').write_text(json.dumps({'context': 'kind-test'}))
                 local = root / 'ax_local/.local'
                 (local / 'bin').mkdir(parents=True)
                 (local / 'bin/ko').touch()

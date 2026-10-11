@@ -1,5 +1,6 @@
 *
 !Dockerfile
 !linkedKnowledge.ts
+!knowledgeLabels.ts
 !KnowledgePanel.tsx
 !apply-overlay.py

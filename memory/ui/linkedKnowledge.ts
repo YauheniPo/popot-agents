@@ -16,6 +16,7 @@ export interface KnowledgeRecord {
   sourceUri: string;
   createdAt: string;
   recordedAt: string;
+  provenance: Record<string, unknown>;
   summaries: string[];
 }
 
@@ -33,6 +34,9 @@ function sourceUri(node?: GraphNode): string {
 export function safeSourceUrl(value: string): string | null {
   try {
     const url = new URL(value);
+    if (url.hostname === 'github.com') {
+      url.pathname = url.pathname.replace(/(\/(?:pull|issues)\/\d+)[,.;:!]+$/, '$1');
+    }
     return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null;
   } catch { return null; }
 }
@@ -60,6 +64,11 @@ export function linkedKnowledge(entityId: string, graph?: GraphPayload | null): 
     const nearby = neighbors(chunk.id);
     const document = byId.get(string(chunk.document_id)) ?? nearby.find(node => node.stage === 'document');
     const text = string(chunk.text);
+    const metadata = parsedObject(chunk.external_metadata ?? document?.external_metadata);
+    const memory = parsedObject(metadata.popot_memory);
+    const provenance = parsedObject(memory.record);
+    const references = Array.isArray(provenance.references) ? provenance.references : [];
+    const reference = references.find(value => typeof value === 'string' && safeSourceUrl(value));
     const timestamp = typeof chunk.t_created === 'number' ? new Date(chunk.t_created) : null;
     const summaries = graph.nodes.filter(node => node.stage === 'summary' &&
       (node.source_chunk_id === chunk.id || nearby.some(other => other.id === node.id)))
@@ -67,9 +76,10 @@ export function linkedKnowledge(entityId: string, graph?: GraphPayload | null): 
     return {
       id: chunk.id, text,
       documentId: document?.id ?? '', documentName: string(document?.name) || string(chunk.document_name),
-      sourceUri: sourceUri(chunk) || sourceUri(document),
+      sourceUri: safeSourceUrl(string(reference) || string(provenance.pr)) || sourceUri(chunk) || sourceUri(document),
       createdAt: timestamp && Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : '',
-      recordedAt: string(parsedObject(text).recorded_at),
+      recordedAt: string(provenance.recorded_at) || string(parsedObject(text).recorded_at),
+      provenance,
       summaries: [...new Set(summaries)],
     };
   });

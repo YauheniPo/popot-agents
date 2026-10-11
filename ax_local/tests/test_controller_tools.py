@@ -14,7 +14,8 @@ from ax_local.cluster.controller_tools import AX_COMMIT, VERSION, HELPER, SECURI
 TEMPLATE = ('// BuildActorTemplate constructs a Substrate ActorTemplate\n'
             '\t\t\tName:    "guest",\n'
             '\t\t\tOnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,\n'
-            '\t\t\tOnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,\n')
+            '\t\t\tOnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,\n'
+            '\t\t\t\tFromData: ateapipb.ResumeSource_RESUME_SOURCE_GOLDEN,\n')
 
 
 class ControllerSetupTests(unittest.TestCase):
@@ -31,9 +32,8 @@ class ControllerSetupTests(unittest.TestCase):
             shutil.copyfile(source / name, scripts / name)
         (scripts.parent / 'docker').mkdir()
         shutil.copyfile(source.parent / 'docker/versions.env', scripts.parent / 'docker/versions.env')
-        (self.root / "config").mkdir()
-        (self.root / "config/runtime.json").write_text(
-            '{"ax":{"context":"kind-popot-ax"}}', encoding="utf-8")
+        (self.root / "ax_local/config.json").write_text(
+            '{"context":"kind-popot-ax"}', encoding="utf-8")
         client = self.local / "src/ax/internal/substrate/client.go"
         client.parent.mkdir(parents=True)
         client.write_text(TEMPLATE, encoding="utf-8")
@@ -96,6 +96,14 @@ class ControllerSetupTests(unittest.TestCase):
         self.assertEqual(updated.count('popotSnapshotScope(image, envMap)'), 2)
         self.assertEqual(patched_source(updated), updated)
         self.assertEqual(updated.count(HELPER), 1)
+
+    def test_popot_data_resume_cold_boots_instead_of_restoring_process_memory(self):
+        updated = patched_source(TEMPLATE)
+        self.assertIn('FromData: popotDataResumeSource(image, envMap)', updated)
+        self.assertIn('return ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT', updated)
+        self.assertIn('return ateapipb.ResumeSource_RESUME_SOURCE_GOLDEN', updated)
+        self.assertIn('env["POPOT_SESSION_SNAPSHOT"] == "data"', updated)
+        self.assertEqual(patched_source(updated), updated)
 
     def test_existing_tool_security_patch_is_upgraded_to_full_snapshot_support(self):
         legacy = HELPER + TEMPLATE.replace('\t\t\tName:    "guest",',

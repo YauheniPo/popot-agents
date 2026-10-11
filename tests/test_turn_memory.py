@@ -16,6 +16,19 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_recall_keeps_provenance_when_ingested_text_is_clean(self):
+        client = Mock()
+        record = {'recorded_at': '2026-10-10', 'references': ['https://github.com/a/b/pull/70'],
+                  'trust': 'historical; verify', 'memories': [{'text': 'Retry takes 60 seconds',
+                                                            'evidence_quote': 'WAIT = 60'}]}
+        client.recall.return_value = [{'text': 'Retry takes 60 seconds', 'raw': {
+            'external_metadata': json.dumps({'popot_memory': {'version': 2, 'record': record}})}}]
+        with patch.dict(os.environ, ENV, clear=True):
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=client)
+        context = memory.context(60)
+        for value in ('2026-10-10', 'https://github.com/a/b/pull/70', 'WAIT = 60', 'historical; verify'):
+            self.assertIn(value, context)
+
     def test_session_records_tools_usage_and_failure_without_raw_content(self):
         client = Mock()
         with patch.dict(os.environ, {**ENV, 'HARNESS_CHAT_ID': 'a' * 16}, clear=True):
@@ -112,6 +125,14 @@ class TurnMemoryTests(unittest.TestCase):
         self.assertIn('check-1', text)
         self.assertIn('https://github.com/Owner/Repo/pull/68', text)
         self.assertNotIn('Invented', text)
+
+    def test_saved_references_exclude_sentence_punctuation(self):
+        with patch.dict(os.environ, ENV, clear=True):
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK + ', check it.'}], client=Mock())
+        memory.observe('check', 'bash', {}, 'passed')
+        memory.save({'memories': [{'kind': 'check', 'text': 'Check passed', 'source': 'check', 'quote': 'passed'}]})
+        record = json.loads(memory.client.remember.call_args.args[0])
+        self.assertEqual(record['references'], ['https://github.com/Owner/Repo/pull/68'])
 
     def test_runtime_reads_before_model_and_saves_curated_summary_after_answer(self):
         client = Mock()

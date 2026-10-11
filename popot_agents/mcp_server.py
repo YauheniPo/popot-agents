@@ -217,6 +217,9 @@ async def stream_call(client, path, payload, context):
     orchestrator's existing disconnect policy and is never automatically retried.
     """
     import httpx
+    meta = context.request_context.meta
+    token = meta.progressToken if meta is not None else None
+    progress_enabled = token is not None and token != ''
     activity = deque(maxlen=20)
     counter = 0
     try:
@@ -251,10 +254,11 @@ async def stream_call(client, path, payload, context):
                             if is_progress_message(message):
                                 activity.append(message)
                                 counter += 1
-                                try:
-                                    await asyncio.wait_for(context.report_progress(counter, message=message), timeout=2)
-                                except Exception:
-                                    pass  # Reporting must not replace or repeat the task result.
+                                if progress_enabled:
+                                    try:
+                                        await asyncio.wait_for(context.report_progress(counter, message=message), timeout=2)
+                                    except Exception:
+                                        pass  # Reporting must not replace or repeat the task result.
                         elif item.get('type') == 'result':
                             result = item.get('result')
                             status = item.get('status')

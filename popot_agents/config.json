@@ -1,0 +1,15 @@
+{
+  "max_concurrent_tasks": 3,
+  "memory": "1536m",
+  "cpus": 2,
+  "pids_limit": 256,
+  "tmpfs_mb": 64,
+  "workspace_tmpfs_mb": 512,
+  "startup_probe_attempts": 40,
+  "startup_probe_interval_seconds": 0.25,
+  "start_timeout_seconds": 30,
+  "probe_timeout_seconds": 5,
+  "restore_timeout_seconds": 30,
+  "inspect_timeout_seconds": 10,
+  "remove_timeout_seconds": 10
+}

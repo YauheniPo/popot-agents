@@ -10,75 +10,33 @@ from unittest.mock import patch
 
 
 class RuntimeConfigTests(unittest.TestCase):
-    def test_unified_config_reaches_docker_ax_and_harness(self):
-        from popot_agents.runtime_config import load_runtime_config
-
-        settings = load_runtime_config()
-        self.assertIn('docker', settings)
-        self.assertIn('ax', settings)
-        settings['docker'].update(memory='3g', cpus=1, max_concurrent_tasks=2)
-        settings['timeouts']['turn_seconds'] = 240
-        settings['ax']['task_resources']['limits']['memory'] = '4Gi'
-        settings['ax']['max_workers'] = 4
-        code = '''
-import json
-from popot_agents.runtime_config import RUNTIME
-from popot_agents.orchestrator.main import DockerAgentRunner
-from popot_agents.runtime_config import AX_CONFIG
-from ax_local.api.ax_runner import AxAgentRunner
-docker = DockerAgentRunner()._docker_command('config-test', False)
-runner = AxAgentRunner('worker@sha256:' + 'a' * 64, 'test', 'http://model/v1')
-manifest = runner.task_manifest('0123456789abcdef')
-env = {item['name']: item['value'] for item in manifest['spec']['env']}
-print(json.dumps({
-    'shared_ax_object': AX_CONFIG is RUNTIME['ax'],
-    'docker_memory': docker[docker.index('--memory') + 1],
-    'docker_cpus': docker[docker.index('--cpus') + 1],
-    'docker_capacity': RUNTIME['docker']['max_concurrent_tasks'],
-    'docker_turn': next(item for item in docker if item.startswith('HARNESS_TURN_TIMEOUT_SECONDS=')),
-    'ax_memory': manifest['spec']['resources']['limits']['memory'],
-    'ax_capacity': runner.worker_queue.max_workers,
-    'ax_turn': env['HARNESS_TURN_TIMEOUT_SECONDS'],
-}))
-runner.shutdown_worker_queue()
-'''
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'runtime.json'
-            path.write_text(json.dumps(settings))
-            result = subprocess.run([sys.executable, '-c', code], capture_output=True,
-                                    text=True, check=True,
-                                    env={**os.environ, 'POPOT_RUNTIME_CONFIG': str(path)})
-        self.assertEqual(json.loads(result.stdout), {
-            'shared_ax_object': True, 'docker_memory': '3g', 'docker_cpus': '1',
-            'docker_capacity': 2, 'docker_turn': 'HARNESS_TURN_TIMEOUT_SECONDS=225',
-            'ax_memory': '4Gi', 'ax_capacity': 4, 'ax_turn': '225',
-        })
-
     def test_ax_budgets_validate_against_same_custom_runtime(self):
         from popot_agents.runtime_config import load_runtime_config
+        from ax_local.config import load_ax_config
 
-        settings = load_runtime_config()
-        self.assertIn('ax', settings)
-        settings['timeouts']['max_turn_seconds'] = 2000
-        settings['ax']['route_timeout_seconds'] = 1920
+        runtime = load_runtime_config()
+        runtime['timeouts']['max_turn_seconds'] = 2000
+        settings = load_ax_config()
+        settings['route_timeout_seconds'] = 1920
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'runtime.json'
+            path = Path(directory) / 'ax.json'
             path.write_text(json.dumps(settings))
             with self.assertRaisesRegex(ValueError, 'route_timeout_seconds'):
-                load_runtime_config(path)
-            settings['ax']['route_timeout_seconds'] = 2100
+                load_ax_config(path, runtime=runtime)
+            settings['route_timeout_seconds'] = 2100
             path.write_text(json.dumps(settings))
-            self.assertEqual(load_runtime_config(path)['ax']['route_timeout_seconds'], 2100)
+            self.assertEqual(load_ax_config(path, runtime=runtime)['route_timeout_seconds'], 2100)
 
     def test_expanded_budget_reaches_worker_and_ax_transport(self):
         from popot_agents.runtime_config import RUNTIME
         from popot_agents.orchestrator.main import DockerAgentRunner, load_agents
-        from popot_agents.runtime_config import AX_CONFIG
+        from ax_local.config import AX_CONFIG
         command = DockerAgentRunner()._docker_command('budget-test', False)
         self.assertIn('HARNESS_TURN_TIMEOUT_SECONDS=885', command)
         self.assertEqual(command[command.index('--memory') + 1], '1536m')
         self.assertEqual(float(command[command.index('--cpus') + 1]), 2)
-        self.assertEqual(RUNTIME['docker']['max_concurrent_tasks'], 3)
+        from popot_agents.orchestrator.docker_config import get_docker_config
+        self.assertEqual(get_docker_config()['max_concurrent_tasks'], 3)
         self.assertGreater(AX_CONFIG['route_timeout_seconds'],
                            RUNTIME['timeouts']['max_turn_seconds'] + AX_CONFIG['response_margin_seconds'])
         agents_path = Path(__file__).resolve().parents[1] / 'config/agents.json'
@@ -91,7 +49,7 @@ runner.shutdown_worker_queue()
 
     def test_mcp_transport_covers_ax_queue_startup_and_model_turn(self):
         from popot_agents.runtime_config import RUNTIME
-        from popot_agents.runtime_config import AX_CONFIG
+        from ax_local.config import AX_CONFIG
         ax = AX_CONFIG
         required = (ax['worker_queue_timeout_seconds'] + ax['startup_timeout_seconds']
                     + RUNTIME['timeouts']['max_turn_seconds'] + 3 * ax['cli_timeout_seconds']
@@ -186,11 +144,6 @@ runner.shutdown_worker_queue()
             loaded = load_runtime_config(path)
             self.assertEqual(loaded["sessions"]["retention_days"], 14)
             self.assertEqual(loaded["timeouts"]["model_request_seconds"], 90)
-            loaded["docker"]["pids_limit"] = 0
-            path.write_text(json.dumps(loaded))
-            with self.assertRaisesRegex(ValueError, "docker.pids_limit"):
-                load_runtime_config(path)
-            loaded["docker"]["pids_limit"] = 64
             loaded["limits"]["socket_message_bytes"] = 1024
             path.write_text(json.dumps(loaded))
             with self.assertRaisesRegex(ValueError, "socket_message_bytes"):

@@ -17,7 +17,7 @@ from ax_local.api.ax_runner import AxAgentRunner
 from ax_local.api.delegation import DelegationService, start_a2a_server
 from ax_local.api.provider_proxy import network_address_toward
 from ax_local.api.server import kind_control_plane_host
-from popot_agents.runtime_config import AX_CONFIG
+from ax_local.config import AX_CONFIG
 from popot_agents.orchestrator.session_store import SessionStore
 
 

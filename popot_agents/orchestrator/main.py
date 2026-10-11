@@ -24,6 +24,7 @@ from popot_agents.role_env import selected_role_env, validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
 from .session_store import SessionStore
+from .docker_config import get_docker_config
 
 
 MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
@@ -53,6 +54,10 @@ def _log_body(value):
 
 class AgentRunError(Exception):
     """The container did not return a valid agent answer."""
+
+
+class AgentResumeError(AgentRunError):
+    """Resume failed with a retained checkpoint; do not replace the worker."""
 
 
 class AgentConfigurationError(Exception):
@@ -162,7 +167,7 @@ class DockerAgentRunner:
         workspace = self.workspace_path(container_name, role_config, create=True)
         host_workspace = self.workspace_host_path(container_name, role_config)
         configured_tools = set((role_config or {}).get("tools", []))
-        resources = {**RUNTIME["docker"], **self.resources}
+        resources = {**get_docker_config(), **self.resources}
         isolate_tools = bool(configured_tools & {"bash", "git_clone"}
                              or (role_config or {}).get("mcpServers"))
         command = [
@@ -235,7 +240,7 @@ class DockerAgentRunner:
             try:
                 subprocess.run(
                     ["docker", "rm", "-f", container_name],
-                    capture_output=True, timeout=RUNTIME["docker"]["remove_timeout_seconds"], check=False,
+                    capture_output=True, timeout=get_docker_config()["remove_timeout_seconds"], check=False,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 pass
@@ -266,12 +271,12 @@ class DockerAgentRunner:
                         "--label", f"popot.chat_id={chat_id}", self.image,
                         "python", "-u", "-m", CHAT_WORKER_MODULE, "serve"])
         started = subprocess.run(command, text=True, capture_output=True,
-                                 timeout=RUNTIME["docker"]["start_timeout_seconds"], check=False)
+                                 timeout=get_docker_config()["start_timeout_seconds"], check=False)
         if started.returncode != 0:
             existing = subprocess.run(
                 ["docker", "inspect", "--format",
                  '{{ index .Config.Labels "popot.chat_id" }}', container_name],
-                text=True, capture_output=True, timeout=RUNTIME["docker"]["inspect_timeout_seconds"], check=False,
+                text=True, capture_output=True, timeout=get_docker_config()["inspect_timeout_seconds"], check=False,
             )
             if existing.returncode != 0 or existing.stdout.strip() != chat_id:
                 detail = started.stderr.strip().splitlines()
@@ -279,10 +284,10 @@ class DockerAgentRunner:
         chat = DockerChat(container_name,
                           (role_config or {}).get("timeout_seconds", self.timeout_seconds),
                           self.workspace_host_path(container_name, role_config))
-        for _ in range(RUNTIME["docker"]["startup_probe_attempts"]):
+        for _ in range(get_docker_config()["startup_probe_attempts"]):
             ready = subprocess.run(
                 ["docker", "exec", container_name, "python", "-m", CHAT_WORKER_MODULE, "ping"],
-                text=True, capture_output=True, timeout=RUNTIME["docker"]["probe_timeout_seconds"], check=False,
+                text=True, capture_output=True, timeout=get_docker_config()["probe_timeout_seconds"], check=False,
             )
             if ready.returncode == 0:
                 try:
@@ -291,7 +296,7 @@ class DockerAgentRunner:
                         return chat
                 except json.JSONDecodeError:
                     pass
-            time.sleep(RUNTIME["docker"]["startup_probe_interval_seconds"])
+            time.sleep(get_docker_config()["startup_probe_interval_seconds"])
         chat.close()
         raise AgentRunError("chat worker did not become ready")
 
@@ -315,7 +320,7 @@ class DockerChat:
                 ["docker", "logs", "--tail", str(RUNTIME["logging"]["worker_log_tail_lines"]),
                  self.container_name],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=RUNTIME["docker"]["inspect_timeout_seconds"], check=False,
+                timeout=get_docker_config()["inspect_timeout_seconds"], check=False,
             )
             if completed.returncode != 0:
                 return
@@ -352,7 +357,7 @@ class DockerChat:
             completed = subprocess.run(
                 ["docker", "exec", self.container_name,
                  "python", "-m", CHAT_WORKER_MODULE, "ping"],
-                text=True, capture_output=True, timeout=RUNTIME["docker"]["probe_timeout_seconds"], check=False,
+                text=True, capture_output=True, timeout=get_docker_config()["probe_timeout_seconds"], check=False,
             )
             return completed.returncode == 0 and json.loads(completed.stdout).get("status") == "ok"
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
@@ -363,7 +368,7 @@ class DockerChat:
             ["docker", "exec", "--interactive", self.container_name,
              "python", "-m", CHAT_WORKER_MODULE, "restore"],
             input=json.dumps({"messages": messages}, ensure_ascii=False),
-            text=True, capture_output=True, timeout=RUNTIME["docker"]["restore_timeout_seconds"], check=False,
+            text=True, capture_output=True, timeout=get_docker_config()["restore_timeout_seconds"], check=False,
         )
         if completed.returncode != 0:
             raise AgentRunError("chat worker could not restore history")
@@ -403,7 +408,7 @@ class DockerChat:
             try:
                 subprocess.run(["docker", "rm", "-f", self.container_name],
                                text=True, capture_output=True,
-                               timeout=RUNTIME["docker"]["remove_timeout_seconds"], check=False)
+                               timeout=get_docker_config()["remove_timeout_seconds"], check=False)
             except (OSError, subprocess.TimeoutExpired):
                 pass
 
@@ -604,14 +609,15 @@ class ChatServer(ThreadingHTTPServer):
     daemon_threads = False
 
     def __init__(self, address, handler, session_dir: str | Path, idle_seconds: int,
-                 store=None):
+                 store=None, *, queued_admission: bool = False):
         self.store = store if store is not None else SessionStore(session_dir)
         self.live: dict[str, ChatRecord] = {}
         self.live_lock = threading.RLock()
         self.session_locks = weakref.WeakValueDictionary()
         self.session_locks_guard = threading.Lock()
         self.worker_managers = ()
-        self.task_slots = threading.BoundedSemaphore(RUNTIME["docker"]["max_concurrent_tasks"])
+        self.task_slots = (None if queued_admission else
+                           threading.BoundedSemaphore(get_docker_config()["max_concurrent_tasks"]))
         self.pending_expired: set[str] = set()
         self.idle_seconds = idle_seconds
         self.last_prune = 0.0
@@ -963,9 +969,10 @@ def create_server(
                     record = None
                 if record is not None and hasattr(record.worker, "resume"):
                     try:
-                        # Resume happens before send, so a failed checkpoint can
-                        # be replaced without retrying any model/tool execution.
+                        # Resume must finish before any new model/tool execution.
                         record.worker.resume()
+                    except AgentResumeError:
+                        raise
                     except AgentRunError:
                         record.worker.close()
                         with self.server.live_lock:
@@ -1047,7 +1054,7 @@ def create_server(
                 self._reply(503, {"error": "Docker CLI is not installed"})
             except AgentConfigurationError as exc:
                 self._reply(503, {"error": str(exc)})
-            except WorkerCapacityTimeout as exc:
+            except (WorkerCapacityTimeout, AgentResumeError) as exc:
                 self._reply(503, {"error": str(exc)})
             except AgentRunError as exc:
                 self._reply(502, {"error": str(exc)})
@@ -1092,7 +1099,8 @@ def create_server(
             self._reply(200, {"status": "closed"})
 
     directory = session_dir or PROJECT_ROOT / ".sessions"
-    server = ChatServer((host, port), Handler, directory, idle_seconds, store)
+    server = ChatServer((host, port), Handler, directory, idle_seconds, store,
+                        queued_admission=queued_admission)
     server.worker_managers = tuple({id(runner): runner for runner in agents.values()
         if getattr(runner, "queues_worker_start", False)
         and hasattr(runner, "shutdown_worker_queue")}.values())

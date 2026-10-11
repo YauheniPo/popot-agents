@@ -11,6 +11,8 @@
 !popot_agents/orchestrator/**
 !ax_local/
 !ax_local/__init__.py
+!ax_local/config.py
+!ax_local/config.json
 !ax_local/api/
 !ax_local/api/**
 !ax_local/worker/

@@ -46,10 +46,8 @@ class UpScriptTests(unittest.TestCase):
             "assert sys.argv[1:] == ['install']\n"
             "with Path(os.environ['CALLS']).open('a') as f: f.write('resource-monitoring\\n')\n"
             "raise SystemExit(int(os.environ.get('MONITORING_FAIL', '0')))\n")
-        (self.root / "config").mkdir()
-        (self.root / "config/runtime.json").write_text(
-            json.dumps({"ax": {"context": "kind-popot-ax",
-                               "route_timeout_seconds": 330}}), encoding="utf-8")
+        (self.root / "ax_local/config.json").write_text(
+            json.dumps({"context": "kind-popot-ax", "route_timeout_seconds": 330}), encoding="utf-8")
         (self.root / ".env").write_text("POPOT_DB_PASSWORD=test\n", encoding="utf-8")
         self.calls = self.root / "calls"
         for name in ("bootstrap.sh", "rebuild-worker.sh"):

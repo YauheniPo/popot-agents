@@ -10,7 +10,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from popot_agents.orchestrator.main import DockerAgentRunner, create_server, load_dotenv, load_roles
-from popot_agents.runtime_config import AX_CONFIG, RUNTIME
+from ax_local.config import AX_CONFIG
+from popot_agents.runtime_config import RUNTIME
 from .provider_proxy import network_address_toward, resolve_provider, start_proxy
 from .ax_runner import AxAgentRunner
 from .cron import CronScheduler

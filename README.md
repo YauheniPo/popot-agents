@@ -12,16 +12,19 @@ backend role.
 
 ```text
 popot_agents/
+  compose.yaml    Plain Docker deployment
+  config.json     Docker resources, capacity and lifecycle timeouts
+  docker/         Dockerfiles for the Docker API and worker
   orchestrator/   HTTP API, Docker worker lifecycle, session storage
   worker/         CLI and HTTP harnesses, chat process, MCP and file helpers
   mcp_server.py    MCP tools for Claude and Codex, backed by the API
   runtime_config.py Shared runtime settings loader and validation
   tools.py        Role tool definitions and execution shared by both images
 config/           Runtime settings, agent profiles, and role definitions
-docker/           Dockerfiles for the orchestrator, worker, and MCP server
+ax_local/         AX/kind deployment, configuration and adapters
+docker/           Shared MCP server Dockerfile
 memory/           Cognee persistent memory, graph UI and local gateway
 tests/            API, worker, roles, sessions, and container tests
-compose.yaml      Local deployment
 ```
 
 Run local tests with `python -m unittest discover -s tests -p 'test_*.py'`.
@@ -30,7 +33,7 @@ Run the API without Compose with `python -m popot_agents.orchestrator.main`.
 ## Project memory and graph UI
 
 Run `bash memory/up.sh`, then rebuild the agent stack with
-`docker compose up --build -d worker-image orchestrator mcp-server`.
+`docker compose --env-file .env -f popot_agents/compose.yaml up --build -d worker-image orchestrator mcp-server`.
 Open **http://localhost:3001** and sign in as `default_user@example.com` with
 `COGNEE_PASSWORD` from `.env` (generated privately by the launcher).
 Agents share project datasets with the UI: select a dataset under **Brains**
@@ -40,35 +43,41 @@ See [memory/README.md](memory/README.md) for setup, datasets and AX integration.
 
 ## Runtime settings
 
-Edit [config/runtime.json](config/runtime.json) for all non-secret runtime settings.
-Common settings, Docker execution and AX execution share this one file.
-`sessions` sets the default worker idle time, session retention, and cleanup
-interval. `docker` sets Docker resources, startup probing, command timeouts, and
-`max_concurrent_tasks` (default: 3). When all task slots are busy, the API
-returns HTTP 503; `/healthz` remains available. `timeouts` covers
-shared turn budgets (`turn_seconds`, `max_turn_seconds`, `min_turn_seconds`,
-`turn_response_margin_seconds`) plus model, MCP, tool and database calls.
-`ax` sets the local cluster, task resources, worker admission queue, suspend
-retention, provider/model selection, `ax.delegation` and `ax.proxy`. `limits` sets request, history,
-tool output, and file sizes. `logging` sets how much of an MCP request body is
-recorded and the worker log tail and file size limits. `model` sets the default
-tool-round limit, `request_retries` (a non-negative integer; 0 disables retries), and optional
-`temperature`/`max_tokens`; `null` omits either model parameter from requests.
-The same file is copied into the orchestrator, worker, and MCP images and
-mounted read-only into the Cognee sync container. Its
-values are validated at startup, so an invalid setting prevents that service
-from starting. Changes require
-`docker compose up --build -d worker-image orchestrator mcp-server` to
-rebuild the stack; existing chat containers keep their old settings until they
-are restarted. For direct Python runs, `POPOT_RUNTIME_CONFIG` can select another
-complete JSON file before process startup; AX uses that same loaded config.
-Local cluster scripts read the repository's `config/runtime.json` directly.
-Docker concurrency/resources and AX admission/resources remain separate because
-these backends enforce different limits. All required values are explicit in
-JSON: missing or unknown fields fail validation instead of restoring legacy defaults.
-Custom configs using the former `worker` section or separate AX JSON must be
-migrated to this layout. Provider profiles stay in `config/agents.json`, role
-instructions/tools in `config/roles.json`, and secrets in `.env`.
+Settings are split by where they apply:
+
+| File | Scope |
+| --- | --- |
+| [config/runtime.json](config/runtime.json) | Shared sessions, turn/model/tool/MCP timeouts, message/file limits, logging, model parameters and memory. |
+| [popot_agents/config.json](popot_agents/config.json) | Docker worker resources, startup probing, container command timeouts and `max_concurrent_tasks` (default: 3). |
+| [ax_local/config.json](ax_local/config.json) | Local kind context, atespace/workspace, AX Task resources, worker queue, suspend retention, AX timeouts, `delegation` and `proxy`. |
+
+In the shared file, `sessions` sets idle time, retention and cleanup intervals.
+`timeouts` includes `turn_seconds`, `max_turn_seconds`, `min_turn_seconds` and
+`turn_response_margin_seconds`. `limits` bounds requests, history, tool output
+and files. `logging` sets MCP request-body and worker-log limits. `model` sets
+tool-round limits, `request_retries` (0 disables retries), and optional
+`temperature`/`max_tokens`; `null` omits these model parameters from requests.
+
+Each service image receives the shared file. The Docker orchestrator also
+receives `popot_agents/config.json`; AX API also receives `ax_local/config.json`.
+Workers and MCP use shared settings without requiring backend configuration.
+Cognee sync mounts the shared file read-only. Docker rejects new tasks with
+HTTP 503 when its task slots are busy; AX uses its own worker admission queue.
+AX route and delegation timeouts are validated against the shared turn budget.
+
+All required values are explicit in JSON: missing or unknown fields fail
+validation. If migrating an older combined config, move the contents of its
+`docker` and `ax` sections to the corresponding backend files and remove those
+sections from `config/runtime.json`. Backend files contain settings directly,
+without an outer `docker` or `ax` wrapper.
+
+After editing, run `docker compose --env-file .env -f popot_agents/compose.yaml up --build -d worker-image orchestrator mcp-server`
+for Docker or `bash ax_local/up.sh` for AX. Existing workers keep their loaded
+settings until replaced. For direct Python runs, `POPOT_RUNTIME_CONFIG`,
+`POPOT_DOCKER_CONFIG` and `POPOT_AX_CONFIG` select alternate files before process
+startup. Local cluster scripts read the repository's `ax_local/config.json` directly.
+Provider profiles stay in `config/agents.json`, role instructions/tools in
+`config/roles.json`, and secrets in `.env`.
 
 Agent-specific `resources` and `model_parameters` can override the runtime
 defaults in [config/agents.json](config/agents.json). For example, an HTTP
@@ -153,17 +162,19 @@ Shared turn settings are defined only in `config/runtime.json`:
 | `memory` | Recall count, summary attempts/tokens, evidence/context/text limits and maximum notes/traced tools |
 
 Both Docker and AX use these shared values. Backend-specific settings live in
-`docker` and `ax` in the same file. AX-specific CLI, route, startup, probe,
-restore, response and deletion timeouts are under `ax`; delegation and proxy
-policies are under `ax.delegation` and `ax.proxy`.
+`popot_agents/config.json` and `ax_local/config.json`. AX-specific CLI, route, startup,
+probe, restore, response and deletion timeouts, plus `delegation` and `proxy`
+policies, are in `ax_local/config.json`.
 AX user sessions suspend after each saved answer and automatically resume on
-the next message with the same `sessionId`. `ax.suspend_retention_seconds`
+the next message with the same `sessionId`. `suspend_retention_seconds`
 defaults to 7200 seconds and overrides the role's worker idle lifetime in AX.
 After two hours without continuation, AX deletes the task; a later message
 restores the saved conversation in a new worker. New AX session histories stay
-available until explicit chat deletion. Successful snapshot resume preserves
-the sandbox; a failed resume or recreation after deletion restores the
-transcript in a new worker. See
+available until explicit chat deletion. The default `snapshot_mode: data` restores
+workspace files, cold boots the harness and reloads the conversation; `full` is
+an explicit option for compatible runtimes. A failed resume retains the Task and
+checkpoint for retry and returns HTTP 503. After Task deletion, only the saved
+transcript is restored in a new worker. See
 [AX session lifecycle](ax_local/README.md#suspend-и-продолжение-сессии).
 AX limits each API process to 10 created workers, including suspended sessions.
 New worker starts wait in FIFO order for up to 3600 seconds; continuation of an
@@ -193,14 +204,14 @@ After setting `.env` as described in "Start and try", start the MCP service
 with the rest of the stack:
 
 ```bash
-docker compose up --build -d mcp-server
+docker compose --env-file .env -f popot_agents/compose.yaml up --build -d mcp-server
 ```
 
 The Streamable HTTP endpoint is `http://127.0.0.1:8001/mcp`. Check the service
 and call the read-only `list_chats` tool:
 
 ```bash
-docker compose ps db orchestrator mcp-server
+docker compose --env-file .env -f popot_agents/compose.yaml ps db orchestrator mcp-server
 curl --fail-with-body -sS http://127.0.0.1:8001/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
@@ -235,7 +246,7 @@ orchestrator API as regular HTTP requests. The MCP service holds no model token
 and has no Docker socket. It is published only on `127.0.0.1`; keep it local
 because its tools can start workers and execute role-authorized actions. Set
 `MCP_PUBLISH_PORT` if port 8001 is busy, and use that port in the client URL.
-Follow incoming MCP calls with `docker compose logs -f mcp-server`. Each HTTP
+Follow incoming MCP calls with `docker compose --env-file .env -f popot_agents/compose.yaml logs -f mcp-server`. Each HTTP
 request logs its client IP and port, method, path, headers, and JSON body; the
 response log includes status and headers. Events share a `request_id`. MCP logs
 hide credential fields and sensitive headers, including `Authorization`, cookies,
@@ -248,13 +259,13 @@ counted but not printed.
 cp .env.example .env  # only on a fresh checkout
 # Set POPOT_DB_PASSWORD and the provider variables you use in .env.
 bash memory/up.sh
-docker compose up --build -d orchestrator
+docker compose --env-file .env -f popot_agents/compose.yaml up --build -d orchestrator
 ```
 
 For local development, keep Compose Watch running in a terminal instead:
 
 ```bash
-docker compose up --watch orchestrator worker-image
+docker compose --env-file .env -f popot_agents/compose.yaml up --watch orchestrator worker-image
 ```
 
 Changes to files copied into a service image automatically rebuild that image.
@@ -262,7 +273,7 @@ Changes to files copied into a service image automatically rebuild that image.
 service is recreated after its rebuild; new tasks and chats use the latest
 worker image after its rebuild. Chat containers that were already started keep
 their old image until they are closed and started again. Changes to `.env` still require
-`docker compose up -d --force-recreate orchestrator` because environment values
+`docker compose --env-file .env -f popot_agents/compose.yaml up -d --force-recreate orchestrator` because environment values
 are read when the container starts.
 
 Run these commands from the repository directory with Docker running. Set
@@ -271,13 +282,13 @@ and model names you need before starting. Compose publishes the API only on
 `127.0.0.1:8000`, runs PostgreSQL without a published port, and builds the
 default worker image. PostgreSQL data lives in `~/.popot-agents/postgres/` and
 persistent workspaces in `~/.popot-agents/workspaces/`. Both survive image and
-container replacement, `docker compose down`, and a new checkout of this
-repository. Check startup with `docker compose logs orchestrator`; stop with
-`docker compose down`. If host port 8000 is occupied, set
+container replacement, `docker compose --env-file .env -f popot_agents/compose.yaml down`, and a new checkout of this
+repository. Check startup with `docker compose --env-file .env -f popot_agents/compose.yaml logs orchestrator`; stop with
+`docker compose --env-file .env -f popot_agents/compose.yaml down`. If host port 8000 is occupied, set
 `API_PUBLISH_PORT=18000` when starting Compose and use that port in requests.
 After changing `config/agents.json` or `config/roles.json`, run
-`docker compose up --build -d orchestrator` again. After changing only `.env`,
-run `docker compose up -d --force-recreate orchestrator` to load its new values.
+`docker compose --env-file .env -f popot_agents/compose.yaml up --build -d orchestrator` again. After changing only `.env`,
+run `docker compose --env-file .env -f popot_agents/compose.yaml up -d --force-recreate orchestrator` to load its new values.
 Keep `POPOT_DB_PASSWORD` unchanged for an existing database; changing it in
 `.env` alone does not rotate the PostgreSQL user's password.
 
@@ -292,16 +303,16 @@ conversation text and code, so keep them private.
 To export sessions before replacing the host, run:
 
 ```bash
-docker compose exec -T db pg_dump -U popot popot_agents > "$HOME/popot-agents-sessions.sql"
+docker compose --env-file .env -f popot_agents/compose.yaml exec -T db pg_dump -U popot popot_agents > "$HOME/popot-agents-sessions.sql"
 ```
 
 Copy that file and `~/.popot-agents/workspaces/` to the new host. With a fresh
 database there, start `db`, restore the dump, then start `orchestrator`:
 
 ```bash
-docker compose up -d db
-docker compose exec -T db psql -v ON_ERROR_STOP=1 -U popot popot_agents < "$HOME/popot-agents-sessions.sql"
-docker compose up -d orchestrator
+docker compose --env-file .env -f popot_agents/compose.yaml up -d db
+docker compose --env-file .env -f popot_agents/compose.yaml exec -T db psql -v ON_ERROR_STOP=1 -U popot popot_agents < "$HOME/popot-agents-sessions.sql"
+docker compose --env-file .env -f popot_agents/compose.yaml up -d orchestrator
 ```
 
 In another terminal:
@@ -325,7 +336,7 @@ curl -sS http://127.0.0.1:8000/messages \
 ```
 
 Workers log when a model request starts and when a response arrives. Follow API
-requests and answers with `docker compose logs -f orchestrator`. While a worker
+requests and answers with `docker compose --env-file .env -f popot_agents/compose.yaml logs -f orchestrator`. While a worker
 is running, use `docker logs -f <popot-chat-container-name>` to see its model
 request events. After each turn and before a container is removed, the
 orchestrator saves the worker log in
@@ -344,7 +355,11 @@ encrypted blocks remain opaque. The original blocks are preserved unchanged in
 assistant messages sent back to the model during the tool loop. The harness
 receives each model response in full, so reasoning events arrive after that
 response, before tool execution or the final answer; this is not token streaming.
-Use an MCP `progressToken` to receive the events during the task. Rebuild the worker image and start a new
+Use a nonempty MCP `params._meta.progressToken` to receive events during the task.
+An absent token, `null`, or `""` disables progress notifications for both `run_task`
+and `send_message`; numeric `0` remains a valid token. The final result and its
+`activity` are still returned. SSE keepalive pings can still appear.
+Rebuild the worker image and start a new
 session to see the new trace events.
 
 The orchestrator also logs each API request and response as JSON lines with a
@@ -383,7 +398,7 @@ fail validation. The total skill prompt budget is
 The selected files are baked into the images. After changing skills, rebuild:
 
 ```bash
-docker compose up --build -d worker-image orchestrator mcp-server
+docker compose --env-file .env -f popot_agents/compose.yaml up --build -d worker-image orchestrator mcp-server
 ```
 
 For the AX stack use `bash ax_local/rebuild-worker.sh`. Running chat workers keep

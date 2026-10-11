@@ -11,6 +11,7 @@ import sys
 import importlib.util
 from datetime import timedelta
 from contextlib import redirect_stderr
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from popot_agents.progress import observe_progress, emit_progress, forward_progress, format_progress
@@ -188,6 +189,39 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(finish.is_set())
                     self.assertEqual([r[0] for r in received], list(range(1,len(received)+1)))
                     self.assertTrue(all(r[1] is None for r in received))
+                    # Raw HTTP preserves the exact token; ClientSession normally
+                    # replaces it with its generated request ID.
+                    async with httpx.AsyncClient(trust_env=False, timeout=10) as http:
+                        for tool_name, argument in [('run_task', 'task'), ('send_message', 'message')]:
+                            for meta in (None, {}, {'progressToken': ''}, {'progressToken': None},
+                                         {'progressToken': 0}, {'progressToken': 'review-70'}):
+                                with self.subTest(tool=tool_name, meta=meta):
+                                    params = {'name': tool_name, 'arguments': {'agent': 'test', argument: 'work'}}
+                                    if meta is not None:
+                                        params['_meta'] = meta
+                                    response = await http.post(url, headers={
+                                        'Accept': 'application/json, text/event-stream',
+                                        'MCP-Protocol-Version': '2025-11-25',
+                                    }, json={'jsonrpc': '2.0', 'id': 99, 'method': 'tools/call', 'params': params})
+                                    response.raise_for_status()
+                                    events = [json.loads(line[6:]) for line in response.text.splitlines()
+                                              if line.startswith('data: ')]
+                                    updates = [event for event in events
+                                               if event.get('method') == 'notifications/progress']
+                                    token = meta.get('progressToken') if meta is not None else None
+                                    if token is None or token == '':
+                                        self.assertEqual(updates, [])
+                                    else:
+                                        self.assertTrue(updates)
+                                        self.assertTrue(all(event['params']['progressToken'] == token
+                                                            for event in updates))
+                                        self.assertEqual(events[-1]['id'], 99)
+                                    replies = [event['result'] for event in events if event.get('id') == 99]
+                                    self.assertEqual(len(replies), 1)
+                                    self.assertFalse(replies[0].get('isError'), replies[0])
+                                    data = replies[0].get('structuredContent') or json.loads(
+                                        next(item['text'] for item in replies[0]['content'] if item['type'] == 'text'))
+                                    self.assertEqual(data['answer'], 'done')
                 finally:
                     finish.set()
                     process.terminate()
@@ -210,6 +244,7 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
         class Runner:
             def start_chat(self, *_): return Chat()
         class Context:
+            request_context = SimpleNamespace(meta=None)
             async def report_progress(self, *_, **__): pass
         with tempfile.TemporaryDirectory() as directory, redirect_stderr(io.StringIO()):
             server = create_server({'test': Runner()}, session_dir=directory, host='127.0.0.1', port=0)
@@ -244,6 +279,7 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
             def start_chat(self, *_): return Chat()
 
         class Context:
+            request_context = SimpleNamespace(meta=SimpleNamespace(progressToken='test'))
             def __init__(self): self.events = []
             async def report_progress(self, progress, total=None, message=None):
                 self.events.append((progress, total, message))

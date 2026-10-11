@@ -154,7 +154,7 @@ def ensure_workers(kubeconfig: Path, cli: Path, context: str, namespace: str,
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     local = root / ".local"
-    config = json.loads((root.parent / "config/runtime.json").read_text())["ax"]
+    config = json.loads((root / "config.json").read_text())
     # Serialize concurrent up/rebuild invocations. No persistent success marker:
     # every launch must compare today's pod IPs against the actual registry.
     local.mkdir(exist_ok=True)
