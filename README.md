@@ -19,6 +19,7 @@ popot_agents/
   tools.py        Role tool definitions and execution shared by both images
 config/           Runtime settings, agent profiles, and role definitions
 docker/           Dockerfiles for the orchestrator, worker, and MCP server
+memory/           Cognee persistent memory, graph UI and local gateway
 tests/            API, worker, roles, sessions, and container tests
 compose.yaml      Local deployment
 ```
@@ -26,19 +27,31 @@ compose.yaml      Local deployment
 Run local tests with `python -m unittest discover -s tests -p 'test_*.py'`.
 Run the API without Compose with `python -m popot_agents.orchestrator.main`.
 
+## Project memory and graph UI
+
+Run `bash memory/up.sh`, then rebuild the agent stack with
+`docker compose up --build -d worker-image orchestrator mcp-server`.
+Open **http://localhost:3001** and sign in as `default_user@example.com` with
+`COGNEE_PASSWORD` from `.env` (generated privately by the launcher).
+Agents share project datasets with the UI: select a dataset under **Brains**
+to inspect its graph after indexing. All conversational roles have Cognee
+recall, remember and processing-status tools. Memory persists across restarts.
+See [memory/README.md](memory/README.md) for setup, datasets and AX integration.
+
 ## Runtime settings
 
 Edit [config/runtime.json](config/runtime.json) for shared non-secret settings.
 `sessions` sets the default worker idle time, session retention, and cleanup
 interval. `worker` sets Docker resources, startup probing, and
-`max_concurrent_tasks` (default: 4). When all task slots are busy, the API
+`max_concurrent_tasks` (default: 3). When all task slots are busy, the API
 returns HTTP 503; `/healthz` remains available. `timeouts` covers
 model, MCP, tool, Docker, and database calls. `limits` sets request, history,
 tool output, and file sizes. `logging` sets how much of an MCP request body is
 recorded and the worker log tail and file size limits. `model` sets the default
 tool-round limit, `request_retries` (a non-negative integer; 0 disables retries), and optional
 `temperature`/`max_tokens`; `null` omits either model parameter from requests.
-The same file is copied into the orchestrator, worker, and MCP images. Its
+The same file is copied into the orchestrator, worker, and MCP images and
+mounted read-only into the Cognee sync container. Its
 values are validated at startup, so an invalid setting prevents that service
 from starting. Changes require
 `docker compose up --build -d worker-image orchestrator mcp-server` to
@@ -52,16 +65,44 @@ profile may add `"resources": {"memory": "2g", "cpus": 2}` and
 `"model_parameters": {"temperature": 0.3, "max_tokens": 1024}`. Role-specific
 `ttl_seconds`, `timeout_seconds`, and `max_tool_rounds` remain in
 [config/roles.json](config/roles.json). Roles without `ttl_seconds` inherit
-`sessions.default_idle_seconds`; all bundled roles currently inherit 300 seconds.
-All bundled roles also inherit `model.default_max_tool_rounds` (12) from runtime.
+`sessions.default_idle_seconds`; all bundled roles currently inherit 900 seconds.
+All bundled roles also inherit `model.default_max_tool_rounds` (40) from runtime.
 To override it for one agent role, add `"max_tool_rounds": 20` to that role in
 `config/roles.json`. Removing the field restores inheritance. Both values must
-be integers from 1 to 20; zero does not mean unlimited.
+be integers from 1 to `model.max_tool_rounds` (currently 80); zero does not mean unlimited.
 Provider credentials and deployment
 ports remain in `.env`; existing `AGENT_CHAT_IDLE_SECONDS` and
 `MCP_UPSTREAM_TIMEOUT_SECONDS` process environment variables override their
 runtime settings when provided. Docker isolation flags and credential redaction
 remain enforced by the application.
+
+Shared turn settings are defined only in `config/runtime.json`:
+
+| Section | Settings |
+| --- | --- |
+| `worker` | Default/max task timeout, minimum harness budget and `response_margin_seconds` for returning the answer and recording the session |
+| `model` | Model retries, default/max tool rounds and final-answer reserve (`final_answer_reserve_seconds`, capped by turn budget / `final_answer_reserve_divisor`) |
+| `timeouts` | Model/tool/transport calls, automatic memory recall, session start/finish and memory summary/capture budgets |
+| `memory` | Recall count, summary attempts/tokens, evidence/context/text limits and maximum notes/traced tools |
+
+Both Docker and AX use these shared values. AX-specific CLI, route, startup,
+probe, restore, response and deletion timeouts remain together under `ax` in
+`ax_local/config.json`; delegation and proxy policies stay in that same file.
+Role-specific timeouts are overrides in `config/roles.json`, not shared defaults.
+With the current settings, every bundled role gets 900 seconds, the harness gets 885,
+and it reserves up to 120 seconds for its final answer. Changing the shared
+maximum also changes role validation and the AX delegation timeout cap.
+AX route timeout must exceed the shared maximum task timeout plus its response margin.
+The default worker has 2 CPUs, 1536 MiB RAM, 256 process slots and a 512 MiB
+workspace tmpfs. Three concurrent workers can consume 4.5 GiB RAM plus service
+overhead; this leaves headroom for Cognee on an 8 GiB Docker VM. AX tasks use
+the same CPU/RAM limits. Model requests allow 120 seconds; MCP tool calls allow
+120 seconds; shell commands and clones allow 180 seconds. Upstream transport
+budgets cover the 1800-second role override cap. Larger limits provide room for
+complex work, but do not make remote model inference faster. Existing sessions
+keep the previous worker image; start a new session to use the new settings.
+The memory limits for note count and trace count must stay within the pinned
+Cognee API contract; invalid values are rejected at startup.
 
 ## Connect Claude or Codex through MCP
 
@@ -123,6 +164,7 @@ counted but not printed.
 ```bash
 cp .env.example .env  # only on a fresh checkout
 # Set POPOT_DB_PASSWORD and the provider variables you use in .env.
+bash memory/up.sh
 docker compose up --build -d orchestrator
 ```
 
@@ -664,7 +706,7 @@ and allow only trusted callers. Running
 `127.0.0.1:8000` by default. `API_HOST`, `API_PORT`,
 `AGENT_ENV_FILE`, and `AGENT_PROFILES_FILE` override the listener, env file,
 and profile file. `AGENT_ROLES_FILE` overrides the roles file. Edit
-`timeout_seconds` in a profile if its model or CLI needs more than 60 seconds.
+`timeout_seconds` in a profile if its model or CLI needs more than the shared 900-second default.
 The API returns HTTP 504 on timeout and HTTP 502 on worker failure. It never
 mounts the host repository into the worker; only the selected role's workspace
 is mounted. A role with Bash and internet can execute downloaded code inside

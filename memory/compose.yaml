@@ -1,0 +1,71 @@
+name: popot-memory
+
+services:
+  cognee:
+    image: cognee/cognee:main-b32d8af
+    restart: unless-stopped
+    stop_grace_period: 30s
+    entrypoint: ["gunicorn", "--chdir", "/app/popot-sync", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-t", "30000", "--bind", "0.0.0.0:8000", "--log-level", "error", "session_api:app"]
+    environment:
+      SYSTEM_ROOT_DIRECTORY: /cognee-storage/system
+      DATA_ROOT_DIRECTORY: /cognee-storage/data
+      HF_HOME: /cognee-storage/system/model-cache/huggingface
+      FASTEMBED_CACHE_PATH: /cognee-storage/system/model-cache/fastembed
+      DEFAULT_USER_PASSWORD: ${COGNEE_PASSWORD:?Run bash memory/up.sh first}
+      ENABLE_BACKEND_ACCESS_CONTROL: "true"
+      REQUIRE_AUTHENTICATION: "true"
+      GRAPH_EXTRACTOR: gliner_demo
+      CACHING: "true"
+      CACHE_BACKEND: sqlite
+      AUTO_FEEDBACK: "false"
+      IMPROVE_AUTO_ENABLED: "false"
+      LLM_API_KEY: ""
+      CORS_ALLOWED_ORIGINS: http://localhost:3001,http://127.0.0.1:3001
+      TELEMETRY_DISABLED: "true"
+    volumes:
+      - cognee-system:/cognee-storage/system
+      - cognee-data:/cognee-storage/data
+      - ../skills:/app/popot-skills:ro
+      - ../config/runtime.json:/app/config/runtime.json:ro
+      - ../popot_agents/__init__.py:/app/popot_agents/__init__.py:ro
+      - ../popot_agents/runtime_config.py:/app/popot_agents/runtime_config.py:ro
+      - ../popot_agents/role_env.py:/app/popot_agents/role_env.py:ro
+      - ./session_api.py:/app/popot-sync/session_api.py:ro
+      - ./import_skills.py:/app/popot-sync/import_skills.py:ro
+      - ../popot_agents/worker/cognee_memory.py:/app/popot-sync/cognee_memory.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).close()"]
+      interval: 10s
+      timeout: 6s
+      retries: 30
+      start_period: 60s
+
+  cognee-web:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    depends_on:
+      cognee:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+  cognee-ui:
+    image: popot-cognee-ui:main-b32d8af-knowledge
+    build:
+      context: ./ui
+    restart: unless-stopped
+    # Share the gateway's network namespace: both browser and UI server-side
+    # graph routes can reach the same authenticated API at localhost:3001.
+    network_mode: service:cognee-web
+    depends_on:
+      cognee-web:
+        condition: service_started
+    environment:
+      COGNEE_BACKEND_URL: http://localhost:3001
+      DEFAULT_USER_PASSWORD: ${COGNEE_PASSWORD:?Run bash memory/up.sh first}
+
+volumes:
+  cognee-system:
+  cognee-data:

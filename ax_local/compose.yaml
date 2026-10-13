@@ -31,6 +31,7 @@ services:
       - kind
     environment:
       AX_LOCAL_API_PORT: 8002
+      COGNEE_API_URL: http://cognee:8000
       AX_LOCAL_PROVIDER: ${AX_LOCAL_PROVIDER:-}
       AX_LOCAL_MODEL: ${AX_LOCAL_MODEL:-}
       AX_LOCAL_PGHOST: db
@@ -71,7 +72,6 @@ services:
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8001
       MCP_ORCHESTRATOR_URL: http://api:8002
-      MCP_UPSTREAM_TIMEOUT_SECONDS: 660
     ports:
       - "127.0.0.1:${AX_MCP_PUBLISH_PORT:-8003}:8001"
     restart: unless-stopped

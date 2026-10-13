@@ -47,9 +47,17 @@ async def _streams(config: dict):
 
 
 def _error_text(config: dict, exc: Exception) -> str:
-    text = str(exc)
+    def details(error: BaseException) -> str:
+        # anyio uses native ExceptionGroup or its Python 3.10 backport.
+        children = getattr(error, "exceptions", ())
+        if children:
+            return "; ".join(details(child) for child in children)
+        return f"{type(error).__name__}: {error}"
+
+    text = details(exc)
     token = safe_tool_env().get(config.get("bearer_token_env", ""))
-    return text.replace(token, "[REDACTED]") if token else text
+    text = text.replace(token, "[REDACTED]") if token else text
+    return text[:MAX_TOOL_OUTPUT]
 
 
 async def _discover_one(alias: str, config: dict) -> dict:
@@ -101,7 +109,7 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> di
                 timeout = min(timeout, remaining)
             discovered.update(asyncio.run(asyncio.wait_for(
                 _discover_one(alias, config), timeout)))
-        except TimeoutError as exc:
+        except (TimeoutError, asyncio.TimeoutError) as exc:
             raise RuntimeError(f"MCP server {alias} timed out during discovery") from exc
         except Exception as exc:
             raise RuntimeError(f"MCP server {alias} failed during discovery: {_error_text(config, exc)}") from None
@@ -144,7 +152,7 @@ def call_tool(config: dict, native_name: str, arguments: dict,
     except MCPToolError as exc:
         # Redact before truncation so a token cut in the middle cannot leak.
         raise MCPToolError(_error_text(config, exc)[:MAX_TOOL_OUTPUT]) from None
-    except TimeoutError as exc:
+    except (TimeoutError, asyncio.TimeoutError) as exc:
         raise RuntimeError("MCP tool call timed out") from exc
     except Exception as exc:
         raise RuntimeError(f"MCP tool {native_name} failed: {_error_text(config, exc)}") from None

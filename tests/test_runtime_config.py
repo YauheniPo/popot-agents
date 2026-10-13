@@ -10,6 +10,71 @@ from unittest.mock import patch
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_expanded_budget_reaches_worker_and_ax_transport(self):
+        from popot_agents.runtime_config import RUNTIME
+        from popot_agents.orchestrator.main import DockerAgentRunner, load_agents
+        from ax_local.config import AX_CONFIG
+        command = DockerAgentRunner()._docker_command('budget-test', False)
+        self.assertIn('HARNESS_TURN_TIMEOUT_SECONDS=885', command)
+        self.assertEqual(command[command.index('--memory') + 1], '1536m')
+        self.assertEqual(float(command[command.index('--cpus') + 1]), 2)
+        self.assertEqual(RUNTIME['worker']['max_concurrent_tasks'], 3)
+        self.assertGreater(AX_CONFIG['ax']['route_timeout_seconds'],
+                           RUNTIME['worker']['max_timeout_seconds'] + AX_CONFIG['ax']['response_margin_seconds'])
+        agents_path = Path(__file__).resolve().parents[1] / 'config/agents.json'
+        for runner in load_agents(str(agents_path)).values():
+            self.assertEqual(runner.timeout_seconds, RUNTIME['worker']['default_timeout_seconds'])
+
+    def test_ax_mcp_inherits_shared_transport_budget(self):
+        compose = Path(__file__).resolve().parents[1] / 'ax_local/compose.yaml'
+        self.assertNotIn('MCP_UPSTREAM_TIMEOUT_SECONDS:', compose.read_text())
+
+    def test_shared_worker_budget_applies_to_docker_and_ax(self):
+        from popot_agents.runtime_config import RUNTIME
+        from popot_agents.orchestrator.main import DockerAgentRunner
+        from ax_local.api.ax_runner import AxAgentRunner
+        with patch.dict(RUNTIME['worker'], {'response_margin_seconds': 9}):
+            command = DockerAgentRunner()._docker_command('test', False,
+                role_config={'timeout_seconds': 120})
+            self.assertIn('HARNESS_TURN_TIMEOUT_SECONDS=111', command)
+            runner = AxAgentRunner("worker@sha256:" + "a" * 64, "test", "http://model/v1")
+            manifest = runner.task_manifest('0123456789abcdef', {'timeout_seconds': 120})
+            env = {item['name']: item['value'] for item in manifest['spec']['env']}
+            self.assertEqual(env['HARNESS_TURN_TIMEOUT_SECONDS'], '111')
+
+    def test_shared_final_answer_reserve_changes_runtime_behavior(self):
+        from popot_agents.runtime_config import RUNTIME
+        from popot_agents.worker.http_harness import run_http
+        now = [0.0]
+        requests = []
+        def respond(call, timeout):
+            requests.append(json.loads(call.data))
+            if len(requests) == 1:
+                now[0] = 44.0
+                return io.BytesIO(b'{"choices":[{"message":{"tool_calls":[{"id":"x","function":{"name":"utc_time","arguments":"{}"}}]}}]}')
+            return io.BytesIO(b'{"choices":[{"message":{"content":"done"}}]}')
+        with patch.dict(RUNTIME['model'], {'final_answer_reserve_seconds': 10}), \
+             patch.dict(os.environ, {'HARNESS_BASE_URL':'http://model/v1', 'HARNESS_MODEL':'test',
+                                    'HARNESS_TURN_TIMEOUT_SECONDS':'60'}, clear=True), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='ok') as tool:
+            self.assertEqual(run_http('task', {'tools':['utc_time']}), 'done')
+        tool.assert_called_once()
+        self.assertIn('tools', requests[-1])
+
+    def test_memory_budget_validation_rejects_impossible_capture_and_nonfinite_timeouts(self):
+        from popot_agents.runtime_config import load_runtime_config
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'runtime.json'
+            for field, value in [('memory_summary_seconds', float('inf')),
+                                 ('memory_capture_margin_seconds', load_runtime_config()['timeouts']['memory_capture_min_seconds'])]:
+                settings = load_runtime_config()
+                settings['timeouts'][field] = value
+                path.write_text(json.dumps(settings))
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    load_runtime_config(path)
+
     def test_default_config_collects_runtime_limits_and_timeouts(self):
         from popot_agents.runtime_config import DEFAULT_PATH, load_runtime_config
 
@@ -60,8 +125,8 @@ class RuntimeConfigTests(unittest.TestCase):
             path.write_text(json.dumps(loaded))
             with self.assertRaisesRegex(ValueError, "socket_message_bytes"):
                 load_runtime_config(path)
-            loaded["limits"]["socket_message_bytes"] = 131072
-            loaded["worker"]["default_timeout_seconds"] = 301
+            loaded["limits"]["socket_message_bytes"] = settings["limits"]["socket_message_bytes"]
+            loaded["worker"]["default_timeout_seconds"] = loaded["worker"]["max_timeout_seconds"] + 1
             path.write_text(json.dumps(loaded))
             with self.assertRaisesRegex(ValueError, "default_timeout_seconds"):
                 load_runtime_config(path)

@@ -1,45 +1,58 @@
 {
   "sessions": {
-    "default_idle_seconds": 300,
+    "default_idle_seconds": 900,
     "retention_days": 7,
     "prune_interval_seconds": 60
   },
   "worker": {
-    "default_timeout_seconds": 60,
-    "max_concurrent_tasks": 4,
-    "memory": "1g",
-    "cpus": 1,
-    "pids_limit": 64,
-    "tmpfs_mb": 16,
-    "workspace_tmpfs_mb": 256,
-    "startup_probe_attempts": 20,
-    "startup_probe_interval_seconds": 0.1
+    "default_timeout_seconds": 900,
+    "max_concurrent_tasks": 3,
+    "memory": "1536m",
+    "cpus": 2,
+    "pids_limit": 256,
+    "tmpfs_mb": 64,
+    "workspace_tmpfs_mb": 512,
+    "startup_probe_attempts": 40,
+    "startup_probe_interval_seconds": 0.25,
+    "max_timeout_seconds": 1800,
+    "min_timeout_seconds": 0.1,
+    "response_margin_seconds": 15
   },
   "timeouts": {
-    "model_request_seconds": 45,
-    "mcp_discovery_seconds": 20,
-    "mcp_tool_seconds": 30,
-    "mcp_upstream_seconds": 360,
-    "tool_command_seconds": 45,
-    "git_clone_seconds": 60,
-    "file_action_seconds": 30,
-    "file_download_seconds": 20,
-    "docker_start_seconds": 15,
-    "docker_probe_seconds": 3,
-    "docker_restore_seconds": 10,
-    "docker_inspect_seconds": 5,
-    "docker_remove_seconds": 5,
-    "postgres_connect_seconds": 5
+    "model_request_seconds": 120,
+    "mcp_discovery_seconds": 60,
+    "mcp_tool_seconds": 120,
+    "mcp_upstream_seconds": 1920,
+    "tool_command_seconds": 180,
+    "git_clone_seconds": 180,
+    "file_action_seconds": 60,
+    "file_download_seconds": 60,
+    "docker_start_seconds": 30,
+    "docker_probe_seconds": 5,
+    "docker_restore_seconds": 30,
+    "docker_inspect_seconds": 10,
+    "docker_remove_seconds": 10,
+    "postgres_connect_seconds": 10,
+    "memory_request_seconds": 5,
+    "memory_recall_seconds": 20,
+    "memory_session_start_seconds": 3,
+    "memory_session_finish_seconds": 5,
+    "memory_summary_seconds": 30,
+    "memory_capture_min_seconds": 8,
+    "memory_capture_margin_seconds": 5,
+    "memory_recall_min_seconds": 1,
+    "memory_tool_request_seconds": 60,
+    "memory_skill_import_seconds": 600
   },
   "limits": {
-    "request_bytes": 65536,
-    "message_chars": 10000,
-    "history_bytes": 100000,
-    "socket_message_bytes": 131072,
-    "tool_output_chars": 12000,
-    "write_file_bytes": 100000,
-    "download_bytes": 5000000,
-    "skill_prompt_bytes": 131072
+    "request_bytes": 262144,
+    "message_chars": 30000,
+    "history_bytes": 500000,
+    "socket_message_bytes": 1048576,
+    "tool_output_chars": 24000,
+    "write_file_bytes": 500000,
+    "download_bytes": 20000000,
+    "skill_prompt_bytes": 262144
   },
   "logging": {
     "mcp_body_max_bytes": 65536,
@@ -47,10 +60,34 @@
     "worker_log_max_bytes": 1048576
   },
   "model": {
-    "default_max_tool_rounds": 20,
+    "default_max_tool_rounds": 40,
     "request_retries": 10,
     "temperature": null,
-    "max_tokens": null
+    "max_tokens": null,
+    "final_answer_reserve_seconds": 120,
+    "final_answer_reserve_divisor": 3,
+    "max_tool_rounds": 80
   },
-  "role_env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+  "role_env_names": [
+    "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "COGNEE_API_URL",
+    "COGNEE_PASSWORD"
+  ],
+  "memory": {
+    "summary_attempts": 2,
+    "summary_max_tokens": 2000,
+    "summary_retry_max_tokens": 4000,
+    "recall_top_k": 8,
+    "task_chars": 8000,
+    "query_chars": 4000,
+    "chunk_chars": 4000,
+    "context_chars": 24000,
+    "tool_evidence_chars": 6000,
+    "tool_evidence_count": 12,
+    "answer_chars": 8000,
+    "max_memories": 5,
+    "text_chars": 1600,
+    "quote_chars": 600,
+    "trace_tool_limit": 200
+  }
 }

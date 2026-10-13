@@ -2,6 +2,7 @@ import io
 import json
 import os
 import subprocess
+import socket
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +13,28 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_memory_dns_outage_does_not_prevent_worker_startup(self):
+        with patch.dict(RUNTIME, {'role_env_names': ['COGNEE_API_URL', 'COGNEE_PASSWORD']}), \
+             patch.dict(os.environ, {'COGNEE_API_URL': 'http://cognee:8000',
+                                     'COGNEE_PASSWORD': 'memory-password'}), \
+             patch('socket.gethostbyname', side_effect=socket.gaierror('memory offline')):
+            manifest = self.runner.task_manifest('0123456789abcdef', {
+                'env_names': ['COGNEE_API_URL', 'COGNEE_PASSWORD'],
+            })
+        env = {item['name']: item['value'] for item in manifest['spec']['env']}
+        self.assertEqual(env['COGNEE_API_URL'], 'http://cognee:8000')
+
+    def test_memory_address_uses_kind_network_ip_instead_of_docker_dns(self):
+        with patch.dict(RUNTIME, {'role_env_names': ['COGNEE_API_URL', 'COGNEE_PASSWORD']}), \
+             patch.dict(os.environ, {'COGNEE_API_URL': 'http://cognee:8000',
+                                     'COGNEE_PASSWORD': 'memory-password'}), \
+             patch('socket.gethostbyname', return_value='172.18.0.8'):
+            manifest = self.runner.task_manifest('0123456789abcdef', {
+                'env_names': ['COGNEE_API_URL', 'COGNEE_PASSWORD'],
+            })
+        env = {item['name']: item['value'] for item in manifest['spec']['env']}
+        self.assertEqual(env['COGNEE_API_URL'], 'http://172.18.0.8:8000')
+
     def test_task_adds_only_selected_role_env_values(self):
         with patch.dict(RUNTIME, {"role_env_names": ["GITHUB_TOKEN"]}), \
              patch.dict(os.environ, {"GITHUB_TOKEN": "selected-secret", "OTHER_TOKEN": "other-secret"}):
@@ -141,10 +164,11 @@ class AxRunnerTests(unittest.TestCase):
                 self.runner.start_chat("0123456789abcdef", deadline=10)
         run.assert_not_called()
 
-    def test_ax_manifest_gives_harness_the_role_turn_budget(self):
+    def test_ax_manifest_reserves_time_to_return_and_record_the_answer(self):
         manifest = self.runner.task_manifest("0123456789abcdef", {"timeout_seconds": 300})
         env = {item["name"]: item["value"] for item in manifest["spec"]["env"]}
-        self.assertEqual(env["HARNESS_TURN_TIMEOUT_SECONDS"], "300")
+        from popot_agents.runtime_config import RUNTIME
+        self.assertEqual(env["HARNESS_TURN_TIMEOUT_SECONDS"], str(300 - RUNTIME['worker']['response_margin_seconds']))
 
     def test_existing_task_is_replaced_after_api_restart(self):
         present = subprocess.CompletedProcess([], 0, "", "")

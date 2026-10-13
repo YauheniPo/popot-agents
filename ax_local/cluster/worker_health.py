@@ -14,9 +14,16 @@ SUBSTRATE_COMMIT = "672533541dbfcd29084e4de2475267088bda3651"
 WORKER_LABEL = "ate.dev/worker-pool"
 
 
+def pool_resources_patch(pool: dict, resources: dict) -> dict | None:
+    if pool['spec'].get('template', {}).get('resources') == resources:
+        return None
+    return {'metadata': {'resourceVersion': pool['metadata']['resourceVersion']},
+            'spec': {'template': {'resources': resources}}}
+
+
 def ensure_workers(kubeconfig: Path, cli: Path, context: str, namespace: str,
                    timeout_seconds: int, *, run=subprocess.run,
-                   clock=time.monotonic, sleep=time.sleep) -> None:
+                   clock=time.monotonic, sleep=time.sleep, resources: dict | None = None) -> None:
     if not re.fullmatch(r"kind-[a-z0-9-]+", context):
         raise ValueError("Worker recovery requires a local kind context")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", namespace):
@@ -53,6 +60,14 @@ def ensure_workers(kubeconfig: Path, cli: Path, context: str, namespace: str,
             workers = registry.get("workers", [])  # protobuf omits empty repeated fields
             if not all(isinstance(items, list) for items in (pools, pods, workers)):
                 raise ValueError("Invalid worker inspection response")
+            if resources is not None:
+                for pool in pools:
+                    patch = pool_resources_patch(pool, resources)
+                    if patch is not None:
+                        name = pool['metadata']['name']
+                        progress(f"Updating AX worker pool resources: {namespace}/{name}")
+                        execute([*kube, '-n', namespace, 'patch', 'workerpool', name,
+                                 '--type=merge', '-p', json.dumps(patch)])
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             # Kubernetes/API may still be coming back after Docker has started.
             progress(f"Waiting for Kubernetes/Substrate worker inspection: {type(exc).__name__}")
@@ -66,6 +81,10 @@ def ensure_workers(kubeconfig: Path, cli: Path, context: str, namespace: str,
         counts = {name: sum(p["metadata"].get("labels", {}).get(WORKER_LABEL) == name
                             for p in pods) for name in desired}
         healthy = bool(pods) and counts == desired
+        if resources is not None:
+            healthy = healthy and all(
+                container.get('resources') == resources
+                for pod in pods for container in pod.get('spec', {}).get('containers', []))
         seen = set()
         for pod in pods:
             meta = pod["metadata"]
@@ -144,7 +163,7 @@ def main() -> None:
                            cwd=source, check=True, timeout=300)
             stamp.write_text(head + "\n")
         ensure_workers(local / "kubeconfig", cli, config["context"], config["atespace"],
-                       config["startup_timeout_seconds"])
+                       config["startup_timeout_seconds"], resources=config['task_resources'])
 
 
 if __name__ == "__main__":

@@ -48,7 +48,7 @@ class SkillTests(unittest.TestCase):
         path = self.root / "roles.json"
         path.write_text(json.dumps({"engineer": self.role}))
         loaded = load_roles(path, {"test": SimpleNamespace(session_mode="http")})
-        self.assertEqual(loaded["engineer"], self.role)
+        self.assertEqual(loaded["engineer"], {**self.role, "name": "engineer"})
         for selection in (None, "testing", [1], ["missing"], ["../other"],
                           [str(self.skill)], ["engineering//testing"],
                           ["engineering/testing", "engineering/testing"]):

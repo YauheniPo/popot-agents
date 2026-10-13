@@ -10,6 +10,11 @@
 
 ## Где что находится
 
+`up.sh` also starts the shared Cognee memory and graph UI at
+**http://localhost:3001**. Sign in as `default_user@example.com` with
+`COGNEE_PASSWORD` from the root `.env`. Agent memory is visible under **Brains**
+after indexing. Details: [memory/README.md](../memory/README.md).
+
 Поле `skills` в `config/roles.json` задаёт навыки роли, например
 `["engineering/codebase-design", "engineering/tdd"]`. API проверяет пути,
 а AX worker загружает выбранные Markdown-файлы в инструкции harness до
@@ -149,8 +154,8 @@ GitHub MCP авторизуется автоматически через `GITHU
 | `port` | `8005` | Внутренний A2A-порт API на сети kind, без публикации на хост. |
 | `max_depth` | `3` | Максимум переходов от родителя к дочерним ролям. Повтор роли в цепочке запрещён. |
 | `max_calls_per_turn` | `8` | Общий предел новых дочерних задач во всём дереве за один ход корневого агента. |
-| `max_concurrent_tasks` | `4` | Отдельный лимит одновременно выполняемых дочерних задач. При заполнении возвращается ошибка без ожидания свободного слота. |
-| `turn_timeout_seconds` | `300` | Бюджет хода агента, которому разрешено делегировать. Запуск и работа потомков входят в оставшийся бюджет родителя. |
+| `max_concurrent_tasks` | `3` | Отдельный лимит одновременно выполняемых дочерних задач. При заполнении возвращается ошибка без ожидания свободного слота. |
+| `turn_timeout_seconds` | `900` | Бюджет хода агента, которому разрешено делегировать. Запуск и работа потомков входят в оставшийся бюджет родителя. |
 | `poll_interval_seconds` | `0.5` | Интервал проверки состояния дочерней задачи. |
 
 После изменения настроек или кода выполните из корня репозитория:
@@ -277,7 +282,7 @@ bash ax_local/up.sh
 Используется `POPOT_DB_PASSWORD` из существующего `.env`. Все команды выполняются
 через эту точку входа. Она также запускает остановленные локальные контейнеры
 `kind-registry` и `popot-ax-control-plane` и выставляет таймаут
-`atenet-router` из `ax.route_timeout_seconds` (по умолчанию 330 секунд).
+`atenet-router` из `ax.route_timeout_seconds` (по умолчанию 1920 секунд).
 Для настройки роутера скрипт вызывает `kubectl` с явными путём к локальному
 `ax_local/.local/kubeconfig` и контекстом `kind-popot-ax`; рабочий контекст
 пользователя не меняется.
@@ -463,3 +468,17 @@ kind-кластера, до запуска API. При ошибке устано
 Источники: [AX v0.3.1](https://github.com/google/ax/tree/v0.3.1),
 [контракт runner](https://github.com/google/ax/blob/v0.3.1/docs/runner.md),
 [локальный kind для Agent Substrate](https://github.com/agent-substrate/substrate/blob/main/README.md#quickstart-development).
+
+The startup worker-health check also synchronizes Substrate WorkerPool CPU/RAM
+from `ax.task_resources` in `ax_local/config.json`. It waits for the replacement
+pods and their registry entries before allowing tasks, so changing task resources
+also updates the workers that host the gVisor sandboxes.
+
+Code review turns inherit the shared 900-second budget (within the AX 1920-second route
+timeout). The HTTP harness reserves up to `model.final_answer_reserve_seconds`
+(currently 120 seconds) from `config/runtime.json` for a final answer, stops
+new tools before that reserve, and returns an explicitly partial result if the
+work budget expires. A final model timeout also returns a partial result; it
+never repeats external writes. Partial turns are marked failed in Cognee and
+are not captured as completed project knowledge. A missing response does not
+undo already published GitHub reviews/comments; inspect them before retrying.

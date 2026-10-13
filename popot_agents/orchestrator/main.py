@@ -191,7 +191,8 @@ class DockerAgentRunner:
         if self.model_env:
             environment["HARNESS_MODEL"] = os.environ[self.model_env]
         turn_timeout = (role_config or {}).get("timeout_seconds", self.timeout_seconds)
-        environment["HARNESS_TURN_TIMEOUT_SECONDS"] = str(max(0.1, turn_timeout - 5))
+        environment["HARNESS_TURN_TIMEOUT_SECONDS"] = str(max(RUNTIME["worker"]["min_timeout_seconds"],
+            turn_timeout - RUNTIME["worker"]["response_margin_seconds"]))
         if self.model_parameters:
             environment["HARNESS_MODEL_PARAMETERS_JSON"] = json.dumps(self.model_parameters)
         environment["HARNESS_SESSION_MODE"] = self.session_mode
@@ -255,7 +256,8 @@ class DockerAgentRunner:
     def start_chat(self, chat_id: str, role_config: dict | None = None) -> DockerChat:
         container_name = f"popot-chat-{chat_id}"
         command = self._docker_command(container_name, detached=True, role_config=role_config)
-        command.extend(["--label", f"popot.chat_id={chat_id}", self.image,
+        command.extend(["--env", f"HARNESS_CHAT_ID={chat_id}",
+                        "--label", f"popot.chat_id={chat_id}", self.image,
                         "python", "-u", "-m", CHAT_WORKER_MODULE, "serve"])
         started = subprocess.run(command, text=True, capture_output=True,
                                  timeout=RUNTIME["timeouts"]["docker_start_seconds"], check=False)
@@ -434,10 +436,12 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
             raise ValueError(f"invalid role name: {name}")
         required = {"agent", "instructions", "tools"}
         optional = {"permissions", "mcpServers", "timeout_seconds", "max_tool_rounds",
-                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description"}
+                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description", "name"}
         if not isinstance(config, dict) or not required.issubset(config) \
                 or set(config) - required - optional:
             raise ValueError(f"role {name} must define agent, instructions and tools")
+        if "name" in config and config["name"] != name:
+            raise ValueError(f"role {name} has an invalid name")
         agent = config["agent"]
         if not isinstance(agent, str) or agent not in agents:
             raise ValueError(f"role {name} uses an unknown agent")
@@ -508,13 +512,13 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
         if permissions.get("internet") and agents[agent].network != "bridge":
             raise ValueError(f"role {name} needs a networked agent profile")
         timeout = config.get("timeout_seconds", RUNTIME["worker"]["default_timeout_seconds"])
-        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 300:
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= RUNTIME["worker"]["max_timeout_seconds"]:
             raise ValueError(f"role {name} has invalid timeout_seconds")
         ttl = config.get("ttl_seconds", RUNTIME["sessions"]["default_idle_seconds"])
         if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 0:
             raise ValueError(f"role {name} has invalid ttl_seconds")
         rounds = config.get("max_tool_rounds", RUNTIME["model"]["default_max_tool_rounds"])
-        if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 20:
+        if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= RUNTIME["model"]["max_tool_rounds"]:
             raise ValueError(f"role {name} has invalid max_tool_rounds")
         mcp_servers = config.get("mcpServers", {})
         if not isinstance(mcp_servers, dict) or (mcp_servers and agents[agent].session_mode != "http"):
@@ -548,7 +552,8 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
                     isinstance(tool, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tool)
                     for tool in offered) or len(offered) != len(set(offered)):
                 raise ValueError(f"role {name} has invalid MCP tools")
-    return roles
+    # Role identity belongs to the block key; attach it only to runtime metadata.
+    return {name: {**config, "name": name} for name, config in roles.items()}
 
 
 def load_dotenv(path: str | Path) -> None:

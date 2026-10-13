@@ -4,7 +4,7 @@ import os
 import unittest
 from contextlib import redirect_stderr
 from urllib.error import HTTPError, URLError
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from popot_agents.worker.http_harness import run_http
 from popot_agents.runtime_config import RUNTIME
@@ -18,6 +18,63 @@ class ModelTimeoutTests(unittest.TestCase):
             patcher = patch.dict(settings, overrides)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def test_reserves_final_answer_and_does_not_run_tools_after_work_budget(self):
+        now = [0.0]
+        bodies = []
+        def respond(call, timeout):
+            bodies.append(json.loads(call.data))
+            if len(bodies) == 1:
+                now[0] = 42.0
+                return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
+                    {'id': 'read', 'function': {'name': 'utc_time', 'arguments': '{}'}}]}}]}).encode())
+            return io.BytesIO(b'{"choices":[{"message":{"content":"Verified partial result"}}]}')
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1',
+             'HARNESS_MODEL': 'example', 'HARNESS_TURN_TIMEOUT_SECONDS': '60'}, clear=True), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='ok') as tool, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('task', {'tools': ['utc_time']})
+        tool.assert_not_called()
+        self.assertNotIn('tools', bodies[-1])
+        self.assertIn('Verified partial result', answer)
+        self.assertIn('частичный', answer.lower())
+
+    def test_final_model_timeout_returns_partial_result_without_repeating_write(self):
+        now = [0.0]
+        memory_client = Mock()
+        memory_client.recall.return_value = []
+        calls = []
+        def respond(call, timeout):
+            calls.append(json.loads(call.data))
+            if len(calls) == 1:
+                return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
+                    {'id': 'write', 'function': {'name': 'write_file',
+                     'arguments': '{"path":"a.txt","content":"done"}'}}]}}]}).encode())
+            now[0] = 60.0
+            raise TimeoutError()
+        def write(*a, **kw):
+            now[0] = 42.0
+            return 'saved'
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1',
+             'HARNESS_MODEL': 'example', 'HARNESS_TURN_TIMEOUT_SECONDS': '60',
+             'COGNEE_PASSWORD': 'private-password',
+             'HARNESS_TOOL_ENV_NAMES_JSON': '["COGNEE_PASSWORD"]'}, clear=True), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', side_effect=write) as tool, \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=memory_client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('[project: popot-agents] task', {'tools': ['write_file'],
+                'mcpServers': {'cognee': {'command': ['python', 'memory.py'], 'tools': ['recall']}}})
+        tool.assert_called_once()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('частичный', answer.lower())
+
+        self.assertEqual(memory_client.session_event.call_args.args[0]['status'], 'failed')
+        memory_client.remember.assert_not_called()
 
     def test_model_timeouts_identify_stage_when_retries_disabled(self):
         for failure in (TimeoutError('private-detail'), URLError(TimeoutError('private-detail'))):
