@@ -111,12 +111,18 @@ memory documents are replaced; datasets and native Skill nodes are retained.
 To recover an original note, read its `text` field from the backup and submit
 it through `CogneeMemory.remember`; it will use the current ingestion format.
 
-GitHub tasks use a separate brain named `github-<owner>-<repo>`. Follow-up turns
-inherit the most recently identified repository. For other projects, include
+GitHub tasks use a separate brain named `github-<owner>-<repo>-<hash>`, where
+the hash comes from the canonical owner/repository pair and prevents names with
+punctuation or different owner/repository boundaries from sharing a brain.
+Follow-up turns inherit the most recently identified repository. For other
+projects, include
 `[project: my-project]` in the task. Ambiguous multi-repository tasks and tasks
 without a project skip memory rather than sharing a global brain. Additional
 model-driven recall is restricted to that same project, and direct model-driven
 `remember` is replaced by runtime capture. `cron_demo` remains excluded.
+Brains created with the earlier unhashed GitHub names remain in Cognee but are
+not recalled automatically under the new names; review and migrate any notes
+you still need before retiring those brains.
 
 Extraction accepts JSON objects, arrays and text content blocks. An invalid or
 empty model response gets one bounded correction attempt; task tools and memory
@@ -187,8 +193,9 @@ workers. Each turn has its own `popot-<chat-id>-<turn-id>` so follow-ups can
 finish independently; the chat ID matches the MCP `sessionId`. The journal
 records role, project, tool names, success/error metadata, memory count and
 provider-reported token usage/cost, without raw questions, answers, commands or
-tool output. Missing provider cost is marked in the completion trace; the
-upstream dashboard may estimate cost from token counts even when the stored
+tool output. The project brain is created when the first session starts, even
+if that turn saves no memory. Missing provider cost is marked in the completion
+trace; the upstream dashboard may estimate cost from token counts even when the stored
 cost is zero; that estimate is not a provider invoice. Old runs are
 not backfilled. Turns without a project or memory-enabled role are excluded.
 

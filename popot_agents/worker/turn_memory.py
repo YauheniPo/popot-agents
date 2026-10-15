@@ -28,15 +28,22 @@ def project_dataset(messages: list[dict]) -> str | None:
         explicit = set(re.findall(r'\[project:\s*([a-zA-Z0-9_-]{1,64})\]', text))
         if explicit:
             return next(iter(explicit)) if len(explicit) == 1 else None
-        repos = {(owner.lower(), repo.lower().removesuffix('.git')) for owner, repo in
-                 re.findall(r'https://github\.com/([A-Za-z0-9_-]+)/([A-Za-z0-9_.-]+)', text)}
+        repos = set()
+        for owner, raw_repo in re.findall(
+                r'https://github\.com/([A-Za-z0-9_-]+)/([A-Za-z0-9_.-]+)', text):
+            repo = raw_repo.rstrip('.,;:!?').lower().removesuffix('.git')
+            if repo:
+                repos.add((owner.lower(), repo))
         if repos:
             if len(repos) != 1:
                 return None
             owner, repo = next(iter(repos))
-            slug = f'github-{owner}-{repo}'
-            slug = re.sub(r'[^a-z0-9_-]', '-', slug)
-            return slug if len(slug) <= 64 else slug[:51] + '-' + hashlib.sha256(slug.encode()).hexdigest()[:12]
+            canonical = f'{owner}/{repo}'
+            readable = re.sub(r'[^a-z0-9_-]', '-', f'github-{owner}-{repo}')
+            # Include the canonical owner/repo in the digest: punctuation and
+            # the owner/repo boundary can otherwise collapse to the same slug.
+            digest = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+            return f'{readable[:47].rstrip("-")}-{digest}'
     return None
 
 
