@@ -653,8 +653,9 @@ class ChatServer(ThreadingHTTPServer):
                     record = self.live.get(session_id)
                 if record is None:
                     continue
-                ttl = (record.role_config or {}).get("ttl_seconds", self.idle_seconds)
-                if ttl > 0 and now - record.last_used > ttl:
+                ttl = getattr(record.worker, "idle_timeout_seconds",
+                              (record.role_config or {}).get("ttl_seconds", self.idle_seconds))
+                if ttl > 0 and now - record.last_used >= ttl:
                     with self.live_lock:
                         self.live.pop(session_id, None)
                     record.worker.close()
@@ -731,7 +732,8 @@ def create_server(
                 self._reply(200, {"status": "ok"})
             elif self.path == "/chats":
                 with self.server.live_lock:
-                    running = set(self.server.live)
+                    statuses = {sid: getattr(record.worker, "status", "running")
+                                for sid, record in self.server.live.items()}
                 self._reply(200, {"chats": [
                     {
                         "sessionId": saved["sessionId"],
@@ -742,7 +744,7 @@ def create_server(
                                       else None),
                         "updatedAt": saved["updatedAt"],
                         "turns": len(saved["messages"]) // 2,
-                        "status": "running" if saved["sessionId"] in running else "stopped",
+                        "status": statuses.get(saved["sessionId"], "stopped"),
                     }
                     for saved in self.server.store.list_chats()
                 ]})
@@ -771,7 +773,7 @@ def create_server(
                     "createdAt": saved.get("createdAt", saved["updatedAt"]),
                     "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
                                   else None),
-                    "status": "running" if live else "stopped",
+                    "status": getattr(live.worker, "status", "running") if live else "stopped",
                     "container": live.worker.container_name if live else None,
                     "workspace": self._workspace(saved, live),
                     "turns": len(saved["messages"]) // 2,
@@ -868,6 +870,8 @@ def create_server(
                     self._reply(404, {"error": "unknown agent"})
                     return
                 session_id = new_session_id
+                if getattr(agents[agent], "retain_session_history", False):
+                    role_config = {**(role_config or {}), "_retain_history": True}
                 worker = (agents[agent].start_chat(session_id, role_config) if role_config
                           else agents[agent].start_chat(session_id))
                 record = ChatRecord(agent, worker, [], role, role_config)
@@ -897,11 +901,30 @@ def create_server(
                     return
                 role = saved.get("role")
                 role_config = saved.get("roleConfig")
+                if getattr(agents[agent], "retain_session_history", False):
+                    role_config = {**(role_config or {}), "_retain_history": True}
                 if "role" in payload and payload["role"] != role:
                     self._reply(409, {"error": "sessionId belongs to another role"})
                     return
                 with self.server.live_lock:
                     record = self.server.live.get(session_id)
+                idle_limit = getattr(record.worker, "idle_timeout_seconds", 0) if record else 0
+                if record is not None and idle_limit > 0 \
+                        and time.monotonic() - record.last_used >= idle_limit:
+                    record.worker.close()
+                    with self.server.live_lock:
+                        self.server.live.pop(session_id, None)
+                    record = None
+                if record is not None and hasattr(record.worker, "resume"):
+                    try:
+                        # Resume happens before send, so a failed checkpoint can
+                        # be replaced without retrying any model/tool execution.
+                        record.worker.resume()
+                    except AgentRunError:
+                        record.worker.close()
+                        with self.server.live_lock:
+                            self.server.live.pop(session_id, None)
+                        record = None
                 if record is not None and not record.worker.is_alive():
                     record.worker.close()
                     with self.server.live_lock:
@@ -925,9 +948,12 @@ def create_server(
                     {"role": "assistant", "content": result["answer"]},
                 ]
                 self.server.store.save(session_id, record.agent, history,
-                                       record.role, record.role_config)
+                                       record.role, role_config)
                 record.messages = history
+                record.role_config = role_config
                 record.last_used = time.monotonic()
+                if hasattr(record.worker, "after_turn"):
+                    record.worker.after_turn()
             except AgentRunError:
                 if not record.worker.is_alive():
                     record.worker.close()

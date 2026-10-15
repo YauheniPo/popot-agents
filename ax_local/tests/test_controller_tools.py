@@ -8,7 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ax_local.cluster.controller_tools import AX_COMMIT, VERSION
+from ax_local.cluster.controller_tools import AX_COMMIT, VERSION, HELPER, SECURITY, patched_source
+
+
+TEMPLATE = ('// BuildActorTemplate constructs a Substrate ActorTemplate\n'
+            '\t\t\tName:    "guest",\n'
+            '\t\t\tOnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,\n'
+            '\t\t\tOnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,\n')
 
 
 class ControllerSetupTests(unittest.TestCase):
@@ -27,8 +33,7 @@ class ControllerSetupTests(unittest.TestCase):
             '{"ax":{"context":"kind-popot-ax"}}', encoding="utf-8")
         client = self.local / "src/ax/internal/substrate/client.go"
         client.parent.mkdir(parents=True)
-        client.write_text('// BuildActorTemplate constructs a Substrate ActorTemplate\n'
-                          '\t\t\tName:    "guest",\n', encoding="utf-8")
+        client.write_text(TEMPLATE, encoding="utf-8")
         (self.local / "bin").mkdir(parents=True)
         (self.local / "kubeconfig").write_text("isolated local config", encoding="utf-8")
         self.company = self.root / "company-kubeconfig"
@@ -80,6 +85,22 @@ class ControllerSetupTests(unittest.TestCase):
         self.assertFalse(self.log.exists())
         self.assertFalse((self.local / "controller-tools-version").exists())
         self.assertEqual(self.company.read_text(), "company config must stay unchanged")
+
+    def test_full_snapshots_are_opted_in_and_patch_is_idempotent(self):
+        updated = patched_source(TEMPLATE)
+        self.assertIn('POPOT_SESSION_SNAPSHOT', updated)
+        self.assertIn('SNAPSHOT_CONTENT_SCOPE_FULL', updated)
+        self.assertEqual(updated.count('popotSnapshotScope(image, envMap)'), 2)
+        self.assertEqual(patched_source(updated), updated)
+        self.assertEqual(updated.count(HELPER), 1)
+
+    def test_existing_tool_security_patch_is_upgraded_to_full_snapshot_support(self):
+        legacy = HELPER + TEMPLATE.replace('\t\t\tName:    "guest",',
+                                          SECURITY + '\t\t\tName:            "guest",')
+        updated = patched_source(legacy)
+        self.assertEqual(updated.count(HELPER), 1)
+        self.assertEqual(updated.count(SECURITY), 1)
+        self.assertEqual(updated.count('popotSnapshotScope(image, envMap)'), 2)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,23 @@ from ax_local.config import AX_CONFIG, load_ax_config
 
 
 class AxConfigTests(unittest.TestCase):
+    def test_suspend_retention_is_two_hours_and_requires_positive_seconds(self):
+        self.assertEqual(AX_CONFIG['ax']['suspend_retention_seconds'], 7200)
+        for value in (0, -1, True, '7200', None):
+            settings = json.loads(json.dumps(AX_CONFIG))
+            settings['ax']['suspend_retention_seconds'] = value
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'config.json'
+                path.write_text(json.dumps(settings))
+                with self.assertRaisesRegex(ValueError, 'suspend_retention_seconds'):
+                    load_ax_config(path)
+        settings = json.loads(json.dumps(AX_CONFIG))
+        settings['ax'].pop('suspend_retention_seconds')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.json'
+            path.write_text(json.dumps(settings))
+            self.assertEqual(load_ax_config(path)['ax']['suspend_retention_seconds'], 7200)
+
     def test_proxy_response_margin_validation_and_legacy_default(self):
         for value in (0, -1, True, '5', None):
             settings = json.loads(json.dumps(AX_CONFIG))

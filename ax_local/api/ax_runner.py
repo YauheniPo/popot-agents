@@ -25,6 +25,7 @@ from ..worker.remote_client import RESPONSE_PREFIX
 class AxAgentRunner:
     session_mode = "http"
     network = "bridge"
+    retain_session_history = True
 
     def __init__(self, image: str, model: str, base_url: str,
                  context: str = AX_CONFIG["ax"]["context"],
@@ -78,6 +79,7 @@ class AxAgentRunner:
             "HARNESS_SESSION_MODE": "http",
             "HARNESS_CHAT_ID": chat_id,
             "HARNESS_SOCKET_PATH": "/workspace/chat.sock",
+            "POPOT_SESSION_SNAPSHOT": "full",
             "PYTHONPATH": "/app",
             "HOME": "/workspace",
             "XDG_CACHE_HOME": "/workspace/.cache",
@@ -223,7 +225,8 @@ class AxAgentRunner:
             chat.close()
             raise
 
-    def _wait_for_chat(self, chat: AxChat, remaining, outer_deadline: float | None) -> AxChat:
+    def _wait_for_chat(self, chat: AxChat, remaining, outer_deadline: float | None,
+                       *, resuming: bool = False) -> AxChat:
         deadline = time.monotonic() + AX_CONFIG["ax"]["startup_timeout_seconds"]
         if outer_deadline is not None:
             deadline = min(deadline, outer_deadline)
@@ -252,6 +255,11 @@ class AxAgentRunner:
                 if reason:
                     detail += f" (reason: {reason})"
                 raise AgentRunError(detail)
+            if resuming and phase == "Running" and chat.probe_issue == "AX chat socket unavailable":
+                # A full checkpoint already contains the listening socket. If
+                # SSH works but that socket is gone, the restored child exited.
+                chat.close()
+                raise AgentRunError("AX resumed task lost its chat process")
             if time.monotonic() >= deadline:
                 break
             time.sleep(remaining(AX_CONFIG["ax"]["startup_probe_interval_seconds"]))
@@ -281,12 +289,84 @@ class AxChat:
     timeout_seconds: int
     workspace_path: None = None
     closed: bool = False
+    suspended: bool = False
     probe_issue: str | None = None
-    _close_lock: object = field(default_factory=threading.Lock, repr=False)
+    _close_lock: object = field(default_factory=threading.RLock, repr=False)
+
+    @property
+    def idle_timeout_seconds(self) -> int:
+        return AX_CONFIG["ax"]["suspend_retention_seconds"]
+
+    @property
+    def status(self) -> str:
+        return "stopped" if self.closed else "suspended" if self.suspended else "running"
+
+    def after_turn(self) -> None:
+        """Checkpoint only after the orchestrator has committed the conversation."""
+        with self._close_lock:
+            if self.closed or self.suspended:
+                return
+            deadline = time.monotonic() + AX_CONFIG["ax"]["cli_timeout_seconds"]
+            try:
+                self.runner._run("suspend", "task", self.container_name,
+                                 timeout=AX_CONFIG["ax"]["cli_timeout_seconds"])
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("AX suspension deadline exceeded")
+                    phase, _ = self.runner.task_status(
+                        self.container_name,
+                        timeout=min(remaining, AX_CONFIG["ax"]["probe_timeout_seconds"]))
+                    if phase == "Suspended":
+                        self.suspended = True
+                        print(f"AX task suspended: task={self.container_name}",
+                              file=sys.stderr, flush=True)
+                        return
+                    if phase in {"Failed", "Completed", "Terminating"}:
+                        raise AgentRunError("AX task could not suspend")
+                    time.sleep(min(AX_CONFIG["ax"]["startup_probe_interval_seconds"],
+                                   max(0, deadline - time.monotonic())))
+            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError) as exc:
+                # The answer is already saved. Preserve that successful response,
+                # and restore its history on the next request rather than rerun it.
+                print(f"AX suspension not confirmed: task={self.container_name} "
+                      f"reason={type(exc).__name__}; closing worker, session history retained",
+                      file=sys.stderr, flush=True)
+                self.close()
+
+    def resume(self) -> None:
+        with self._close_lock:
+            if self.closed:
+                raise AgentRunError("AX chat worker is closed")
+            if not self.suspended:
+                return
+            deadline = time.monotonic() + AX_CONFIG["ax"]["startup_timeout_seconds"]
+
+            def remaining(limit):
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    raise TimeoutError("AX resume deadline exceeded")
+                return min(limit, budget)
+
+            try:
+                self.runner._run("resume", "task", self.container_name,
+                                 timeout=remaining(AX_CONFIG["ax"]["cli_timeout_seconds"]))
+                self.suspended = False
+                self.runner._wait_for_chat(self, remaining, deadline, resuming=True)
+                print(f"AX task resumed: task={self.container_name}",
+                      file=sys.stderr, flush=True)
+            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError):
+                self.close()
+                raise AgentRunError(
+                    "AX chat worker could not resume; restore saved history in a new worker"
+                ) from None
 
     def is_alive(self, timeout_seconds: float = AX_CONFIG["ax"]["probe_timeout_seconds"]) -> bool:
         if self.closed:
             return False
+        if self.suspended:
+            # Inspecting/listing a chat must never wake its sandbox with SSH.
+            return True
         try:
             ready = self.runner.remote(self.container_name, {"action": "ping"},
                                        timeout=timeout_seconds).get("status") == "ok"
@@ -294,7 +374,9 @@ class AxChat:
             return ready
         except AgentRunError as exc:
             detail = str(exc).lower()
-            if "connection refused" in detail:
+            if "filenotfounderror" in detail or "connectionrefusederror" in detail:
+                self.probe_issue = "AX chat socket unavailable"
+            elif "connection refused" in detail:
                 self.probe_issue = "AX ssh connection failed"
             elif "guest services" in detail:
                 self.probe_issue = "AX guest services unavailable"
@@ -320,6 +402,7 @@ class AxChat:
             raise AgentRunError(result.get("error", "AX chat worker could not restore history"))
 
     def send(self, message: str, *, timeout_seconds: float | None = None) -> dict[str, str]:
+        self.resume()
         timeout = self.timeout_seconds if timeout_seconds is None else min(
             self.timeout_seconds, timeout_seconds)
         service = self.runner.delegation

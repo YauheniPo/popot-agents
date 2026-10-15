@@ -29,7 +29,7 @@ fi
 VERSION="$(python3 "$PATCHER" "$LOCAL/src/ax")"
 export KO_DOCKER_REPO="localhost:5001"
 export KO_DEFAULTPLATFORMS="linux/$(go env GOARCH)"
-echo "Rebuilding local AX controller for UID 10001 tools"
+echo "Rebuilding local AX controller for UID 10001 tools and full session snapshots"
 (cd "$LOCAL/src/ax" && ko apply -f deploy/ax-controller.yaml)
 kubectl --context "$CONTEXT" set env deployment/ax-controller -n ax-system \
   AX_SNAPSHOTS_BUCKET=gs://ate-snapshots/popot-ax/

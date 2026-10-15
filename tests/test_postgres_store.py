@@ -61,6 +61,26 @@ class PostgresSessionStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.expires_at(self.store.get(self.session_id)))
         self.assertNotIn(self.session_id, self.store.prune_expired())
 
+    def test_ax_history_survives_retention_and_all_pruning_paths(self):
+        import psycopg
+
+        role = {'_retain_history': True, 'ttl_seconds': 900}
+        history = [{'role': 'user', 'content': 'original task'},
+                   {'role': 'assistant', 'content': 'previous answer'}]
+        self.store.save(self.session_id, 'test_agent', history, None, role)
+        with psycopg.connect(connect_timeout=5) as connection:
+            connection.execute(
+                'UPDATE agent_sessions SET created_at = %s WHERE session_id = %s',
+                (datetime.now(timezone.utc) - timedelta(days=30), self.session_id),
+            )
+        saved = self.store.get(self.session_id)
+        self.assertEqual(saved['messages'], history)
+        self.assertIsNone(self.store.expires_at(saved))
+        self.assertIn(self.session_id, {chat['sessionId'] for chat in self.store.list_chats()})
+        self.assertNotIn(self.session_id, self.store.expired_ids())
+        self.assertFalse(self.store.delete_expired(self.session_id))
+        self.assertNotIn(self.session_id, self.store.prune_expired())
+
     def test_imports_legacy_json_session_without_replacing_existing_data(self):
         with tempfile.TemporaryDirectory() as directory:
             created_at = datetime.now(timezone.utc).isoformat()

@@ -23,11 +23,14 @@ def load_ax_config(path: str | Path | None = None) -> dict:
                for key in ("default_provider", "default_model")):
         raise ValueError("AX default provider and model must be nonempty strings")
     ax = settings["ax"]
+    if isinstance(ax, dict):
+        ax.setdefault("suspend_retention_seconds", 7200)
     if not isinstance(ax, dict) or set(ax) != {
             "context", "atespace", "workspace_name", "task_resources", "task_debug",
             "cli_timeout_seconds", "route_timeout_seconds", "startup_timeout_seconds",
             "startup_probe_interval_seconds", "session_backend", "probe_timeout_seconds",
-            "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds"}:
+            "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds",
+            "suspend_retention_seconds"}:
         raise ValueError("AX config has invalid ax settings")
     if not isinstance(ax["context"], str) or not re.fullmatch(r"kind-[a-z0-9-]+", ax["context"]):
         raise ValueError("AX config ax.context must name a local kind context")
@@ -44,7 +47,8 @@ def load_ax_config(path: str | Path | None = None) -> dict:
         raise ValueError("AX config ax.task_debug must be boolean")
     for key in ("cli_timeout_seconds", "route_timeout_seconds", "startup_timeout_seconds",
                 "startup_probe_interval_seconds", "probe_timeout_seconds",
-                "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds"):
+                "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds",
+                "suspend_retention_seconds"):
         if type(ax[key]) is not int or ax[key] <= 0:
             raise ValueError(f"AX config ax.{key} must be positive")
     if ax["route_timeout_seconds"] > 3600:

@@ -64,7 +64,8 @@ class PostgresSessionStore:
                 SELECT session_id, agent, role, role_config, messages, created_at, updated_at
                 FROM agent_sessions
                 WHERE session_id = %s AND (created_at > now() - %s::interval
-                    OR role_config->>'ttl_seconds' = '0')
+                    OR role_config->>'ttl_seconds' = '0'
+                    OR role_config->>'_retain_history' = 'true')
             """, (session_id, SESSION_RETENTION)).fetchone()
         return self._saved(row) if row else None
 
@@ -75,6 +76,7 @@ class PostgresSessionStore:
                 FROM agent_sessions
                 WHERE created_at > now() - %s::interval
                     OR role_config->>'ttl_seconds' = '0'
+                    OR role_config->>'_retain_history' = 'true'
                 ORDER BY updated_at DESC
             """, (SESSION_RETENTION,)).fetchall()
         return [self._saved(row) for row in rows]
@@ -103,6 +105,7 @@ class PostgresSessionStore:
                 DELETE FROM agent_sessions
                 WHERE created_at <= now() - %s::interval
                     AND (role_config->>'ttl_seconds' IS DISTINCT FROM '0')
+                    AND (role_config->>'_retain_history' IS DISTINCT FROM 'true')
                 RETURNING session_id
             """, (SESSION_RETENTION,)).fetchall()
         return {row[0] for row in rows}
@@ -113,6 +116,7 @@ class PostgresSessionStore:
                 SELECT session_id FROM agent_sessions
                 WHERE created_at <= now() - %s::interval
                     AND (role_config->>'ttl_seconds' IS DISTINCT FROM '0')
+                    AND (role_config->>'_retain_history' IS DISTINCT FROM 'true')
             """, (SESSION_RETENTION,)).fetchall()
         return {row[0] for row in rows}
 
@@ -124,6 +128,7 @@ class PostgresSessionStore:
                 DELETE FROM agent_sessions
                 WHERE session_id = %s AND created_at <= now() - %s::interval
                     AND (role_config->>'ttl_seconds' IS DISTINCT FROM '0')
+                    AND (role_config->>'_retain_history' IS DISTINCT FROM 'true')
                 RETURNING session_id
             """, (session_id, SESSION_RETENTION)).fetchall()
         return bool(rows)
@@ -153,7 +158,8 @@ class PostgresSessionStore:
                     if updated_at.tzinfo is None:
                         updated_at = updated_at.replace(tzinfo=timezone.utc)
                     if created_at + SESSION_RETENTION <= datetime.now(timezone.utc) \
-                            and (saved.get("roleConfig") or {}).get("ttl_seconds") != 0:
+                            and (saved.get("roleConfig") or {}).get("ttl_seconds") != 0 \
+                            and (saved.get("roleConfig") or {}).get("_retain_history") is not True:
                         continue
                     agent, messages = saved["agent"], saved["messages"]
                     if not isinstance(agent, str) or not isinstance(messages, list):
