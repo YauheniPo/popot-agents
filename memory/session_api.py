@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cognee.api.client import app
 from cognee.infrastructure.session.get_session_manager import get_session_manager
-from cognee.modules.data.methods import get_datasets_by_name
+from cognee.modules.data.methods import create_authorized_dataset, get_datasets_by_name
 from cognee.modules.session_lifecycle.metrics import (
     SessionStatus, accumulate_usage, ensure_and_touch_session, get_session_row, mark_ended,
 )
@@ -42,12 +42,13 @@ class SessionEvent(BaseModel):
 
 @app.post('/api/v1/popot/session')
 async def session_event(payload: SessionEvent, user: User = Depends(get_authenticated_user)):
-    # Only an owned dataset may be attributed; never guess another user's brain.
-    datasets = await get_datasets_by_name([payload.dataset_name], user.id)
-    dataset_id = datasets[0].id if datasets else None
     row = await get_session_row(session_id=payload.session_id, user_id=user.id)
     if row is not None and row.status in ('completed', 'failed'):
         return {'status': row.status, 'session_id': payload.session_id}
+    # Give the first turn a project even when it produces no memory document.
+    datasets = await get_datasets_by_name([payload.dataset_name], user.id)
+    dataset = datasets[0] if datasets else await create_authorized_dataset(payload.dataset_name, user)
+    dataset_id = dataset.id
     await ensure_and_touch_session(session_id=payload.session_id, user_id=user.id,
                                    dataset_id=dataset_id)
     sm = get_session_manager(dataset_id=dataset_id)
