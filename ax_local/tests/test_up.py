@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,8 @@ class UpScriptTests(unittest.TestCase):
         shutil.copyfile(SOURCE, self.ax / "up.sh")
         cluster = self.ax / "cluster"
         cluster.mkdir()
+        shutil.copyfile(SOURCE.parent / 'cluster/build_versions.py', cluster / 'build_versions.py')
+        shutil.copyfile(SOURCE.parent.parent / 'pyproject.toml', self.root / 'pyproject.toml')
         shutil.copyfile(SOURCE.parent / "cluster" / "router_timeout.py",
                         cluster / "router_timeout.py")
         (cluster / "worker_health.py").write_text(
@@ -57,6 +60,7 @@ class UpScriptTests(unittest.TestCase):
             )
         fake_bin = self.root / "bin"
         fake_bin.mkdir()
+        (fake_bin / 'python3').symlink_to(sys.executable)
         docker = fake_bin / "docker"
         docker.write_text(
             "#!/usr/bin/env bash\n"
@@ -114,6 +118,12 @@ class UpScriptTests(unittest.TestCase):
         self.assertEqual(calls[-2:], ['deployment-cleanup', 'resource-monitoring'])
         self.assertTrue(any("--kubeconfig=" in call and "--context=kind-popot-ax" in call
                             for call in calls if call.startswith("kubectl ")))
+
+    def test_invalid_build_config_prevents_cluster_changes(self):
+        (self.root / 'pyproject.toml').write_text('[tool.popot.build]\n')
+        result = self.run_up()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls.exists())
 
     def test_failed_worker_recovery_prevents_api_start(self):
         self.env["HEALTH_FAIL"] = "1"

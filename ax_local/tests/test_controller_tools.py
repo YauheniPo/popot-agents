@@ -30,8 +30,7 @@ class ControllerSetupTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "cluster"
         for name in ("controller_tools.py", "controller_tools.sh", "build_versions.py"):
             shutil.copyfile(source / name, scripts / name)
-        (scripts.parent / 'docker').mkdir()
-        shutil.copyfile(source.parent / 'docker/versions.env', scripts.parent / 'docker/versions.env')
+        shutil.copyfile(source.parents[1] / 'pyproject.toml', self.root / 'pyproject.toml')
         (self.root / "ax_local/config.json").write_text(
             '{"context":"kind-popot-ax"}', encoding="utf-8")
         client = self.local / "src/ax/internal/substrate/client.go"

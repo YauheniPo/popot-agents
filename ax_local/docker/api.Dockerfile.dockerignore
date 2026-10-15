@@ -1,9 +1,11 @@
 *
+!pyproject.toml
 !popot_agents/
 !popot_agents/__init__.py
 !popot_agents/tools.py
 !popot_agents/runtime_config.py
 !popot_agents/role_env.py
+!popot_agents/progress.py
 !popot_agents/skills.py
 !skills/
 !skills/**
@@ -13,6 +15,8 @@
 !ax_local/__init__.py
 !ax_local/config.py
 !ax_local/config.json
+!ax_local/cluster/
+!ax_local/cluster/build_versions.py
 !ax_local/api/
 !ax_local/api/**
 !ax_local/worker/

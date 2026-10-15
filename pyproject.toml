@@ -15,3 +15,9 @@ mcp-tools = [
     "mcp-server-fetch==2026.8.18",
     "mcp-server-git==2026.8.18",
 ]
+
+[tool.popot.build]
+AX_VERSION = "v0.3.1"
+AX_COMMIT = "e70162a34037c221fe6fadefd98308c05a4ad8f3"
+SUBSTRATE_COMMIT = "672533541dbfcd29084e4de2475267088bda3651"
+KO_VERSION = "v0.19.1"

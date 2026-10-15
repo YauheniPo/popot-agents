@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOCAL="$ROOT/ax_local/.local"
+python3 "$ROOT/ax_local/cluster/build_versions.py" >/dev/null
 
 if [[ ! -f "$ROOT/.env" ]]; then
   echo "Missing $ROOT/.env; configure the database password and provider credentials first" >&2

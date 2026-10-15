@@ -1,8 +1,14 @@
+FROM --platform=$BUILDPLATFORM python:3.12-slim AS build-versions
+WORKDIR /build
+COPY pyproject.toml ./
+COPY ax_local/cluster/build_versions.py ax_local/cluster/build_versions.py
+RUN python ax_local/cluster/build_versions.py > /build-versions.env
+
 FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS ax-cli
 
 ARG TARGETOS
 ARG TARGETARCH
-COPY ax_local/docker/versions.env /build-versions.env
+COPY --from=build-versions /build-versions.env /build-versions.env
 RUN . /build-versions.env \
     && git clone --depth 1 --branch "$AX_VERSION" https://github.com/google/ax.git /src/ax \
     && test "$(git -C /src/ax rev-parse HEAD)" = "$AX_COMMIT"

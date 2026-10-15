@@ -15,8 +15,8 @@
 !config/runtime.json
 !ax_local/
 !ax_local/__init__.py
-!ax_local/docker/
-!ax_local/docker/versions.env
+!ax_local/cluster/
+!ax_local/cluster/build_versions.py
 !ax_local/worker/
 !ax_local/worker/**
 **/__pycache__/
