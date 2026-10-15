@@ -510,6 +510,26 @@ through stdio. Only the listed server tools are exposed to the model: `fetch`,
 worker image if the new server package is not installed. MCP commands are
 operator configuration; API requests cannot supply them.
 
+MCP package versions are defined once in the root `pyproject.toml`:
+the `mcp` dependency group supplies the SDK for the gateway, worker client and
+Cognee adapter. Both Docker and AX images install this group. The worker client
+uses the SDK's automatic protocol negotiation: modern servers use `2026-07-28`,
+and older servers use the supported initialize handshake. The gateway accepts
+both `2026-07-28` and the existing `2025-11-25` curl requests.
+
+The reference Fetch/Git servers still require SDK 1.x. Their `mcp-tools` group
+is installed separately in `/opt/mcp-tools` inside each worker image; roles call
+the `mcp-server-fetch` and `mcp-server-git` entrypoints. Do not install both
+groups into the same virtual environment. After changing versions, rebuild
+the worker and MCP images (`bash ax_local/up.sh` for AX).
+
+For local SDK development, run from the repository root with Python 3.10+:
+
+```bash
+python -m pip install --upgrade 'pip>=25.1'
+python -m pip install --group mcp
+```
+
 `backend_engineer` also connects to the [official remote GitHub MCP server](https://github.com/github/github-mcp-server#remote-github-mcp-server)
 using Streamable HTTP. Its config contains only the token variable name:
 
@@ -565,7 +585,7 @@ To reproduce the agent's GitHub MCP file-write operation, install the same MCP
 SDK version used by the worker if it is missing from your virtual environment:
 
 ```bash
-python3 -m pip install "mcp==1.30.0"
+python3 -m pip install --group mcp
 python3 scripts/check_github_token.py --check-write
 ```
 

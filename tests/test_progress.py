@@ -9,8 +9,8 @@ import socket
 import subprocess
 import sys
 import importlib.util
-from datetime import timedelta
 from contextlib import redirect_stderr
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -129,9 +129,8 @@ class ProgressTests(unittest.TestCase):
 class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(importlib.util.find_spec('mcp'), 'requires the installed MCP SDK')
     async def test_real_mcp_transport_sends_progress_notifications_before_result(self):
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-        import httpx
+        from mcp import Client
+        import httpx2 as httpx
         finish = threading.Event()
         received = []
         class Chat:
@@ -166,62 +165,76 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                     async with httpx.AsyncClient(trust_env=False, timeout=.3) as http:
                         for _ in range(60):
                             try:
-                                await http.get(url)
+                                # GET /mcp can hold an SSE stream open in SDK 2.x.
+                                await http.get(f'http://127.0.0.1:{port}/')
                                 break
                             except httpx.HTTPError: await asyncio.sleep(.1)
-                        else: self.fail('MCP server did not start')
-                    async with streamablehttp_client(url) as (read, write, _):
-                        async with ClientSession(read, write) as session:
-                            await session.initialize()
-                            tools = await session.list_tools()
-                            tool = next(t for t in tools.tools if t.name == 'run_task')
-                            self.assertNotIn('ctx', tool.inputSchema['properties'])
-                            result = await session.call_tool('run_task', {'agent':'test','task':'work'},
-                                read_timeout_seconds=timedelta(seconds=10), progress_callback=progress)
-                            self.assertFalse(result.isError, result)
-                            data = result.structuredContent or json.loads(next(c.text for c in result.content if c.type == 'text'))
-                            self.assertEqual(data['answer'], 'done')
-                            self.assertIn({'event': 'assistant_message', 'agent_role': 'code_reviewer', 'content': 'Проверяю PR'},
-                                          [json.loads(item) for item in data['activity']])
-                            self.assertIn({'event': 'assistant_reasoning', 'agent_role': 'code_reviewer',
-                                           'reasoning': 'Provider reasoning fixture.'},
-                                          [json.loads(item) for item in data['activity']])
+                        else:
+                            log.flush()
+                            self.fail('MCP server did not start: ' + Path(log.name).read_text())
+                    async with Client(url) as session:
+                        self.assertEqual(session.session.protocol_version, '2026-07-28')
+                        tools = await session.list_tools()
+                        tool = next(t for t in tools.tools if t.name == 'run_task')
+                        self.assertNotIn('ctx', tool.input_schema['properties'])
+                        result = await session.call_tool('run_task', {'agent':'test','task':'work'},
+                            read_timeout_seconds=10, progress_callback=progress)
+                        self.assertFalse(result.is_error, result)
+                        data = result.structured_content or json.loads(next(c.text for c in result.content if c.type == 'text'))
+                        self.assertEqual(data['answer'], 'done')
+                        self.assertIn({'event': 'assistant_message', 'agent_role': 'code_reviewer', 'content': 'Проверяю PR'},
+                                      [json.loads(item) for item in data['activity']])
+                        self.assertIn({'event': 'assistant_reasoning', 'agent_role': 'code_reviewer',
+                                       'reasoning': 'Provider reasoning fixture.'},
+                                      [json.loads(item) for item in data['activity']])
                     self.assertTrue(finish.is_set())
                     self.assertEqual([r[0] for r in received], list(range(1,len(received)+1)))
                     self.assertTrue(all(r[1] is None for r in received))
                     # Raw HTTP preserves the exact token; ClientSession normally
                     # replaces it with its generated request ID.
                     async with httpx.AsyncClient(trust_env=False, timeout=10) as http:
-                        for tool_name, argument in [('run_task', 'task'), ('send_message', 'message')]:
-                            for meta in (None, {}, {'progressToken': ''}, {'progressToken': None},
-                                         {'progressToken': 0}, {'progressToken': 'review-70'}):
-                                with self.subTest(tool=tool_name, meta=meta):
-                                    params = {'name': tool_name, 'arguments': {'agent': 'test', argument: 'work'}}
-                                    if meta is not None:
-                                        params['_meta'] = meta
-                                    response = await http.post(url, headers={
-                                        'Accept': 'application/json, text/event-stream',
-                                        'MCP-Protocol-Version': '2025-11-25',
-                                    }, json={'jsonrpc': '2.0', 'id': 99, 'method': 'tools/call', 'params': params})
-                                    response.raise_for_status()
-                                    events = [json.loads(line[6:]) for line in response.text.splitlines()
-                                              if line.startswith('data: ')]
-                                    updates = [event for event in events
-                                               if event.get('method') == 'notifications/progress']
-                                    token = meta.get('progressToken') if meta is not None else None
-                                    if token is None or token == '':
-                                        self.assertEqual(updates, [])
-                                    else:
-                                        self.assertTrue(updates)
-                                        self.assertTrue(all(event['params']['progressToken'] == token
-                                                            for event in updates))
-                                        self.assertEqual(events[-1]['id'], 99)
-                                    replies = [event['result'] for event in events if event.get('id') == 99]
-                                    self.assertEqual(len(replies), 1)
-                                    self.assertFalse(replies[0].get('isError'), replies[0])
-                                    data = replies[0].get('structuredContent') or json.loads(
-                                        next(item['text'] for item in replies[0]['content'] if item['type'] == 'text'))
-                                    self.assertEqual(data['answer'], 'done')
+                        for version in ('2025-11-25', '2026-07-28'):
+                            for tool_name, argument in [('run_task', 'task'), ('send_message', 'message')]:
+                                for meta in (None, {}, {'progressToken': ''}, {'progressToken': None},
+                                             {'progressToken': 0}, {'progressToken': 'review-70'}):
+                                    with self.subTest(version=version, tool=tool_name, meta=meta):
+                                        params = {'name': tool_name, 'arguments': {'agent': 'test', argument: 'work'}}
+                                        if meta is not None:
+                                            params['_meta'] = dict(meta)
+                                        if version == '2026-07-28':
+                                            params.setdefault('_meta', {}).update({
+                                                'io.modelcontextprotocol/protocolVersion': version,
+                                                'io.modelcontextprotocol/clientCapabilities': {},
+                                            })
+                                        response = await http.post(url, headers={
+                                            'Accept': 'application/json, text/event-stream',
+                                            'MCP-Protocol-Version': version,
+                                            'Mcp-Method': 'tools/call',
+                                            'Mcp-Name': tool_name,
+                                        }, json={'jsonrpc': '2.0', 'id': 99, 'method': 'tools/call', 'params': params})
+                                        self.assertEqual(response.status_code, 200, response.text)
+                                        if response.headers['content-type'].startswith('application/json'):
+                                            events = [response.json()]
+                                        else:
+                                            events = [json.loads(line[6:]) for line in response.text.splitlines()
+                                                      if line.startswith('data: ')]
+                                        self.assertTrue(all('error' not in event for event in events), events)
+                                        updates = [event for event in events
+                                                   if event.get('method') == 'notifications/progress']
+                                        token = meta.get('progressToken') if meta is not None else None
+                                        if token is None or token == '':
+                                            self.assertEqual(updates, [])
+                                        else:
+                                            self.assertTrue(updates)
+                                            self.assertTrue(all(event['params']['progressToken'] == token
+                                                                for event in updates))
+                                            self.assertEqual(events[-1]['id'], 99)
+                                        replies = [event['result'] for event in events if event.get('id') == 99]
+                                        self.assertEqual(len(replies), 1)
+                                        self.assertFalse(replies[0].get('isError'), replies[0])
+                                        data = replies[0].get('structuredContent') or json.loads(
+                                            next(item['text'] for item in replies[0]['content'] if item['type'] == 'text'))
+                                        self.assertEqual(data['answer'], 'done')
                 finally:
                     finish.set()
                     process.terminate()
@@ -279,7 +292,7 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
             def start_chat(self, *_): return Chat()
 
         class Context:
-            request_context = SimpleNamespace(meta=SimpleNamespace(progressToken='test'))
+            request_context = SimpleNamespace(meta={'progress_token': 'test'})
             def __init__(self): self.events = []
             async def report_progress(self, progress, total=None, message=None):
                 self.events.append((progress, total, message))

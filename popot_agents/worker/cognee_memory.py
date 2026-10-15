@@ -170,9 +170,9 @@ class CogneeMemory:
 
 
 def create_server():
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
-    server = FastMCP('Popot Cognee Memory')
+    server = MCPServer('Popot Cognee Memory')
 
     def memory():
         return CogneeMemory(os.environ.get('COGNEE_API_URL', 'http://host.docker.internal:3001'),

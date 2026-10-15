@@ -21,7 +21,7 @@ class ImagePackagingTests(unittest.TestCase):
         dockerfile = project / "docker" / "mcp.Dockerfile"
         with tempfile.TemporaryDirectory() as directory:
             image_root = Path(directory)
-            for line in dockerfile.read_text().splitlines():
+            for line in dockerfile.read_text().replace('\\\n', '').splitlines():
                 parts = shlex.split(line)
                 if not parts or parts[0] != "COPY":
                     continue
@@ -157,14 +157,14 @@ class GatewayTests(unittest.TestCase):
     def test_server_registers_expected_tools_over_streamable_http(self):
         from popot_agents.mcp_server import main
 
-        class FakeFastMCP:
+        class FakeMCPServer:
             instance = None
 
             def __init__(self, name, **settings):
                 self.name = name
                 self.settings = settings
                 self.tools = {}
-                FakeFastMCP.instance = self
+                FakeMCPServer.instance = self
 
             def tool(self):
                 def register(function):
@@ -173,35 +173,36 @@ class GatewayTests(unittest.TestCase):
                 return register
 
             async def list_tools(self):
-                return [types.SimpleNamespace(name=name, inputSchema={
+                return [types.SimpleNamespace(name=name, input_schema={
                     "type": "object", "properties": {},
                     "required": ["task" if name == "run_task" else "message"],
                 }) for name in ("run_task", "send_message")]
 
-            def run(self, transport):
+            def run(self, transport, **settings):
                 self.transport = transport
+                self.transport_settings = settings
 
-            def streamable_http_app(self):
+            def streamable_http_app(self, **settings):
                 return "upstream-asgi-app"
 
-        fastmcp = types.ModuleType("mcp.server.fastmcp")
-        fastmcp.FastMCP = FakeFastMCP
-        fastmcp.Context = type('Context', (), {})
+        mcpserver = types.ModuleType("mcp.server.mcpserver")
+        mcpserver.MCPServer = FakeMCPServer
+        mcpserver.Context = type('Context', (), {})
         security = types.ModuleType("mcp.server.transport_security")
         security.TransportSecuritySettings = lambda **settings: settings
         with patch.dict(sys.modules, {
             "mcp": types.ModuleType("mcp"),
             "mcp.server": types.ModuleType("mcp.server"),
-            "mcp.server.fastmcp": fastmcp,
+            "mcp.server.mcpserver": mcpserver,
             "mcp.server.transport_security": security,
         }), patch.dict(os.environ, {"MCP_ORCHESTRATOR_URL": self.base_url}), \
                 patch("urllib.request.urlopen", side_effect=self.urlopen):
             main()
-            self.assertEqual(FakeFastMCP.instance.tools["run_task"](
+            self.assertEqual(FakeMCPServer.instance.tools["run_task"](
                 "build a feature", role="backend_engineer"),
                 {"answer": "task done", "sessionId": "task123",
                  "container": "popot-chat-task123"})
-            continued = FakeFastMCP.instance.tools["run_task"](
+            continued = FakeMCPServer.instance.tools["run_task"](
                 "что еще добавишь?", role="product_manager",
                 sessionId="d7ed630a2ce24092")
             self.assertEqual(continued["sessionId"], "d7ed630a2ce24092")
@@ -210,27 +211,27 @@ class GatewayTests(unittest.TestCase):
                 "message": "что еще добавишь?", "sessionId": "d7ed630a2ce24092",
                 "role": "product_manager",
             }))
-            self.assertEqual(FakeFastMCP.instance.tools["run_task"](
+            self.assertEqual(FakeMCPServer.instance.tools["run_task"](
                 "continue", session_id="d7ed630a2ce24092")["sessionId"],
                 "d7ed630a2ce24092")
-            message = FakeFastMCP.instance.tools["send_message"](
+            message = FakeMCPServer.instance.tools["send_message"](
                 "one more turn", session_id="d7ed630a2ce24092")
             self.assertEqual(message["sessionId"], "d7ed630a2ce24092")
             self.assertEqual(message["container"], "popot-chat-d7ed630a2ce24092")
-            self.assertEqual(FakeFastMCP.instance.tools["run_task"](
+            self.assertEqual(FakeMCPServer.instance.tools["run_task"](
                 "1+3?", role="product_manager", sessionId="")["sessionId"],
                 "task123")
             self.assertEqual(self.calls[-1], ("POST", "/tasks", {
                 "task": "1+3?", "role": "product_manager",
             }))
-            self.assertEqual(FakeFastMCP.instance.tools["run_task"](
+            self.assertEqual(FakeMCPServer.instance.tools["run_task"](
                 "continue", sessionId="", session_id="d7ed630a2ce24092")["sessionId"],
                 "d7ed630a2ce24092")
             with self.assertRaisesRegex(ValueError, "must match"):
-                FakeFastMCP.instance.tools["run_task"](
+                FakeMCPServer.instance.tools["run_task"](
                     "continue", sessionId="first", session_id="second")
-        server = FakeFastMCP.instance
-        advertised = {tool.name: tool.inputSchema
+        server = FakeMCPServer.instance
+        advertised = {tool.name: tool.input_schema
                       for tool in asyncio.run(server.list_tools())}
         self.assertEqual(len(advertised["run_task"]["anyOf"]), 4)
         self.assertEqual(len(advertised["send_message"]["anyOf"]), 3)
@@ -239,7 +240,9 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(server.name, "popot-agents")
         self.assertEqual(server.transport, "streamable-http")
         self.assertEqual(set(server.tools), {"run_task", "send_message", "list_chats", "get_chat"})
-        self.assertTrue(server.settings["stateless_http"])
+        self.assertTrue(server.transport_settings["stateless_http"])
+        self.assertFalse(server.transport_settings["json_response"])
+        self.assertTrue(server.transport_settings["transport_security"]["enable_dns_rebinding_protection"])
         from popot_agents.mcp_server import MCPHTTPLoggingMiddleware
         logged_app = server.streamable_http_app()
         self.assertIsInstance(logged_app, MCPHTTPLoggingMiddleware)

@@ -1,7 +1,9 @@
 FROM python:3.10-slim
 LABEL com.popot.project="popot-agents"
 
-RUN pip install --no-cache-dir mcp==1.30.0
+COPY pyproject.toml /build/pyproject.toml
+RUN python -m pip install --no-cache-dir --upgrade 'pip>=25.1' \
+    && pip install --no-cache-dir --group /build/pyproject.toml:mcp
 
 RUN useradd --create-home --uid 10001 mcp
 WORKDIR /app

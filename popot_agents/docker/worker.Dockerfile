@@ -2,7 +2,14 @@ FROM python:3.10-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir mcp==1.30.0 mcp-server-fetch==2026.8.18 mcp-server-git==2026.8.18
+COPY pyproject.toml /build/pyproject.toml
+RUN python -m pip install --no-cache-dir --upgrade 'pip>=25.1' \
+    && pip install --no-cache-dir --group /build/pyproject.toml:mcp \
+    && python -m venv /opt/mcp-tools \
+    && /opt/mcp-tools/bin/pip install --no-cache-dir --upgrade 'pip>=25.1' \
+    && /opt/mcp-tools/bin/pip install --no-cache-dir --group /build/pyproject.toml:mcp-tools \
+    && ln -s /opt/mcp-tools/bin/mcp-server-fetch /usr/local/bin/mcp-server-fetch \
+    && ln -s /opt/mcp-tools/bin/mcp-server-git /usr/local/bin/mcp-server-git
 
 RUN useradd --create-home --uid 10001 agent && mkdir /workspace && chown agent:agent /workspace
 WORKDIR /app

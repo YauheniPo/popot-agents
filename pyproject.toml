@@ -6,3 +6,12 @@ dependencies = ["psycopg[binary]==3.3.6"]
 
 [project.optional-dependencies]
 ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.42.0"]
+
+[dependency-groups]
+mcp = ["mcp==2.3.0"]
+# Official Fetch/Git servers still require SDK 1.x; install in a separate venv.
+mcp-tools = [
+    "mcp==1.30.0",
+    "mcp-server-fetch==2026.8.18",
+    "mcp-server-git==2026.8.18",
+]

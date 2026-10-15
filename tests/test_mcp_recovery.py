@@ -23,11 +23,10 @@ class MCPRecoveryTests(unittest.TestCase):
             def __init__(self, *args): pass
             async def __aenter__(self): return self
             async def __aexit__(self, *args): pass
-            async def initialize(self): pass
             async def call_tool(self, name, arguments):
-                return SimpleNamespace(isError=True, content=[SimpleNamespace(
+                return SimpleNamespace(is_error=True, content=[SimpleNamespace(
                     type='text', text=outer.error_message)])
-        return SimpleNamespace(ClientSession=Session)
+        return SimpleNamespace(Client=Session)
 
     def test_error_result_retains_type_and_redacts_before_truncation(self):
         self.error_message = 'x' * 30 + 'private-token' + ': ref master missing'

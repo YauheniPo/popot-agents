@@ -32,12 +32,12 @@ async def _streams(config: dict):
         token = safe_tool_env().get(token_name)
         if not token:
             raise ValueError(f"required MCP environment variable is missing or not selected: {token_name}")
-        import httpx
+        import httpx2 as httpx
         from mcp.client.streamable_http import streamable_http_client
 
         async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"},
                                      follow_redirects=False) as client:
-            async with streamable_http_client(config["url"], http_client=client) as (read, write, _):
+            async with streamable_http_client(config["url"], http_client=client) as (read, write):
                 yield read, write
     else:
         from mcp.client.stdio import stdio_client
@@ -61,22 +61,21 @@ def _error_text(config: dict, exc: Exception) -> str:
 
 
 async def _discover_one(alias: str, config: dict) -> dict:
-    async with _streams(config) as (read, write):
-        from mcp import ClientSession
+    from mcp import Client
 
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            listed, cursors = {}, set()
-            cursor = None
-            while True:
-                page = await session.list_tools(cursor=cursor) if cursor else await session.list_tools()
-                listed.update({tool.name: tool for tool in page.tools})
-                cursor = getattr(page, "nextCursor", None)
-                if not cursor:
-                    break
-                if cursor in cursors:
-                    raise RuntimeError("MCP server repeated a tools cursor")
-                cursors.add(cursor)
+    # The SDK negotiates modern MCP and falls back for older tool servers.
+    async with Client(_streams(config)) as client:
+        listed, cursors = {}, set()
+        cursor = None
+        while True:
+            page = await client.list_tools(cursor=cursor)
+            listed.update({tool.name: tool for tool in page.tools})
+            cursor = page.next_cursor
+            if not cursor:
+                break
+            if cursor in cursors:
+                raise RuntimeError("MCP server repeated a tools cursor")
+            cursors.add(cursor)
     missing = set(config["tools"]) - listed.keys()
     if missing:
         raise RuntimeError(f"MCP server {alias} does not expose: {', '.join(sorted(missing))}")
@@ -90,7 +89,7 @@ async def _discover_one(alias: str, config: dict) -> dict:
             "schema": {"type": "function", "function": {
                 "name": name,
                 "description": tool.description or f"{alias}: {native_name}",
-                "parameters": tool.inputSchema,
+                "parameters": tool.input_schema,
             }},
         }
     return result
@@ -117,12 +116,10 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> di
 
 
 async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
-    async with _streams(config) as (read, write):
-        from mcp import ClientSession
+    from mcp import Client
 
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(native_name, arguments=arguments)
+    async with Client(_streams(config)) as client:
+        result = await client.call_tool(native_name, arguments=arguments)
     parts = []
     for item in result.content:
         kind = getattr(item, "type", None)
@@ -135,8 +132,8 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
         elif kind == "resource_link":
             parts.append(f"Resource link (content not loaded): {item.uri}")
     output = "\n".join(parts) or json.dumps(
-        getattr(result, "structuredContent", None) or {}, ensure_ascii=False)
-    if result.isError:
+        result.structured_content or {}, ensure_ascii=False)
+    if result.is_error:
         raise MCPToolError(output)
     return output[:MAX_TOOL_OUTPUT] + ("\n[output truncated]" if len(output) > MAX_TOOL_OUTPUT else "")
 

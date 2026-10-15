@@ -3,6 +3,7 @@
 import json
 import asyncio
 from collections import deque
+from dataclasses import replace
 import os
 import sys
 import uuid
@@ -61,7 +62,7 @@ def _require_target(role: str | None, agent: str | None,
 
 
 def _describe_chat_tool_schema(schema: dict, names: tuple[str, ...]) -> None:
-    """Advertise the alternatives FastMCP cannot infer from optional arguments."""
+    """Advertise the alternatives MCPServer cannot infer from optional arguments."""
     schema["anyOf"] = [
         {"required": [name],
          "properties": {name: {"type": "string", "minLength": 1,
@@ -211,14 +212,14 @@ class OrchestratorClient:
 
 
 async def stream_call(client, path, payload, context):
-    """Stream short actions using HTTPX, already supplied by the MCP SDK.
+    """Stream short actions using HTTPX2, already supplied by the MCP SDK.
 
     Cancelling the MCP call closes its HTTP stream; agent work follows the
     orchestrator's existing disconnect policy and is never automatically retried.
     """
-    import httpx
+    import httpx2 as httpx
     meta = context.request_context.meta
-    token = meta.progressToken if meta is not None else None
+    token = meta.get('progress_token') if meta is not None else None
     progress_enabled = token is not None and token != ''
     activity = deque(maxlen=20)
     counter = 0
@@ -274,22 +275,32 @@ async def stream_call(client, path, payload, context):
         raise RuntimeError('orchestrator returned invalid progress stream') from exc
 
 
+async def _omit_null_progress_token(ctx, call_next):
+    """Preserve the gateway's null = no progress contract before SDK validation."""
+    if ctx.method == "tools/call" and ctx.params is not None:
+        meta = ctx.params.get("_meta")
+        if isinstance(meta, dict) and "progressToken" in meta and meta["progressToken"] is None:
+            meta = {key: value for key, value in meta.items() if key != "progressToken"}
+            ctx = replace(ctx, params={**ctx.params, "_meta": meta})
+    return await call_next(ctx)
+
+
 def main() -> None:
-    from mcp.server.fastmcp import FastMCP, Context
+    from mcp.server.mcpserver import MCPServer, Context
     from mcp.server.transport_security import TransportSecuritySettings
 
-    class LoggedFastMCP(FastMCP):
-        def streamable_http_app(self):
-            return MCPHTTPLoggingMiddleware(super().streamable_http_app())
+    class LoggedMCPServer(MCPServer):
+        def streamable_http_app(self, **settings):
+            return MCPHTTPLoggingMiddleware(super().streamable_http_app(**settings))
 
         async def list_tools(self):
             tools = await super().list_tools()
             for tool in tools:
                 if tool.name == "run_task":
-                    _describe_chat_tool_schema(tool.inputSchema,
+                    _describe_chat_tool_schema(tool.input_schema,
                                                ("role", "agent", "sessionId", "session_id"))
                 elif tool.name == "send_message":
-                    _describe_chat_tool_schema(tool.inputSchema,
+                    _describe_chat_tool_schema(tool.input_schema,
                                                ("session_id", "role", "agent"))
             return tools
 
@@ -297,18 +308,7 @@ def main() -> None:
         os.getenv("MCP_ORCHESTRATOR_URL", "http://127.0.0.1:8000"),
         int(os.getenv("MCP_UPSTREAM_TIMEOUT_SECONDS", str(RUNTIME["timeouts"]["mcp_upstream_seconds"]))),
     )
-    server = LoggedFastMCP(
-        "popot-agents",
-        host=os.getenv("MCP_HOST", "127.0.0.1"),
-        port=int(os.getenv("MCP_PORT", "8001")),
-        stateless_http=True,
-        json_response=False,
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*"],
-            allowed_origins=["http://127.0.0.1:*", "http://localhost:*"],
-        ),
-    )
+    server = LoggedMCPServer("popot-agents", middleware=[_omit_null_progress_token])
 
     @server.tool()
     async def run_task(task: str, role: str | None = None, agent: str | None = None,
@@ -365,7 +365,18 @@ def main() -> None:
         """Get the status and metadata of one saved chat."""
         return client.get_chat(session_id)
 
-    server.run(transport="streamable-http")
+    server.run(
+        transport="streamable-http",
+        host=os.getenv("MCP_HOST", "127.0.0.1"),
+        port=int(os.getenv("MCP_PORT", "8001")),
+        stateless_http=True,
+        json_response=False,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*"],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*"],
+        ),
+    )
 
 
 if __name__ == "__main__":
