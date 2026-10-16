@@ -9,6 +9,11 @@ import subprocess
 import time
 from pathlib import Path
 
+if __package__:
+    from .worker_pool import ensure_named_pool
+else:
+    from worker_pool import ensure_named_pool
+
 
 SUBSTRATE_COMMIT = "672533541dbfcd29084e4de2475267088bda3651"
 WORKER_LABEL = "ate.dev/worker-pool"
@@ -90,10 +95,14 @@ def ensure_workers(kubeconfig: Path, cli: Path, context: str, namespace: str,
             meta = pod["metadata"]
             uid, name = meta["uid"], meta["name"]
             if (meta.get("namespace") != namespace
-                    or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", name)
-                    or meta.get("labels", {}).get(WORKER_LABEL) not in desired):
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", name)):
                 raise ValueError("Worker pod is outside the selected local pool")
             seen.add(uid)
+            if meta.get('labels', {}).get(WORKER_LABEL) not in desired:
+                if meta.get('deletionTimestamp'):
+                    healthy = False  # Foreground pool deletion is still cascading.
+                    continue
+                raise ValueError('Worker pod is outside the selected local pool')
             status = pod.get("status", {})
             ip = status.get("podIP")
             ready = any(c.get("type") == "Ready" and c.get("status") == "True"
@@ -162,6 +171,8 @@ def main() -> None:
             subprocess.run(["go", "build", "-mod=vendor", "-o", str(cli), "./cmd/kubectl-ate"],
                            cwd=source, check=True, timeout=300)
             stamp.write_text(head + "\n")
+        ensure_named_pool(local / 'kubeconfig', cli, config['context'], config['atespace'],
+                          config.get('worker_pool_name', 'popot-workers'), config['startup_timeout_seconds'])
         ensure_workers(local / "kubeconfig", cli, config["context"], config["atespace"],
                        config["startup_timeout_seconds"], resources=config['task_resources'])
 

@@ -1,4 +1,5 @@
 FROM python:3.10-slim
+LABEL com.popot.project="popot-agents"
 
 RUN pip install --no-cache-dir mcp==1.30.0
 

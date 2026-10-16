@@ -95,7 +95,6 @@ class DelegationService:
         self.grants: dict[str, Grant] = {}
         self.tokens: dict[str, Grant] = {}
         self.jobs: dict[str, Job] = {}
-        self.slots = threading.BoundedSemaphore(policy["max_concurrent_tasks"])
         self.closed = False
 
     def is_active(self, session_id: str) -> bool:
@@ -309,8 +308,6 @@ class DelegationService:
                 raise A2AError("delegation depth limit reached")
             if grant.run.calls >= self.policy["max_calls_per_turn"]:
                 raise A2AError("delegation call limit reached")
-            if not self.slots.acquire(blocking=False):
-                raise A2AError("delegation is busy; child capacity is full")
             session_id = uuid.uuid4().hex[:16]
             config = {**self.roles[role], "_ax_delegation": {
                 "parent_session_id": grant.session_id, "root_session_id": grant.root_id,
@@ -325,7 +322,6 @@ class DelegationService:
                 job.thread.start()
             except Exception:
                 self.jobs.pop(session_id, None)
-                self.slots.release()
                 raise
             return self._task(self.store.get(session_id))
 
@@ -390,7 +386,6 @@ class DelegationService:
                 self.revoke(job.session_id)
                 with self.lock:
                     self.jobs.pop(job.session_id, None)
-                self.slots.release()
 
     @staticmethod
     def _task(saved: dict) -> dict:

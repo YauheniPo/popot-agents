@@ -17,5 +17,6 @@ RUN npx eslint src/modules/business/linkedKnowledge.ts src/modules/business/Know
 RUN npm run build
 
 FROM cognee/cognee-ui:main-b32d8af AS runner
+LABEL com.popot.project="popot-agents"
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone /app/
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static /app/.next/static

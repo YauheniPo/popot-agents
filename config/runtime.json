@@ -22,7 +22,7 @@
     "model_request_seconds": 120,
     "mcp_discovery_seconds": 60,
     "mcp_tool_seconds": 120,
-    "mcp_upstream_seconds": 1920,
+    "mcp_upstream_seconds": 7200,
     "tool_command_seconds": 180,
     "git_clone_seconds": 180,
     "file_action_seconds": 60,

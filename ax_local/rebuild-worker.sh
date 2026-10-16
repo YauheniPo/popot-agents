@@ -29,5 +29,5 @@ fi
 printf '%s\n' "$IMAGE_DIGEST" > "$IMAGE_FILE"
 
 docker compose --env-file "$ROOT/.env" -f "$ROOT/ax_local/compose.yaml" \
-  up --build --force-recreate -d mcp-server
+  up --build --force-recreate -d --wait --wait-timeout 300 mcp-server
 echo "AX worker and local API/MCP rebuilt"

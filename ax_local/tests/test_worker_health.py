@@ -108,6 +108,16 @@ class WorkerHealthTests(unittest.TestCase):
         self.assertGreater(self.tick, 0)
         self.assertFalse(any("delete" in args for args, _ in self.calls))
 
+    def test_waits_for_terminating_pods_of_a_removed_pool(self):
+        old = pod('old-pool-pod', 'old-uid')
+        old['metadata']['labels']['ate.dev/worker-pool'] = 'removed-pool'
+        old['metadata']['deletionTimestamp'] = '2026-10-09T10:00:00Z'
+        current = pod()
+        self.run_health([([old, current], [worker(old), worker(current)]),
+                         ([current], [worker(current)])])
+        self.assertGreater(self.tick, 0)
+        self.assertFalse(any('delete' in args for args, _ in self.calls))
+
     def test_same_name_new_uid_is_not_deleted_for_old_registration(self):
         p = pod()
         old = worker(pod(uid="old-uid"), "10.0.0.99")
@@ -179,10 +189,13 @@ class WorkerHealthMainTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, worker_health.SUBSTRATE_COMMIT)
             with patch.object(worker_health, "__file__", str(ax / "cluster/worker_health.py")), \
                  patch.object(worker_health.subprocess, "run", side_effect=run) as command, \
+                 patch.object(worker_health, "ensure_named_pool", create=True) as named, \
                  patch.object(worker_health, "ensure_workers") as ensure:
                 worker_health.main()
                 worker_health.main()
             self.assertEqual(sum(c.args[0][0] == "go" for c in command.call_args_list), 1)
+            named.assert_called_with(ax / '.local/kubeconfig', cli, 'kind-popot-ax',
+                                     'ate-demo-counter', 'popot-workers', 300)
             ensure.assert_called_with(ax / ".local/kubeconfig", cli, "kind-popot-ax",
                                       "ate-demo-counter", 300, resources={
                                           "requests": {"cpu": "500m", "memory": "512Mi"},

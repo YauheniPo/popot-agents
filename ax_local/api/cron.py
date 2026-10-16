@@ -12,11 +12,10 @@ from popot_agents.orchestrator.cron import cron_matches, validate_cron
 
 
 class CronScheduler:
-    def __init__(self, roles: dict, runner, store, *, max_concurrent_tasks: int):
+    def __init__(self, roles: dict, runner, store):
         self.entries = [(role, index, entry) for role, config in roles.items()
                         for index, entry in enumerate(config.get("cron", []))]
         self.roles, self.runner, self.store = roles, runner, store
-        self.slots = threading.BoundedSemaphore(max_concurrent_tasks)
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
         self.active: set[tuple[str, int]] = set()
@@ -68,11 +67,6 @@ class CronScheduler:
                 session_id = hashlib.sha256(identity.encode()).hexdigest()[:16]
                 if self.store.get(session_id) is not None:
                     continue
-                if not self.slots.acquire(blocking=False):
-                    print(json.dumps({"event": "ax_cron", "role": role, "schedule": index,
-                                      "state": "SKIPPED", "reason": "capacity full"}),
-                          file=sys.stderr, flush=True)
-                    continue
                 config = {key: value for key, value in self.roles[role].items() if key != "cron"}
                 config["_ax_cron"] = {"schedule_index": index, "expression": entry["schedule"],
                                       "scheduled_at": minute.isoformat(),
@@ -88,7 +82,6 @@ class CronScheduler:
                 except Exception:
                     self.active.discard(key)
                     self.active_sessions.discard(session_id)
-                    self.slots.release()
                     raise
 
     def _execute(self, key: tuple[str, int], session_id: str, config: dict, task: str) -> None:
@@ -130,7 +123,6 @@ class CronScheduler:
                     self.active.discard(key)
                     self.active_sessions.discard(session_id)
                     self.jobs.discard(threading.current_thread())
-                self.slots.release()
 
     def wait_for_jobs(self) -> None:
         while True:

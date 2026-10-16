@@ -91,8 +91,7 @@ def make_server():
         runner.delegation = DelegationService(
             roles, policy, runner, server.store, f"http://{host}:{policy['port']}")
         server.delegation = runner.delegation
-    server.cron = CronScheduler(roles, runner, server.store,
-                                max_concurrent_tasks=policy["max_concurrent_tasks"])
+    server.cron = CronScheduler(roles, runner, server.store)
     return server
 
 
@@ -128,6 +127,8 @@ def main() -> None:
     a2a = None
     try:
         server = make_server()
+        for manager in server.worker_managers:
+            manager.recover_workers()
         if server.delegation:
             server.delegation.recover_interrupted()
             a2a = start_a2a_server(server.delegation, kind_ip, AX_CONFIG["delegation"]["port"])
