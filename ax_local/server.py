@@ -1,4 +1,4 @@
-"""Compatibility entry point for the AX comparison API."""
+"""Compatibility entry point for the AX API."""
 
 from .api.server import main
 

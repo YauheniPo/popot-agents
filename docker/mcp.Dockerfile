@@ -14,6 +14,6 @@ COPY popot_agents/progress.py /app/popot_agents/
 COPY config/runtime.json /app/config/runtime.json
 USER mcp
 
-ENV MCP_HOST=0.0.0.0 MCP_PORT=8001 MCP_ORCHESTRATOR_URL=http://orchestrator:8000
+ENV MCP_HOST=0.0.0.0 MCP_PORT=8001 MCP_ORCHESTRATOR_URL=http://api:8002
 EXPOSE 8001
 CMD ["python", "-u", "-m", "popot_agents.mcp_server"]

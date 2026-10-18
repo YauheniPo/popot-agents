@@ -29,7 +29,6 @@ from .worker_queue import WorkerQueue
 
 class AxAgentRunner:
     session_mode = "http"
-    network = "bridge"
     retain_session_history = True
     queues_worker_start = True
 
@@ -40,7 +39,7 @@ class AxAgentRunner:
         if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image):
             raise ValueError("AX worker image must be pinned by sha256 digest")
         if not context.startswith("kind-") or not re.fullmatch(r"[a-z0-9-]+", context):
-            raise ValueError("AX comparison requires a local kind context")
+            raise ValueError("AX requires a local kind context")
         if not model or not base_url.startswith(("http://", "https://")):
             raise ValueError("a model and HTTP base URL are required")
         self.image = image

@@ -1,95 +1,83 @@
 # Popot Agents
 
-`POST /tasks` and `POST /messages` create a Docker worker and return its
-`sessionId`. Pass that ID to `/messages` to continue the conversation in the
-same worker. The API is synchronous and handles one request at a time. Docker
-Compose builds the orchestrator and worker images. The orchestrator container
-receives HTTP requests and starts separate worker containers through Docker.
-The worker image includes Git, Curl, and the MCP Python packages used by the
-backend role.
+Agents run through AX Tasks in a local kind cluster. The MCP gateway accepts a
+role and task; the AX API selects the role's provider, starts or resumes a
+sandbox, and returns the answer with a `sessionId`. Follow-up messages reuse that
+session. AX owns worker admission, snapshots and sandbox lifecycle.
+
+Docker hosts kind and the Compose services for the API, PostgreSQL, MCP and
+Cognee. The standalone Docker agent runner has been removed. Existing data from
+that deployment is not migrated or deleted automatically.
+
+## Start
+
+Requirements and bootstrap details: [AX setup](ax_local/README.md#подготовка).
+Use Python 3.11+ for the AX scripts, a running Docker daemon, Git, Go and kubectl.
+
+```bash
+cp .env.example .env
+# Set POPOT_DB_PASSWORD and the credentials/models for the roles you use.
+bash ax_local/up.sh
+```
+
+The launcher starts AX, memory and resource monitoring. The MCP endpoint is
+**http://127.0.0.1:8003/mcp** (`AX_MCP_PUBLISH_PORT` overrides the published port).
+The API listens on port 8002 inside Compose; it is not published on the host.
+See [operations and monitoring](ax_local/README.md) and the
+[interactive architecture](ax_local/architecture.html).
 
 ## Project layout
 
 ```text
+ax_local/         AX deployment, Compose, API/worker images, lifecycle and metrics
 popot_agents/
-  compose.yaml    Plain Docker deployment
-  config.json     Docker resources, capacity and lifecycle timeouts
-  docker/         Dockerfiles for the Docker API and worker
-  orchestrator/   HTTP API, Docker worker lifecycle, session storage
-  worker/         CLI and HTTP harnesses, chat process, MCP and file helpers
-  mcp_server.py    MCP tools for Claude and Codex, backed by the API
+  orchestrator/   HTTP API, profile/role validation and session storage
+  worker/         Harness, conversation process, MCP and file helpers
+  mcp_server.py    MCP gateway backed by the AX API
   runtime_config.py Shared runtime settings loader and validation
-  tools.py        Role tool definitions and execution shared by both images
-config/           Runtime settings, agent profiles, and role definitions
-ax_local/         AX/kind deployment, configuration and adapters
-docker/           Shared MCP server Dockerfile
+  tools.py        Role tool definitions and execution
+config/           Runtime settings, provider profiles and role definitions
+docker/           MCP gateway Dockerfile
 memory/           Cognee persistent memory, graph UI and local gateway
-tests/            API, worker, roles, sessions, and container tests
+skills/           Instructions selected by each role
+tests/            API, harness, MCP, roles, sessions and configuration tests
 ```
 
-Run local tests with `python -m unittest discover -s tests -p 'test_*.py'`.
-Run the API without Compose with `python -m popot_agents.orchestrator.main`.
+`popot_agents` remains the Python package used by AX. It no longer launches
+worker containers through Docker or provides a separate API entrypoint.
 
 ## Project memory and graph UI
 
-Run `bash memory/up.sh`, then rebuild the agent stack with
-`docker compose --env-file .env -f popot_agents/compose.yaml up --build -d worker-image orchestrator mcp-server`.
-Open **http://localhost:3001** and sign in as `default_user@example.com` with
-`COGNEE_PASSWORD` from `.env` (generated privately by the launcher).
-Agents share project datasets with the UI: select a dataset under **Brains**
-to inspect its graph after indexing. All conversational roles have Cognee
-recall, remember and processing-status tools. Memory persists across restarts.
-See [memory/README.md](memory/README.md) for setup, datasets and AX integration.
+`bash ax_local/up.sh` also starts Cognee. Open **http://localhost:3001** and sign
+in as `default_user@example.com` using `COGNEE_PASSWORD` from `.env` (generated
+privately by the launcher). Select a project dataset under **Brains** to inspect
+its indexed graph. Memory persists independently of AX Tasks. See
+[memory/README.md](memory/README.md) for datasets, indexing and maintenance.
 
 ## Runtime settings
 
-Settings are split by where they apply:
-
 | File | Scope |
 | --- | --- |
-| [config/runtime.json](config/runtime.json) | Shared sessions, turn/model/tool/MCP timeouts, message/file limits, logging, model parameters and memory. |
-| [popot_agents/config.json](popot_agents/config.json) | Docker worker resources, startup probing, container command timeouts and `max_concurrent_tasks` (default: 3). |
-| [ax_local/config.json](ax_local/config.json) | Local kind context, atespace/workspace, AX Task resources, worker queue, suspend retention, AX timeouts, `delegation` and `proxy`. |
+| [config/runtime.json](config/runtime.json) | Harness, session, model/tool/MCP budgets, message limits, logging and memory |
+| [config/agents.json](config/agents.json) | HTTP provider endpoints, model variable names and model parameters |
+| [config/roles.json](config/roles.json) | Role instructions, tools, permissions, skills, delegation and schedules |
+| [ax_local/config.json](ax_local/config.json) | kind context, WorkerPool, Task resources, queue, snapshots, AX timeouts, delegation and proxy |
+| [pyproject.toml](pyproject.toml) | Python dependencies and pinned AX/Substrate/ko build versions |
+| `.env` | Credentials, selected model names and published MCP port |
 
-In the shared file, `sessions` sets idle time, retention and cleanup intervals.
-`timeouts` includes `turn_seconds`, `max_turn_seconds`, `min_turn_seconds` and
-`turn_response_margin_seconds`. `limits` bounds requests, history, tool output
-and files. `logging` sets MCP request-body and worker-log limits. `model` sets
-tool-round limits, `request_retries` (0 disables retries), and optional
-`temperature`/`max_tokens`; `null` omits these model parameters from requests.
+Workers and MCP read the shared runtime file; only the AX deployment needs
+`ax_local/config.json`. For direct Python runs, `POPOT_RUNTIME_CONFIG` and
+`POPOT_AX_CONFIG` select alternate files before startup. Cluster scripts read the
+repository's `ax_local/config.json`. Missing or unknown settings fail validation.
 
-Each service image receives the shared file. The Docker orchestrator also
-receives `popot_agents/config.json`; AX API also receives `ax_local/config.json`.
-Workers and MCP use shared settings without requiring backend configuration.
-Cognee sync mounts the shared file read-only. Docker rejects new tasks with
-HTTP 503 when its task slots are busy; AX uses its own worker admission queue.
-AX route and delegation timeouts are validated against the shared turn budget.
+After changing deployment settings, roles or profiles, run `bash ax_local/up.sh`.
+Start a new session for changed role instructions or a new worker image. Existing
+sessions keep their saved role configuration and checkpoint.
 
-All required values are explicit in JSON: missing or unknown fields fail
-validation. If migrating an older combined config, move the contents of its
-`docker` and `ax` sections to the corresponding backend files and remove those
-sections from `config/runtime.json`. Backend files contain settings directly,
-without an outer `docker` or `ax` wrapper.
-
-After editing, run `docker compose --env-file .env -f popot_agents/compose.yaml up --build -d worker-image orchestrator mcp-server`
-for Docker or `bash ax_local/up.sh` for AX. Existing workers keep their loaded
-settings until replaced. For direct Python runs, `POPOT_RUNTIME_CONFIG`,
-`POPOT_DOCKER_CONFIG` and `POPOT_AX_CONFIG` select alternate files before process
-startup. Local cluster scripts read the repository's `ax_local/config.json` directly.
-Provider profiles stay in `config/agents.json`, role instructions/tools in
-`config/roles.json`, and secrets in `.env`.
-
-Agent-specific `resources` and `model_parameters` can override the runtime
-defaults in [config/agents.json](config/agents.json). For example, an HTTP
-profile may add `"resources": {"memory": "2g", "cpus": 2}` and
-`"model_parameters": {"temperature": 0.3, "max_tokens": 1024}`. Role-specific
-`ttl_seconds`, `timeout_seconds`, and `max_tool_rounds` remain in
-[config/roles.json](config/roles.json). Roles without `ttl_seconds` inherit
-`sessions.default_idle_seconds`; all bundled roles currently inherit 900 seconds.
-All bundled roles also inherit `model.default_max_tool_rounds` (40) from runtime.
-To override it for one agent role, add `"max_tool_rounds": 20` to that role in
-`config/roles.json`. Removing the field restores inheritance. Both values must
-be integers from 1 to `model.max_tool_rounds` (currently 80); zero does not mean unlimited.
+Task CPU/RAM resources and worker capacity are configured in `ax_local/config.json`.
+Profiles may set `model_parameters`, such as `temperature` or `max_tokens`.
+Role-specific `timeout_seconds` and `max_tool_rounds` override shared turn defaults.
+The default round limit is 40 and the maximum is 80; zero is not unlimited.
 
 HTTP profiles can also pass OpenRouter's optional `reasoning` object through
 `model_parameters`, for example in the `openrouter` block of `config/agents.json`:
@@ -111,7 +99,7 @@ behavior unchanged. The `openrouter` and `nous` profiles explicitly set
 OpenRouter probe returned reasoning; Nous chat completion requests returned
 HTTP 404 both with and without reasoning, despite the model being listed.
 Ollama's configured `qwen2.5-coder:14b` does not advertise a separate thinking
-mode; the `ollama_cloud`, `ollama_claude` and `ollama_claude_local` profiles have
+mode; the `ollama_cloud` profile has
 no model selected in the local environment and keep reasoning unset.
 Recheck support when changing a profile's model.
 Model/provider support still determines which options work, including whether
@@ -140,7 +128,7 @@ work before use in persistent chats. DeepSeek did not respond within the probe's
 Changing `NVIDIA_MODEL` configures the `nvidia_nim` profile. To use it in AX,
 set the relevant role's `agent` to `nvidia_nim` in `config/roles.json` and rebuild.
 
-Docker and AX both use the role's profile from `config/agents.json`: its
+AX uses the role's profile from `config/agents.json`: its
 `model_env` names the model variable in `.env`, and `model_parameters` reaches
 the worker via `HARNESS_MODEL_PARAMETERS_JSON`. Delegated and scheduled tasks
 use their own role's profile. These are deployment settings, not additional
@@ -150,8 +138,7 @@ for AX); new workers receive the settings.
 Provider credentials and deployment
 ports remain in `.env`; existing `AGENT_CHAT_IDLE_SECONDS` and
 `MCP_UPSTREAM_TIMEOUT_SECONDS` process environment variables override their
-runtime settings when provided. Docker isolation flags and credential redaction
-remain enforced by the application.
+runtime settings when provided. Provider credentials stay in the AX API proxy.
 
 Shared turn settings are defined only in `config/runtime.json`:
 
@@ -161,8 +148,7 @@ Shared turn settings are defined only in `config/runtime.json`:
 | `timeouts` | Default/max turn time, minimum harness budget, response margin, model/tool/transport calls and memory request budgets |
 | `memory` | Recall count, summary attempts/tokens, evidence/context/text limits and maximum notes/traced tools |
 
-Both Docker and AX use these shared values. Backend-specific settings live in
-`popot_agents/config.json` and `ax_local/config.json`. AX-specific CLI, route, startup,
+AX uses these shared values. Deployment-specific CLI, route, startup,
 probe, restore, response and deletion timeouts, plus `delegation` and `proxy`
 policies, are in `ax_local/config.json`.
 AX user sessions suspend after each saved answer and automatically resume on
@@ -186,196 +172,37 @@ With the current settings, every bundled role gets 900 seconds, the harness gets
 and it reserves up to 120 seconds for its final answer. Changing the shared
 maximum also changes role validation and the AX delegation timeout cap.
 AX route timeout must exceed the shared maximum task timeout plus its response margin.
-The default worker has 2 CPUs, 1536 MiB RAM, 256 process slots and a 512 MiB
-workspace tmpfs. The Docker API admits three concurrent requests; three workers
-can consume 4.5 GiB RAM plus service overhead; this leaves headroom for Cognee
-on an 8 GiB Docker VM. AX tasks use
-the same CPU/RAM limits. Model requests allow 120 seconds; MCP tool calls allow
-120 seconds; shell commands and clones allow 180 seconds. Upstream transport
-budgets cover the 1800-second role override cap. Larger limits provide room for
-complex work, but do not make remote model inference faster. Existing sessions
-keep the previous worker image; start a new session to use the new settings.
+AX Task CPU/RAM limits are defined by `task_resources` in `ax_local/config.json`.
+Model requests and MCP tool calls default to 120 seconds; shell commands and clones
+to 180 seconds. Transport budgets cover the maximum turn and worker queue.
 The memory limits for note count and trace count must stay within the pinned
 Cognee API contract; invalid values are rejected at startup.
 
-## Connect Claude or Codex through MCP
+## Connect through MCP
 
-After setting `.env` as described in "Start and try", start the MCP service
-with the rest of the stack:
-
-```bash
-docker compose --env-file .env -f popot_agents/compose.yaml up --build -d mcp-server
-```
-
-The Streamable HTTP endpoint is `http://127.0.0.1:8001/mcp`. Check the service
-and call the read-only `list_chats` tool:
+Configure a Streamable HTTP client with `http://127.0.0.1:8003/mcp`.
+The gateway exposes `run_task`, `send_message`, `list_chats` and `get_chat`.
+For a copyable request:
 
 ```bash
-docker compose --env-file .env -f popot_agents/compose.yaml ps db orchestrator mcp-server
-curl --fail-with-body -sS http://127.0.0.1:8001/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -H 'MCP-Protocol-Version: 2025-11-25' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_chats","arguments":{}}}'
+curl -N --fail-with-body -sS 'http://127.0.0.1:8003/mcp' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-11-25' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"progressToken":"task-1"},"name":"run_task","arguments":{"role":"backend_engineer","task":"Describe the tools available to you."}}}'
 ```
 
-The MCP response should contain a `chats` list from the orchestrator. Then add
-the server to your client:
+A nonempty `progressToken` enables MCP progress notifications carrying harness
+and delegated-agent events. An empty or omitted token disables those notifications;
+SSE keepalive `ping` comments may still appear. The final result includes the
+answer, `sessionId` and activity. Continue with `send_message` and that `sessionId`.
 
-```bash
-codex mcp add popot-agents --url http://127.0.0.1:8001/mcp
-claude mcp add --transport http popot-agents http://127.0.0.1:8001/mcp
-```
-
-These commands use the [Codex and Claude HTTP MCP connection format](https://developers.openai.com/learn/docs-mcp).
-
-The server exposes `run_task` to start a session or continue one by passing the
-returned `sessionId` inside `params.arguments`. `send_message` also continues
-a session using its `session_id` argument. The MCP tool schemas require one of
-`role` or `agent` for a new session, or a session ID for a follow-up. Use
-`"role":"chat"` for general questions such as arithmetic; ask the user which
-role to use when their intent is unclear. Missing targets are rejected by MCP
-before an HTTP request reaches the orchestrator.
-Omit `sessionId` or pass an empty string to create a new session.
-For example, a follow-up through `run_task` uses
-`"params":{"name":"run_task","arguments":{"sessionId":"PASTE_ID_HERE","task":"Continue"}}`.
-`sessionId` next to `arguments` is ignored by MCP tool dispatch. `list_chats`
-and `get_chat` show saved sessions. Roles,
-profiles, workspaces, and session retention are handled by the same
-orchestrator API as regular HTTP requests. The MCP service holds no model token
-and has no Docker socket. It is published only on `127.0.0.1`; keep it local
-because its tools can start workers and execute role-authorized actions. Set
-`MCP_PUBLISH_PORT` if port 8001 is busy, and use that port in the client URL.
-Follow incoming MCP calls with `docker compose --env-file .env -f popot_agents/compose.yaml logs -f mcp-server`. Each HTTP
-request logs its client IP and port, method, path, headers, and JSON body; the
-response log includes status and headers. Events share a `request_id`. MCP logs
-hide credential fields and sensitive headers, including `Authorization`, cookies,
-and MCP session IDs. JSON request bodies above `logging.mcp_body_max_bytes` are
-counted but not printed.
-
-## Start and try
-
-```bash
-cp .env.example .env  # only on a fresh checkout
-# Set POPOT_DB_PASSWORD and the provider variables you use in .env.
-bash memory/up.sh
-docker compose --env-file .env -f popot_agents/compose.yaml up --build -d orchestrator
-```
-
-For local development, keep Compose Watch running in a terminal instead:
-
-```bash
-docker compose --env-file .env -f popot_agents/compose.yaml up --watch orchestrator worker-image
-```
-
-Changes to files copied into a service image automatically rebuild that image.
-`popot_agents/tools.py` and `.dockerignore` rebuild both. The orchestrator
-service is recreated after its rebuild; new tasks and chats use the latest
-worker image after its rebuild. Chat containers that were already started keep
-their old image until they are closed and started again. Changes to `.env` still require
-`docker compose --env-file .env -f popot_agents/compose.yaml up -d --force-recreate orchestrator` because environment values
-are read when the container starts.
-
-Run these commands from the repository directory with Docker running. Set
-`POPOT_DB_PASSWORD` in `.env` to a long random value and add the provider tokens
-and model names you need before starting. Compose publishes the API only on
-`127.0.0.1:8000`, runs PostgreSQL without a published port, and builds the
-default worker image. PostgreSQL data lives in `~/.popot-agents/postgres/` and
-persistent workspaces in `~/.popot-agents/workspaces/`. Both survive image and
-container replacement, `docker compose --env-file .env -f popot_agents/compose.yaml down`, and a new checkout of this
-repository. Check startup with `docker compose --env-file .env -f popot_agents/compose.yaml logs orchestrator`; stop with
-`docker compose --env-file .env -f popot_agents/compose.yaml down`. If host port 8000 is occupied, set
-`API_PUBLISH_PORT=18000` when starting Compose and use that port in requests.
-After changing `config/agents.json` or `config/roles.json`, run
-`docker compose --env-file .env -f popot_agents/compose.yaml up --build -d orchestrator` again. After changing only `.env`,
-run `docker compose --env-file .env -f popot_agents/compose.yaml up -d --force-recreate orchestrator` to load its new values.
-Keep `POPOT_DB_PASSWORD` unchanged for an existing database; changing it in
-`.env` alone does not rotate the PostgreSQL user's password.
-
-On startup, the orchestrator imports unexpired sessions from this checkout's
-old `.sessions/` folder into PostgreSQL without overwriting existing rows.
-If you used an older checkout, stop its API and copy any `.workspaces/` content
-once into `~/.popot-agents/workspaces/` before starting the new version. For a
-host replacement, back up the database with `pg_dump` and copy the workspaces;
-reinstalling the host without a backup loses local data. Backups contain
-conversation text and code, so keep them private.
-
-To export sessions before replacing the host, run:
-
-```bash
-docker compose --env-file .env -f popot_agents/compose.yaml exec -T db pg_dump -U popot popot_agents > "$HOME/popot-agents-sessions.sql"
-```
-
-Copy that file and `~/.popot-agents/workspaces/` to the new host. With a fresh
-database there, start `db`, restore the dump, then start `orchestrator`:
-
-```bash
-docker compose --env-file .env -f popot_agents/compose.yaml up -d db
-docker compose --env-file .env -f popot_agents/compose.yaml exec -T db psql -v ON_ERROR_STOP=1 -U popot popot_agents < "$HOME/popot-agents-sessions.sql"
-docker compose --env-file .env -f popot_agents/compose.yaml up -d orchestrator
-```
-
-In another terminal:
-
-```bash
-curl -sS http://127.0.0.1:8000/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"agent":"ollama","task":"Reply with exactly OK"}'
-```
-
-The request uses the local Ollama profile; set `OLLAMA_MODEL` and make its model
-available before sending it. `/tasks` returns `sessionId` and keeps the worker
-available for five minutes after its last message. Continue through `/messages`
-with that ID. New tasks and chats require either `agent` or `role`; follow-up
-messages can use only `sessionId`. `GET /healthz` checks the API process.
-
-```bash
-curl -sS http://127.0.0.1:8000/messages \
-  -H 'Content-Type: application/json' \
-  -d '{"sessionId":"PASTE_ID_HERE","message":"Уточни критерии приемки"}'
-```
-
-Workers log when a model request starts and when a response arrives. Follow API
-requests and answers with `docker compose --env-file .env -f popot_agents/compose.yaml logs -f orchestrator`. While a worker
-is running, use `docker logs -f <popot-chat-container-name>` to see its model
-request events. After each turn and before a container is removed, the
-orchestrator saves the worker log in
-`$HOME/.popot-agents/worker-logs/<sessionId>.log`. For example, run
-`tail -f "$HOME/.popot-agents/worker-logs/<sessionId>.log"`. The file is removed
-when its session is deleted or expires. Worker logs include turn
-start/completion, tools available to
-the HTTP model, the number of tool calls it chose, visible assistant messages,
-tool names and safe argument summaries, tool results or result sizes, and the
-final answer. Shell commands, file contents, and arbitrary
-tool output are summarized to avoid exposing credentials. Reasoning fields
-actually returned by the provider (`reasoning`, `reasoning_content`,
-`reasoning_details`) appear in `assistant_reasoning` trace/progress events with
-credential redaction. No explanation is invented when the provider omits them;
-encrypted blocks remain opaque. The original blocks are preserved unchanged in
-assistant messages sent back to the model during the tool loop. The harness
-receives each model response in full, so reasoning events arrive after that
-response, before tool execution or the final answer; this is not token streaming.
-Use a nonempty MCP `params._meta.progressToken` to receive events during the task.
-An absent token, `null`, or `""` disables progress notifications for both `run_task`
-and `send_message`; numeric `0` remains a valid token. The final result and its
-`activity` are still returned. SSE keepalive pings can still appear.
-Rebuild the worker image and start a new
-session to see the new trace events.
-
-The orchestrator also logs each API request and response as JSON lines with a
-shared `request_id`, client IP and port, `User-Agent`, method, path, status, and
-the JSON bodies. Credential fields are redacted and authorization headers are
-not logged; task and message text and agent answers are logged in full. Limit
-access to Docker logs accordingly. MCP calls use the `popot-agents-mcp/1` user
-agent and appear with the MCP container's IP. This identifies the calling
-service, not an individual user; the API has no client authentication.
+Requests can select a role, but cannot override its command, credentials or
+permissions. Keep this local endpoint restricted to trusted callers; it has no
+client authentication.
 
 ## Roles and tools
 
 Roles live in the separate [config/roles.json](config/roles.json) file. Each role selects an
 `agent` profile from `config/agents.json` and defines instructions, built-in `tools`,
-`permissions`, and optional `mcpServers`, `allowed_roles`, `description`, and `skills`. Set `AGENT_ROLES_FILE` to use another roles
-file. Rebuild the orchestrator image after editing it. Invalid agents or tool names fail at
+`permissions`, and optional `mcpServers`, `allowed_roles`, `description`, and `skills`.
+Rebuild the AX API after editing it. Invalid agents or tool names fail at
 startup. Requests can select a configured role by name; they cannot define
 instructions or tools themselves.
 
@@ -388,7 +215,7 @@ Each role's `skills` list selects directories relative to the repository's
 
 An omitted field or `[]` disables skills for that role. At worker startup, the
 harness loads the selected `SKILL.md` files and their Markdown references into
-the role instructions. This works for HTTP and CLI harnesses in Docker and AX.
+the role instructions. AX uses these instructions in its HTTP harness.
 The worker emits a `skills_loaded` event containing names and prompt size.
 Scripts are bundled but never executed by the loader; skills do not grant tools
 or change permissions. Unknown paths, duplicates, symlinks and oversized content
@@ -398,10 +225,10 @@ fail validation. The total skill prompt budget is
 The selected files are baked into the images. After changing skills, rebuild:
 
 ```bash
-docker compose --env-file .env -f popot_agents/compose.yaml up --build -d worker-image orchestrator mcp-server
+bash ax_local/up.sh
 ```
 
-For the AX stack use `bash ax_local/rebuild-worker.sh`. Running chat workers keep
+For a worker-only rebuild use `bash ax_local/rebuild-worker.sh`. Running chat workers keep
 their startup snapshot. A resumed session keeps its saved skill selection and,
 if its worker has stopped, loads those skills from the new worker image. Start a
 new session to use a changed role selection. The imported upstream version and
@@ -426,15 +253,7 @@ Feature team roles use the `openrouter` agent profile by default. Change a role'
 `agent` field to another configured profile if needed, and set that profile's
 model and credentials in `.env` as described below. For example:
 
-```bash
-curl -sS http://127.0.0.1:8000/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"role":"product_manager","task":"Опиши user story и критерии приемки для нового поиска в каталоге."}'
-
-curl -sS http://127.0.0.1:8000/messages \
-  -H 'Content-Type: application/json' \
-  -d '{"role":"qa_engineer","message":"Составь проверки для поиска по каталогу: пустой запрос, нет результатов и ошибка API."}'
-```
+Select `product_manager` or `qa_engineer` in the MCP request above to use those roles.
 
 The task and chat responses include `sessionId`, `role`, and `agent`; send only
 `sessionId` on later messages. The role and
@@ -453,8 +272,7 @@ records acceptance, rework or blocker decisions. Continue using the returned
 `sessionId` to preserve the specification and decisions. See
 [AX planner](ax_local/README.md#планировщик-и-спецификации).
 See [AX delegation](ax_local/README.md#делегирование-задач-между-ax-агентами)
-for runtime settings and a test request. The Docker orchestrator starts one
-selected specialist for each request. The backend worker starts with an empty workspace;
+for runtime settings and a test request. The backend worker starts with an empty workspace;
 provide a public repository URL to clone, or relevant code in the request.
 No company data source is mounted.
 
@@ -463,8 +281,7 @@ in `config/runtime.json`, currently
 `"role_env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]`.
 Then select it in that role's `config/roles.json` entry with
 `"env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]`, and set
-`GITHUB_PERSONAL_ACCESS_TOKEN` in the orchestrator/AX
-API environment. Other roles do not receive it. Existing runtime variables
+`GITHUB_PERSONAL_ACCESS_TOKEN` in the AX API environment. Other roles do not receive it. Existing runtime variables
 remain available as before; shell and MCP tools receive their existing small
 baseline plus only names selected by the role and allowed by runtime config.
 Missing or empty selected values fail that role's startup. Keep values out of
@@ -472,8 +289,7 @@ Missing or empty selected values fail that role's startup. Keep values out of
 runtime variable names such as `HARNESS_*` and `AX_*` cannot be selected. Removing
 a name from the runtime allowlist also blocks it in previously saved sessions.
 AX v0.3.1 passes the selected values as literal Task environment values, so
-operators with access to AX Task specifications can see them. Docker container
-environment values are similarly visible to Docker administrators.
+operators with access to AX Task specifications can see them.
 
 AX roles can also define a `cron` list of `{ "schedule": "0 9 * * 1-5", "task": "..." }`
 entries. The AX API runs them in UTC as separate persisted sessions. See
@@ -482,22 +298,21 @@ entries. The AX API runs them in UTC as separate persisted sessions. See
 `calculate` supports basic `+`, `-`, `*`, `/` arithmetic and parentheses.
 `utc_time` returns the current UTC timestamp. Built-in tools run inside the
 worker and are available only to roles that list them. HTTP model profiles use
-a bounded tool-call loop. CLI profiles receive role instructions, while the CLI
-itself controls its own tools; role tools and MCP servers require an HTTP profile.
+a bounded tool-call loop. The AX runner requires HTTP provider profiles.
 The selected model must support structured tool calls; some local models
 write a tool call as plain text instead of invoking it. With the installed
 `qwen2.5-coder:14b`, this behavior was observed for `calculate`.
 
 ### Backend workspace, permissions, and MCP
 
-`backend_engineer` uses the configured OpenRouter model and a private host directory
-under `~/.popot-agents/workspaces/` with Docker Compose. Its `permissions` set a persistent workspace, shell access,
+`backend_engineer` uses its configured model and `/workspace` inside its AX sandbox. Its `permissions` set a persistent workspace, shell access,
 and internet access. The role's `tools` list allows Bash, file reads/writes,
 public HTTPS Git clone, and HTTP(S) file downloads. `git_clone` puts a shallow
 clone in the workspace; `download_file` is limited to 5 MB. Bash runs as an
 unprivileged user inside the container. Model credentials are not forwarded to
-Bash or MCP subprocesses. The worker can access only its own mounted workspace,
-not the host project directory. There is no Docker socket in the worker.
+Bash or MCP subprocesses. The host project directory is not mounted into the sandbox. There is no Docker
+socket in the worker. Workspace files are restored from the retained AX snapshot;
+after Task deletion, only saved conversation history remains.
 
 The same role's `mcpServers` section starts the public reference
 [Fetch MCP server](https://github.com/modelcontextprotocol/servers/blob/main/src/fetch/README.md)
@@ -512,7 +327,7 @@ operator configuration; API requests cannot supply them.
 
 MCP package versions are defined once in the root `pyproject.toml`:
 the `mcp` dependency group supplies the SDK for the gateway, worker client and
-Cognee adapter. Both Docker and AX images install this group. The worker client
+Cognee adapter. The gateway and AX worker images install this group. The worker client
 uses the SDK's automatic protocol negotiation: modern servers use `2026-07-28`,
 and older servers use the supported initialize handshake. The gateway accepts
 both `2026-07-28` and the existing `2025-11-25` curl requests.
@@ -575,38 +390,19 @@ correct arguments or choose another permitted tool within the existing turn and
 round limits. MCP transport errors and tool timeouts still fail the turn;
 an uncertain tool write is not automatically retried.
 
-### Checking the GitHub token
+### Offline authentication checks
 
-Run the read-only checks for `YauheniPo/YauheniPo` and `YauheniPo/popot-agents`:
-
-```bash
-python3 scripts/check_github_token.py
-```
-
-To reproduce the agent's GitHub MCP file-write operation, install the same MCP
-SDK version used by the worker if it is missing from your virtual environment:
+`tests/test_mcp_remote.py` checks token forwarding, refusal when a token is
+missing or not selected by the role, and redaction in authentication errors.
+The tests isolate the process environment, use a fake token and mocked MCP
+responses, and fail on DNS or socket connection attempts. No GitHub secret or
+repository write permission is needed in CI.
 
 ```bash
-python3 -m pip install --group mcp
-python3 scripts/check_github_token.py --check-write
+python -m unittest discover -s tests -p 'test_mcp_remote.py'
 ```
 
-The write probe reads `GITHUB_PERSONAL_ACCESS_TOKEN` from `.env` (or `--env-file`),
-resolves the profile repository's default branch, and creates a unique
-`popot-token-check-*` branch through the REST API. It calls the official GitHub
-MCP `create_or_update_file` tool with the current README SHA and UTF-8 plain text,
-appending a diagnostic HTML comment. It verifies the saved content and deletes
-the temporary branch. This creates a real commit and may trigger repository
-automation. The default branch is unchanged. The original agent's exact content
-was not available in its logs; this tests the same tool with diagnostic content.
-
-Failures report their stage and MCP error text with the token redacted. If branch
-creation fails, the MCP write has not been attempted. Writes are never retried.
-A cleanup failure returns a nonzero exit status and names the branch to remove;
-a process kill or ambiguous branch-creation timeout may also require manual
-cleanup. Success confirms this local token's write operation on the temporary
-branch, not permission to update a protected default branch, publish PR reviews,
-or which token a running AX worker received.
+These checks validate client behavior, not a real token's validity or permissions.
 
 ### Harness execution loops
 
@@ -639,17 +435,9 @@ invalid directory names and existing destinations are returned as failed tool
 results so the model can correct them within the round/turn budget.
 
 Limits use existing settings: role `max_tool_rounds` (otherwise
-`config/runtime.json → model.default_max_tool_rounds`) and role/profile
-`timeout_seconds`. Recovery consumes the same budget as ordinary steps; each new
+`config/runtime.json → model.default_max_tool_rounds`) and role
+`timeout_seconds` (otherwise the shared turn timeout). Recovery consumes the same budget as ordinary steps; each new
 turn starts a fresh budget. These limits bound attempts, not guarantee completion.
-
-The configured Claude CLI profiles own their native agentic loop; their commands
-pass `--max-turns {max_turns}` using the same round setting. See the
-[Claude CLI reference](https://code.claude.com/docs/en/cli-reference).
-The wrapper also enforces `HARNESS_TURN_TIMEOUT_SECONDS` for CLI execution and
-does not restart a failed CLI process. Other custom CLI commands must implement
-their own tool loop; they can use the `{max_turns}` placeholder. The orchestrator
-supplies the time budget for both HTTP and CLI workers.
 
 `code_reviewer` has code-review, diagnosing-bugs, codebase-design, TDD and handoff
 skills, with GitHub tools for reading files, commits and PRs and publishing inline
@@ -659,8 +447,7 @@ completion. Each allowed specialist's `description` is included in the delegatio
 tool schema; existing roles without that field fall back to their instructions.
 Reviewers cannot access the parent's workspace: pass the diff, source context,
 requirements and test results, or a readable repository/ref/PR. This is a model
-instruction, not a server-enforced review gate. Docker harnesses expose the reviewer
-as a selectable role; agent-to-agent delegation currently requires AX.
+instruction, not a server-enforced review gate.
 
 When given a PR, the reviewer checks its diff and existing comments, creates a
 pending review pinned to the head SHA, adds findings at the relevant file/line,
@@ -674,174 +461,63 @@ model-directed; approvals, merges and source edits are forbidden by its instruct
 After these changes run `bash ax_local/up.sh` and start a new session
 (`"sessionId": ""`) to load the new tools and instructions.
 
-```bash
-curl -sS http://127.0.0.1:8000/messages \
-  -H 'Content-Type: application/json' \
-  -d '{"role":"backend_engineer","message":"Клонируй https://github.com/octocat/Hello-World.git, создай hello.py с print(42), выполни файл и покажи git status."}'
-```
-
-The response includes `workspace`, an absolute path on the Docker host. The same
-directory is mounted again when a stopped chat resumes with its `sessionId`.
-`GET /chats/ID` also reports the path. `POST /tasks` creates a new persistent
-workspace for a backend task and returns its path. `DELETE /chats/ID` removes
-the worker and chat history but leaves code in the workspace.
-`AGENT_WORKSPACE_DIR` sets the path visible inside the orchestrator. When the
-orchestrator runs in Docker, `AGENT_WORKSPACE_HOST_DIR` must point to the same
-mounted directory on the Docker host; Compose sets both paths. Keep the volume
-and path settings when restarting the API. Workspace folders are ignored by Git
-and Docker builds.
-
 ## Chats and worker lifecycle
 
-Create a chat with a first message (omit `sessionId`):
+Create a session with `run_task` or an initial `send_message`, selecting a role.
+Continue with the returned `sessionId`. The session stores its original role and
+instructions; changing the role on a follow-up returns HTTP 409. Unknown IDs return
+404. Inspect saved conversations with `list_chats` and `get_chat`.
 
-```bash
-curl -sS http://127.0.0.1:8000/messages \
-  -H 'Content-Type: application/json' \
-  -d '{"agent":"openrouter","message":"Запомни число 327."}'
-```
+AX suspends a user session after saving its answer. DATA snapshots retain workspace
+files, while PostgreSQL retains conversation history. Resume cold-boots the harness
+and reloads the saved conversation. Process memory and background processes are
+not restored in DATA mode. A failed resume keeps the checkpoint for retry.
 
-The reply contains `sessionId`, `container`, and `answer`. To continue, pass
-the returned ID and omit `agent`:
-
-```bash
-curl -sS http://127.0.0.1:8000/messages \
-  -H 'Content-Type: application/json' \
-  -d '{"sessionId":"PASTE_ID_HERE","message":"Какое число я назвал?"}'
-```
-
-The same ID goes to the same running worker. Without an ID, a new chat gets a
-new worker. The session row stores the original role and harness configuration;
-resume uses that saved configuration. Passing a different `role` with the ID
-returns 409, including after restart. An unknown ID returns 404. See running
-containers with:
-
-```bash
-docker ps --filter label=popot.chat_id --format '{{.Names}} {{.Status}}'
-```
-
-`GET /chats` lists saved chats and their IDs, including `createdAt` and
-`expiresAt`. `GET /chats/ID` shows whether a
-worker is running; `DELETE /chats/ID` removes the worker **and** its saved
-history. The API stops idle workers after five minutes by default and stops all
-its workers when it shuts down. Set `ttl_seconds` in a role in
-`config/roles.json` to override the idle lifetime for that role; for example,
-`"ttl_seconds": 600` keeps its worker for ten minutes after the last message.
-`"ttl_seconds": 0` disables idle shutdown and session expiry; `expiresAt` is
-`null` for those sessions. Explicit deletion and orchestrator shutdown still
-stop the worker. Other sessions retain history for seven days by default **from session
-creation**, regardless of later activity or image rebuilds. At expiry, requests
-with that `sessionId` return 404; periodic cleanup deletes the database row and
-stops its worker. The persistent workspace is left intact.
-Before expiry, a request with the same `sessionId` starts a new worker and
-restores the conversation.
-Set `AGENT_CHAT_IDLE_SECONDS` to change the default idle timeout and `AGENT_SESSION_DIR`
-to store history in files when running without Compose. Imported session files
-without `createdAt` use their last `updatedAt` as the earliest known timestamp.
-
-The HTTP harness sends the complete saved conversation to the model. The CLI
-adapter runs a CLI for each turn inside the same container and gives it the
-conversation transcript; the container's process and temporary workspace stay
-alive between turns. Restoring a stopped session restores the transcript;
-temporary workspaces disappear, while the backend role's persistent workspace
-survives. Chats have a 100 KB history
-limit and return an error when they reach it.
+After `suspend_retention_seconds` without continuation, AX deletes the Task and its
+workspace; a later message creates a new Task and restores the transcript only.
+New AX session histories stay available until explicit deletion. `container` in
+responses is the AX Task name; `workspace` is `null` because no host workspace path
+is exposed. See [session lifecycle](ax_local/README.md#suspend-и-продолжение-сессии).
 
 ## Select a model and provider
 
-Profiles live in [config/agents.json](config/agents.json). Put the listed values in `.env`
-**before starting the API**, or export them in the shell. Exported variables
-take priority over `.env`. Choose the profile with `agent` on the first message.
-Missing variables return HTTP 503. The API never accepts a command, image, URL,
-or credential in a task request.
+Set model names and credentials in `.env`, then assign the profile to a role's
+`agent` field in `config/roles.json`. AX creates provider routes for profiles used
+by roles. Missing settings for a selected provider fail API startup. Delegated and
+scheduled work uses the receiving role's own profile.
 
-| Profile | Provider and harness | Variables to set |
+| Profile | Provider | Variables |
 | --- | --- | --- |
 | `openrouter` | OpenRouter chat API | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
 | `ollama` | Local Ollama chat API | `OLLAMA_MODEL` |
 | `ollama_cloud` | Ollama Cloud chat API | `OLLAMA_API_KEY`, `OLLAMA_CLOUD_MODEL` |
-| `ollama_claude` | Claude Code CLI using Ollama Cloud | `OLLAMA_API_KEY`, `OLLAMA_CLAUDE_MODEL` |
-| `ollama_claude_local` | Claude Code CLI using local Ollama | `OLLAMA_CLAUDE_MODEL` |
 | `nous` | Nous inference chat API | `NOUS_API_KEY`, `NOUS_MODEL` |
 | `nvidia_nim` | NVIDIA NIM chat API | `NVIDIA_API_KEY`, `NVIDIA_MODEL` |
 
-For a local model already installed in Ollama:
+The proxy reaches local Ollama through `host.docker.internal:11434`; change the
+profile's `HARNESS_BASE_URL` if your host uses another endpoint. AX uses the HTTP
+harness and does not deploy custom Claude/Hermes CLI images. The old standalone
+Docker profiles `ollama_claude` and `ollama_claude_local` have been removed.
 
-Set `OLLAMA_MODEL=qwen2.5-coder:14b` in `.env` and start the API. Pull the model
-with `ollama pull qwen2.5-coder:14b` first if it is not installed.
+## Local checks
 
-Then call:
-
-```bash
-curl -sS http://127.0.0.1:8000/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"agent":"ollama","task":"Reply with exactly OK"}'
-```
-
-The Docker worker reaches the host Ollama server through
-`host.docker.internal:11434`. Change that URL in `config/agents.json` for a different
-Docker host. For Ollama Cloud, set `OLLAMA_API_KEY` and `OLLAMA_CLOUD_MODEL` and
-choose `ollama_cloud`. To run **Claude Code against Ollama Cloud**, set
-`OLLAMA_API_KEY` to your Ollama API token and choose `ollama_claude`.
-The worker maps it to `ANTHROPIC_AUTH_TOKEN` for Claude Code.
-The `ollama_claude_local` profile uses the local server and the `ollama`
-placeholder token.
-
-The default roles use OpenRouter's `openrouter/free` router, which selects a free
-model compatible with the requested tools.
-Set `OPENROUTER_API_KEY` in `.env` and call:
+Use a Python 3.11+ virtual environment. Install the project dependencies and the
+MCP SDK group from `pyproject.toml`; keep the legacy Fetch/Git servers in a separate
+virtual environment as described above.
 
 ```bash
-curl -sS http://127.0.0.1:8000/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"role":"product_manager","task":"Say only OK."}'
+python -m pip install --upgrade 'pip>=25.1'
+python -m pip install --group mcp
+python - <<'PYTHON'
+import subprocess, sys, tomllib
+with open('pyproject.toml', 'rb') as source:
+    project = tomllib.load(source)['project']
+subprocess.run([sys.executable, '-m', 'pip', 'install',
+                *project['dependencies'], *project['optional-dependencies']['ax']], check=True)
+PYTHON
+python -m unittest discover -s tests -p 'test_*.py'
+python -m unittest discover -s ax_local/tests -p 'test_*.py'
 ```
 
-To use the `nous` profile, set `NOUS_API_KEY` and a model supported by Nous in
-`NOUS_MODEL`, then select `"agent":"nous"` or assign that profile to a role.
-
-The two Claude Code profiles need an image named `popot-agent-claude:local`
-containing the `claude` executable. This repository supplies the generic CLI
-adapter, but does not install Claude Code or build that image. Build your own
-image with the CLI and copy the `popot_agents` package into `/app`; use UID 10001
-and set `/app` as its working directory. Change the profile's `image` and
-`command` in `config/agents.json` for any other harness or CLI. Rebuild custom
-images that still contain the old flat Python files before using them with this
-version. `{task}` and `{model}` are replaced as individual arguments;
-without `{task}`, the worker sends the task on stdin. The CLI's stdout becomes
-the answer. A CLI can run multiple steps or use tools; the included HTTP harness
-uses the global `model.default_max_tool_rounds` limit from `config/runtime.json`.
-Any role can override it with its optional `max_tool_rounds` field.
-
-The `nous` HTTP profile uses a Nous Portal API key directly. This is separate
-from Hermes Agent's Portal integration, which uses OAuth and refreshes its own
-token. To run a full Hermes agent, supply an authenticated Hermes CLI image to
-the same worker adapter.
-
-## Worker contract and limits
-
-The `/tasks` and `/messages` APIs run a conversation process in each container
-and talk to it over a local Unix socket. A task becomes the first saved message
-in that conversation. The worker stays live for five minutes of inactivity by default;
-later messages with its `sessionId` reuse it.
-The runner gives each worker a read-only root filesystem, a writable workspace
-and `/tmp`, CPU/memory/process limits, and a 60-second default deadline (180 seconds
-for the Claude Code profiles and backend role). Only profiles that
-need a model endpoint have Docker bridge networking. Credentials are forwarded
-from named host environment variables with Docker `--env NAME`; they are not
-stored in `config/agents.json` or placed in the Docker command arguments.
-
-Inside Compose the API listens on `0.0.0.0:8000`, while the published host port
-is bound to `127.0.0.1`. The orchestrator has access to the Docker socket,
-which grants it broad control over the host's Docker daemon. Keep the API local
-and allow only trusted callers. Running
-`python -m popot_agents.orchestrator.main` directly still listens on
-`127.0.0.1:8000` by default. `API_HOST`, `API_PORT`,
-`AGENT_ENV_FILE`, and `AGENT_PROFILES_FILE` override the listener, env file,
-and profile file. `AGENT_ROLES_FILE` overrides the roles file. Edit
-`timeout_seconds` in a profile if its model or CLI needs more than the shared 900-second default.
-The API returns HTTP 504 on timeout and HTTP 502 on worker failure. It never
-mounts the host repository into the worker; only the selected role's workspace
-is mounted. A role with Bash and internet can execute downloaded code inside
-its Docker container, so configure it only for trusted API callers and use a
-dedicated model credential.
+Live cluster, provider and database checks require their documented opt-in
+settings and services. See [AX verification](ax_local/README.md) for these checks.

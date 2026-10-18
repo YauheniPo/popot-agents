@@ -1,11 +1,10 @@
-"""HTTP orchestrator for tasks and resumable Docker chat workers."""
+"""HTTP API and profile validation for AX tasks and resumable sessions."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import threading
@@ -15,22 +14,20 @@ import weakref
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from popot_agents.tools import TOOL_SCHEMAS
 from popot_agents.progress import is_progress_message, emit_progress, observe_progress, format_progress
-from popot_agents.role_env import selected_role_env, validate_role_env_names
+from popot_agents.role_env import validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
 from .session_store import SessionStore
-from .docker_config import get_docker_config
 
 
 MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
 MAX_TASK_LENGTH = RUNTIME["limits"]["message_chars"]
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CHAT_WORKER_MODULE = "popot_agents.worker.session_worker"
 LOG_SECRET_FIELDS = {"api_key", "apikey", "authorization", "cookie", "password",
                      "secret", "token", "access_token", "refresh_token"}
 
@@ -68,23 +65,17 @@ class WorkerCapacityTimeout(AgentRunError):
     """No worker slot became available before the admission deadline."""
 
 
-class DockerAgentRunner:
+class AgentProfile:
+    """Validated provider settings; AX owns worker creation and resources."""
+
     def __init__(
         self,
-        image: str = "popot-agent-worker:local",
-        timeout_seconds: int = RUNTIME["timeouts"]["turn_seconds"],
-        network: str = "none",
         env_names: list[str] | None = None,
-        command: list[str] | None = None,
         environment: dict[str, str] | None = None,
         model_env: str | None = None,
-        env_aliases: dict[str, str] | None = None,
-        session_mode: str = "cli",
+        session_mode: str = "http",
         model_parameters: dict | None = None,
-        resources: dict | None = None,
     ) -> None:
-        if network not in {"none", "bridge"}:
-            raise ValueError("network must be 'none' or 'bridge'")
         if session_mode not in {"cli", "http"}:
             raise ValueError("session_mode must be 'cli' or 'http'")
         for name in env_names or []:
@@ -92,339 +83,16 @@ class DockerAgentRunner:
                 raise ValueError(f"invalid environment variable name: {name}")
         if model_env and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", model_env):
             raise ValueError("invalid model environment variable name")
-        for target, source in (env_aliases or {}).items():
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target) or source not in (env_names or []):
-                raise ValueError("environment aliases must use forwarded variable names")
         model_parameters = validate_model_parameters(
             {} if model_parameters is None else model_parameters, "model_parameters")
-        resource_fields = {"memory", "cpus", "pids_limit", "tmpfs_mb", "workspace_tmpfs_mb"}
-        if resources is not None and (not isinstance(resources, dict)
-                                      or set(resources) - resource_fields):
-            raise ValueError("resources has unknown fields")
-        for key, value in (resources or {}).items():
-            if key == "memory":
-                valid = isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*[kmg]", value)
-            elif key == "cpus":
-                valid = type(value) in (int, float) and value > 0
-            else:
-                valid = type(value) is int and value > 0
-            if not valid:
-                raise ValueError(f"resources.{key} is invalid")
-        self.image = image
-        self.timeout_seconds = timeout_seconds
-        self.network = network
         self.env_names = env_names or []
-        self.command = command
         self.environment = environment or {}
         self.model_env = model_env
-        self.env_aliases = env_aliases or {}
         self.session_mode = session_mode
         self.model_parameters = model_parameters
-        self.resources = resources or {}
-
-    @staticmethod
-    def workspace_path(container_name: str, role_config: dict | None,
-                       create: bool = False) -> Path | None:
-        permissions = (role_config or {}).get("permissions", {})
-        if permissions.get("workspace") != "persistent":
-            return None
-        root = Path(os.getenv("AGENT_WORKSPACE_DIR", str(PROJECT_ROOT / ".workspaces"))).resolve()
-        path = root / container_name
-        if create:
-            root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.chmod(root, 0o700)
-            path.mkdir(mode=0o770, exist_ok=True)
-            if os.geteuid() == 0:
-                os.chown(path, -1, 10001)
-            os.chmod(path, 0o770)
-        return path
-
-    @staticmethod
-    def workspace_host_path(container_name: str, role_config: dict | None) -> Path | None:
-        if (role_config or {}).get("permissions", {}).get("workspace") != "persistent":
-            return None
-        host_root = os.getenv("AGENT_WORKSPACE_HOST_DIR")
-        if host_root:
-            root = Path(host_root)
-            if not root.is_absolute():
-                raise ValueError("AGENT_WORKSPACE_HOST_DIR must be absolute")
-            return root / container_name
-        return DockerAgentRunner.workspace_path(container_name, role_config)
-
-    def _docker_command(self, container_name: str, detached: bool,
-                        role_config: dict | None = None) -> list[str]:
-        role_env_names = [name for name in (role_config or {}).get("env_names", [])
-                          if name in RUNTIME["role_env_names"]]
-        try:
-            selected_role_env(role_env_names)
-        except ValueError as exc:
-            raise AgentConfigurationError(str(exc)) from exc
-        for name in self.env_names:
-            if not os.getenv(name):
-                raise AgentConfigurationError(f"required environment variable is missing: {name}")
-        if self.model_env and not os.getenv(self.model_env):
-            raise AgentConfigurationError(f"required environment variable is missing: {self.model_env}")
-        workspace = self.workspace_path(container_name, role_config, create=True)
-        host_workspace = self.workspace_host_path(container_name, role_config)
-        configured_tools = set((role_config or {}).get("tools", []))
-        resources = {**get_docker_config(), **self.resources}
-        isolate_tools = bool(configured_tools & {"bash", "git_clone"}
-                             or (role_config or {}).get("mcpServers"))
-        command = [
-            "docker", "run", "--rm", "--detach" if detached else "--interactive", "--init",
-            "--name", container_name,
-            "--network", self.network, "--read-only", "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges", "--pids-limit", str(resources["pids_limit"]),
-            "--memory", resources["memory"], "--cpus", str(resources["cpus"]),
-            "--tmpfs", f"/tmp:rw,uid=10001,gid=10001,size={resources['tmpfs_mb']}m",
-            "--env", "HOME=/workspace",
-            "--env", "XDG_CACHE_HOME=/workspace/.cache",
-            "--env", "XDG_CONFIG_HOME=/workspace/.config",
-        ]
-        if workspace:
-            command.extend(["--mount", f"type=bind,src={host_workspace},dst=/workspace"])
-        else:
-            command.extend(["--tmpfs", f"/workspace:rw,uid=10001,gid=10001,size={resources['workspace_tmpfs_mb']}m"])
-        if isolate_tools:
-            command.extend(["--user", "0:10001", "--cap-add", "SETUID",
-                            "--cap-add", "SETGID", "--tmpfs",
-                            "/run:rw,uid=0,gid=0,mode=0700,size=1m"])
-        for name in self.env_names:
-            command.extend(["--env", name])
-        for name in role_env_names:
-            if name not in self.env_names:
-                command.extend(["--env", name])
-        environment = dict(self.environment)
-        if self.command is not None:
-            environment["HARNESS_COMMAND_JSON"] = json.dumps(self.command)
-        if self.env_aliases:
-            environment["HARNESS_ENV_ALIASES_JSON"] = json.dumps(self.env_aliases)
-        if self.model_env:
-            environment["HARNESS_MODEL"] = os.environ[self.model_env]
-        turn_timeout = (role_config or {}).get("timeout_seconds", self.timeout_seconds)
-        environment["HARNESS_TURN_TIMEOUT_SECONDS"] = str(max(RUNTIME["timeouts"]["min_turn_seconds"],
-            turn_timeout - RUNTIME["timeouts"]["turn_response_margin_seconds"]))
-        if self.model_parameters:
-            environment["HARNESS_MODEL_PARAMETERS_JSON"] = json.dumps(self.model_parameters)
-        environment["HARNESS_SESSION_MODE"] = self.session_mode
-        if isolate_tools:
-            environment["HARNESS_SOCKET_PATH"] = "/run/chat.sock"
-        if role_config is not None:
-            environment["HARNESS_ROLE_JSON"] = json.dumps(role_config, ensure_ascii=False)
-            environment["HARNESS_TOOL_ENV_NAMES_JSON"] = json.dumps(role_env_names)
-        for name, value in environment.items():
-            command.extend(["--env", f"{name}={value}"])
-        return command
-
-    def __call__(self, task: str, role_config: dict | None = None) -> dict[str, str]:
-        container_name = f"popot-agent-{uuid.uuid4().hex[:12]}"
-        command = self._docker_command(container_name, detached=False, role_config=role_config)
-        command.append(self.image)
-        timeout_seconds = (role_config or {}).get("timeout_seconds", self.timeout_seconds)
-        model_env = self.model_env or "none"
-        started_at = time.monotonic()
-        print(f"worker {container_name} started model_env={model_env} timeout={timeout_seconds}s",
-              file=sys.stderr, flush=True)
-        try:
-            completed = subprocess.run(
-                command,
-                input=json.dumps({"task": task}),
-                text=True,
-                capture_output=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            print(f"worker {container_name} timed out after {time.monotonic() - started_at:.1f}s",
-                  file=sys.stderr, flush=True)
-            try:
-                subprocess.run(
-                    ["docker", "rm", "-f", container_name],
-                    capture_output=True, timeout=get_docker_config()["remove_timeout_seconds"], check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-            raise
-        if completed.returncode != 0:
-            print(f"worker {container_name} failed exit={completed.returncode} "
-                  f"after {time.monotonic() - started_at:.1f}s", file=sys.stderr, flush=True)
-            detail = completed.stderr.strip().splitlines()
-            raise AgentRunError(detail[-1] if detail else "agent container failed")
-        try:
-            result = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise AgentRunError("agent container returned invalid JSON") from exc
-        if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
-            raise AgentRunError("agent container returned no answer")
-        print(f"worker {container_name} completed after {time.monotonic() - started_at:.1f}s",
-              file=sys.stderr, flush=True)
-        response = {"answer": result["answer"]}
-        workspace = self.workspace_host_path(container_name, role_config)
-        if workspace:
-            response["workspace"] = str(workspace)
-        return response
-
-    def start_chat(self, chat_id: str, role_config: dict | None = None) -> DockerChat:
-        container_name = f"popot-chat-{chat_id}"
-        command = self._docker_command(container_name, detached=True, role_config=role_config)
-        command.extend(["--env", f"HARNESS_CHAT_ID={chat_id}",
-                        "--label", f"popot.chat_id={chat_id}", self.image,
-                        "python", "-u", "-m", CHAT_WORKER_MODULE, "serve"])
-        started = subprocess.run(command, text=True, capture_output=True,
-                                 timeout=get_docker_config()["start_timeout_seconds"], check=False)
-        if started.returncode != 0:
-            existing = subprocess.run(
-                ["docker", "inspect", "--format",
-                 '{{ index .Config.Labels "popot.chat_id" }}', container_name],
-                text=True, capture_output=True, timeout=get_docker_config()["inspect_timeout_seconds"], check=False,
-            )
-            if existing.returncode != 0 or existing.stdout.strip() != chat_id:
-                detail = started.stderr.strip().splitlines()
-                raise AgentRunError(detail[-1] if detail else "chat container failed to start")
-        chat = DockerChat(container_name,
-                          (role_config or {}).get("timeout_seconds", self.timeout_seconds),
-                          self.workspace_host_path(container_name, role_config))
-        for _ in range(get_docker_config()["startup_probe_attempts"]):
-            ready = subprocess.run(
-                ["docker", "exec", container_name, "python", "-m", CHAT_WORKER_MODULE, "ping"],
-                text=True, capture_output=True, timeout=get_docker_config()["probe_timeout_seconds"], check=False,
-            )
-            if ready.returncode == 0:
-                try:
-                    if json.loads(ready.stdout).get("status") == "ok":
-                        print(f"chat worker {container_name} ready", file=sys.stderr, flush=True)
-                        return chat
-                except json.JSONDecodeError:
-                    pass
-            time.sleep(get_docker_config()["startup_probe_interval_seconds"])
-        chat.close()
-        raise AgentRunError("chat worker did not become ready")
 
 
-class DockerChat:
-    def __init__(self, container_name: str, timeout_seconds: int,
-                 workspace_path: Path | None = None) -> None:
-        self.container_name = container_name
-        self.timeout_seconds = timeout_seconds
-        self.workspace_path = str(workspace_path) if workspace_path else None
-        self.closed = False
-        self._last_log_lines: list[str] = []
-
-    def _capture_logs(self) -> None:
-        log_dir = os.getenv("AGENT_WORKER_LOG_DIR")
-        match = re.fullmatch(r"popot-chat-([0-9a-f]{16})", self.container_name)
-        if not log_dir or match is None:
-            return
-        try:
-            completed = subprocess.run(
-                ["docker", "logs", "--tail", str(RUNTIME["logging"]["worker_log_tail_lines"]),
-                 self.container_name],
-                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=get_docker_config()["inspect_timeout_seconds"], check=False,
-            )
-            if completed.returncode != 0:
-                return
-            lines = completed.stdout.splitlines(keepends=True)
-            overlap = 0
-            for count in range(min(len(self._last_log_lines), len(lines)), 0, -1):
-                if self._last_log_lines[-count:] == lines[:count]:
-                    overlap = count
-                    break
-            self._last_log_lines = lines
-            addition = "".join(lines[overlap:]).encode("utf-8")
-            if not addition:
-                return
-            directory = Path(log_dir)
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            path = directory / f"{match.group(1)}.log"
-            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(path, flags, 0o600)
-            with os.fdopen(descriptor, "r+b") as file:
-                existing = file.read()
-                content = (existing + addition)[-RUNTIME["logging"]["worker_log_max_bytes"]:]
-                content = content.decode("utf-8", errors="ignore").encode("utf-8")
-                file.seek(0)
-                file.write(content)
-                file.truncate()
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            print(f"worker log capture failed for {self.container_name}: {type(exc).__name__}",
-                  file=sys.stderr, flush=True)
-
-    def is_alive(self) -> bool:
-        if self.closed:
-            return False
-        try:
-            completed = subprocess.run(
-                ["docker", "exec", self.container_name,
-                 "python", "-m", CHAT_WORKER_MODULE, "ping"],
-                text=True, capture_output=True, timeout=get_docker_config()["probe_timeout_seconds"], check=False,
-            )
-            return completed.returncode == 0 and json.loads(completed.stdout).get("status") == "ok"
-        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-            return False
-
-    def restore(self, messages: list[dict[str, str]]) -> None:
-        completed = subprocess.run(
-            ["docker", "exec", "--interactive", self.container_name,
-             "python", "-m", CHAT_WORKER_MODULE, "restore"],
-            input=json.dumps({"messages": messages}, ensure_ascii=False),
-            text=True, capture_output=True, timeout=get_docker_config()["restore_timeout_seconds"], check=False,
-        )
-        if completed.returncode != 0:
-            raise AgentRunError("chat worker could not restore history")
-        try:
-            result = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise AgentRunError("chat worker returned invalid restore response") from exc
-        if result.get("status") != "ok":
-            raise AgentRunError(result.get("error", "chat worker could not restore history"))
-
-    def send(self, message: str) -> dict[str, str]:
-        try:
-            completed = subprocess.run(
-                ["docker", "exec", "--interactive", self.container_name,
-                 "python", "-m", CHAT_WORKER_MODULE, "message"],
-                input=json.dumps({"message": message}, ensure_ascii=False),
-                text=True, capture_output=True, timeout=self.timeout_seconds, check=False,
-            )
-        finally:
-            self._capture_logs()
-        if completed.returncode != 0:
-            raise AgentRunError("chat worker is unavailable")
-        try:
-            result = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise AgentRunError("chat worker returned invalid JSON") from exc
-        if isinstance(result, dict) and isinstance(result.get("error"), str):
-            raise AgentRunError(result["error"])
-        if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
-            raise AgentRunError("chat worker returned no answer")
-        return {"answer": result["answer"]}
-
-    def close(self) -> None:
-        if not self.closed:
-            self.closed = True
-            self._capture_logs()
-            try:
-                subprocess.run(["docker", "rm", "-f", self.container_name],
-                               text=True, capture_output=True,
-                               timeout=get_docker_config()["remove_timeout_seconds"], check=False)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-
-
-def remove_worker_log(session_id: str) -> None:
-    log_dir = os.getenv("AGENT_WORKER_LOG_DIR")
-    if not log_dir or re.fullmatch(r"[0-9a-f]{16}", session_id) is None:
-        return
-    try:
-        (Path(log_dir) / f"{session_id}.log").unlink(missing_ok=True)
-    except OSError as exc:
-        print(f"worker log cleanup failed for {session_id}: {type(exc).__name__}",
-              file=sys.stderr, flush=True)
-
-
-def load_agents(path: str) -> dict[str, DockerAgentRunner]:
+def load_agents(path: str) -> dict[str, AgentProfile]:
     with open(path, encoding="utf-8") as file:
         profiles = json.load(file)
     if not isinstance(profiles, dict) or not profiles:
@@ -433,11 +101,11 @@ def load_agents(path: str) -> dict[str, DockerAgentRunner]:
     for name, profile in profiles.items():
         if not isinstance(profile, dict):
             raise ValueError(f"invalid agent profile: {name}")
-        agents[name] = DockerAgentRunner(**profile)
+        agents[name] = AgentProfile(**profile)
     return agents
 
 
-def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dict[str, dict]:
+def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str, dict]:
     with open(path, encoding="utf-8") as file:
         roles = json.load(file)
     if not isinstance(roles, dict):
@@ -520,8 +188,6 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
         if {"bash", "read_file", "write_file", "git_clone", "download_file"} & set(tools) \
                 and permissions.get("workspace") != "persistent":
             raise ValueError(f"role {name} needs a persistent workspace")
-        if permissions.get("internet") and agents[agent].network != "bridge":
-            raise ValueError(f"role {name} needs a networked agent profile")
         timeout = config.get("timeout_seconds", RUNTIME["timeouts"]["turn_seconds"])
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= RUNTIME["timeouts"]["max_turn_seconds"]:
             raise ValueError(f"role {name} has invalid timeout_seconds")
@@ -592,7 +258,7 @@ def load_dotenv(path: str | Path) -> None:
 @dataclass
 class ChatRecord:
     agent: str
-    worker: DockerChat
+    worker: Any
     messages: list[dict[str, str]]
     role: str | None = None
     role_config: dict | None = None
@@ -609,15 +275,13 @@ class ChatServer(ThreadingHTTPServer):
     daemon_threads = False
 
     def __init__(self, address, handler, session_dir: str | Path, idle_seconds: int,
-                 store=None, *, queued_admission: bool = False):
+                 store=None):
         self.store = store if store is not None else SessionStore(session_dir)
         self.live: dict[str, ChatRecord] = {}
         self.live_lock = threading.RLock()
         self.session_locks = weakref.WeakValueDictionary()
         self.session_locks_guard = threading.Lock()
         self.worker_managers = ()
-        self.task_slots = (None if queued_admission else
-                           threading.BoundedSemaphore(get_docker_config()["max_concurrent_tasks"]))
         self.pending_expired: set[str] = set()
         self.idle_seconds = idle_seconds
         self.last_prune = 0.0
@@ -662,7 +326,6 @@ class ChatServer(ThreadingHTTPServer):
                     record = self.live.pop(session_id, None)
                 if record is not None:
                     record.worker.close()
-                remove_worker_log(session_id)
             finally:
                 lock.release()
         with self.live_lock:
@@ -700,15 +363,13 @@ class ChatServer(ThreadingHTTPServer):
 def create_server(
     agents: Mapping[str, Callable[[str], dict[str, str]]],
     host: str = "127.0.0.1",
-    port: int = 8000,
+    port: int = 8002,
     session_dir: str | Path | None = None,
     idle_seconds: int = RUNTIME["sessions"]["default_idle_seconds"],
     roles: Mapping[str, dict] | None = None,
     store=None,
 ) -> ChatServer:
     roles = roles or {}
-    queued_admission = bool(agents) and all(
-        getattr(runner, "queues_worker_start", False) for runner in agents.values())
     class Handler(BaseHTTPRequestHandler):
         def _log_request(self, body) -> None:
             self._request_id = uuid.uuid4().hex[:12]
@@ -723,14 +384,7 @@ def create_server(
         def _workspace(self, saved: dict, live: ChatRecord | None = None) -> str | None:
             if live is not None:
                 return getattr(live.worker, "workspace_path", None)
-            runner = agents.get(saved["agent"])
-            if runner is None or not hasattr(runner, "workspace_path"):
-                return None
-            container_name = f"popot-chat-{saved['sessionId']}"
-            local_path = runner.workspace_path(container_name, saved.get("roleConfig"))
-            if not local_path or not local_path.exists():
-                return None
-            return str(runner.workspace_host_path(container_name, saved.get("roleConfig")))
+            return None
 
         def _progress(self, message: str) -> None:
             if not is_progress_message(message) or getattr(self, '_progress_broken', False):
@@ -1034,12 +688,6 @@ def create_server(
             payload = self._read_payload()
             if payload is None:
                 return
-            acquired = False
-            if not queued_admission:
-                acquired = self.server.task_slots.acquire(blocking=False)
-            if not queued_admission and not acquired:
-                self._reply(503, {"error": "orchestrator is busy; retry later"})
-                return
             try:
                 streaming = self.headers.get('Accept') == 'application/x-ndjson'
                 with observe_progress(self._progress if streaming else None):
@@ -1051,7 +699,7 @@ def create_server(
             except subprocess.TimeoutExpired:
                 self._reply(504, {"error": "agent timed out"})
             except FileNotFoundError:
-                self._reply(503, {"error": "Docker CLI is not installed"})
+                self._reply(503, {"error": "AX runtime executable or file is unavailable"})
             except AgentConfigurationError as exc:
                 self._reply(503, {"error": str(exc)})
             except (WorkerCapacityTimeout, AgentResumeError) as exc:
@@ -1062,9 +710,6 @@ def create_server(
                 pass
             except OSError:
                 self._reply(500, {"error": "session storage failed"})
-            finally:
-                if acquired:
-                    self.server.task_slots.release()
 
         def do_DELETE(self) -> None:
             self._log_request(None)
@@ -1095,50 +740,11 @@ def create_server(
             if record is not None:
                 record.worker.close()
             self.server.store.delete(session_id)
-            remove_worker_log(session_id)
             self._reply(200, {"status": "closed"})
 
     directory = session_dir or PROJECT_ROOT / ".sessions"
-    server = ChatServer((host, port), Handler, directory, idle_seconds, store,
-                        queued_admission=queued_admission)
+    server = ChatServer((host, port), Handler, directory, idle_seconds, store)
     server.worker_managers = tuple({id(runner): runner for runner in agents.values()
         if getattr(runner, "queues_worker_start", False)
         and hasattr(runner, "shutdown_worker_queue")}.values())
     return server
-
-
-def main() -> None:
-    load_dotenv(os.getenv("AGENT_ENV_FILE", str(PROJECT_ROOT / ".env")))
-    host = os.getenv("API_HOST", "127.0.0.1")
-    port = int(os.getenv("API_PORT", "8000"))
-    agents = load_agents(os.getenv("AGENT_PROFILES_FILE", str(PROJECT_ROOT / "config" / "agents.json")))
-    roles = load_roles(os.getenv("AGENT_ROLES_FILE", str(PROJECT_ROOT / "config" / "roles.json")), agents)
-    store = None
-    if os.getenv("AGENT_SESSION_BACKEND") == "postgres":
-        from .postgres_session_store import PostgresSessionStore
-        store = PostgresSessionStore()
-        if os.getenv("AGENT_LEGACY_SESSION_DIR"):
-            store.import_legacy(os.environ["AGENT_LEGACY_SESSION_DIR"])
-    server = create_server(
-        agents, host, port,
-        session_dir=os.getenv("AGENT_SESSION_DIR", str(PROJECT_ROOT / ".sessions")),
-        idle_seconds=int(os.getenv("AGENT_CHAT_IDLE_SECONDS", str(RUNTIME["sessions"]["default_idle_seconds"]))),
-        roles=roles,
-        store=store,
-    )
-    print(f"Listening on http://{host}:{port}", flush=True)
-    def stop_on_sigterm(_signum, _frame):
-        raise KeyboardInterrupt
-
-    previous_handler = signal.signal(signal.SIGTERM, stop_on_sigterm)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        signal.signal(signal.SIGTERM, previous_handler)
-        server.server_close()
-
-
-if __name__ == "__main__":
-    main()

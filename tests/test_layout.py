@@ -8,38 +8,59 @@ from pathlib import Path
 
 
 class ProjectLayoutTests(unittest.TestCase):
+    def test_profiles_are_configuration_without_a_standalone_runner(self):
+        from popot_agents.orchestrator.main import load_agents
+
+        profiles = load_agents(Path(__file__).resolve().parents[1] / 'config/agents.json')
+        for name, profile in profiles.items():
+            with self.subTest(profile=name):
+                self.assertFalse(callable(profile))
+                self.assertFalse(hasattr(profile, 'start_chat'))
+                self.assertFalse(hasattr(profile, 'network'))
+                self.assertFalse(hasattr(profile, 'image'))
+                self.assertEqual(profile.session_mode, 'http')
+                self.assertIn('HARNESS_BASE_URL', profile.environment)
+
+    def test_standalone_docker_deployment_is_removed(self):
+        root = Path(__file__).resolve().parents[1]
+        for path in ('popot_agents/compose.yaml', 'popot_agents/config.json',
+                     'popot_agents/docker/worker.Dockerfile',
+                     'popot_agents/docker/orchestrator.Dockerfile',
+                     'popot_agents/orchestrator/docker_config.py'):
+            with self.subTest(path=path):
+                self.assertFalse((root / path).exists())
+
     @unittest.skipUnless(shutil.which('docker'), 'Docker Compose is required')
-    def test_docker_compose_keeps_shared_paths_and_existing_project_identity(self):
+    def test_ax_compose_uses_shared_paths_without_docker_socket(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             env_file = Path(directory) / '.env'
             env_file.write_text('POPOT_DB_PASSWORD=layout-test\n')
             result = subprocess.run(
                 ['docker', 'compose', '--env-file', str(env_file), '-f',
-                 str(root / 'popot_agents/compose.yaml'), 'config',
+                 str(root / 'ax_local/compose.yaml'), 'config',
                  '--format', 'json', '--no-env-resolution'], cwd=directory,
                 env={key: value for key, value in os.environ.items()
                      if not key.startswith('COMPOSE_')},
                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
-        self.assertEqual(config['name'], 'popot-agents')
+        self.assertEqual(config['name'], 'popot-ax-local')
         services = config['services']
+        self.assertEqual(set(services), {'db', 'api', 'mcp-server'})
         for name, dockerfile in {
-            'worker-image': 'popot_agents/docker/worker.Dockerfile',
-            'orchestrator': 'popot_agents/docker/orchestrator.Dockerfile',
+            'api': 'ax_local/docker/api.Dockerfile',
             'mcp-server': 'docker/mcp.Dockerfile',
         }.items():
             with self.subTest(service=name):
                 self.assertEqual(services[name]['build']['context'], str(root))
                 self.assertEqual(services[name]['build']['dockerfile'], dockerfile)
                 self.assertTrue((root / dockerfile).is_file())
-                self.assertEqual(services[name]['develop']['watch'][0]['path'], str(root))
-        orchestrator = services['orchestrator']
-        self.assertEqual(orchestrator['env_file'][0]['path'], str(root / '.env'))
-        mounts = {item['target']: item['source'] for item in orchestrator['volumes']}
-        self.assertEqual(mounts['/data/legacy-sessions'], str(root / '.sessions'))
-        self.assertFalse((root / 'compose.yaml').exists())
+        self.assertEqual(services['api']['env_file'][0]['path'], str(root / '.env'))
+        for service in services.values():
+            for mount in service.get('volumes', []):
+                self.assertNotIn('docker.sock', mount.get('source', ''))
+                self.assertNotIn('docker.sock', mount['target'])
 
     def test_orchestrator_loads_profiles_and_roles_from_config_directory(self):
         from popot_agents.orchestrator.main import load_agents, load_roles

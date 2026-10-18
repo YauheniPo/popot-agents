@@ -1,6 +1,5 @@
 import io
 import json
-import subprocess
 import tempfile
 import threading
 import time
@@ -14,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from popot_agents.orchestrator.main import AgentRunError, ChatServer, DockerAgentRunner, create_server
+from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
 from popot_agents.orchestrator.session_store import SessionStore
 from popot_agents.worker.session_worker import Conversation
 
@@ -95,31 +94,6 @@ class TaskSessionTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             handler.do_GET()
 
-    def test_busy_orchestrator_rejects_task_without_starting_worker(self):
-        runner = FakeRunner()
-        with patch("popot_agents.orchestrator.main.ChatServer") as server_class:
-            create_server({"test_agent": runner})
-        handler_class = server_class.call_args.args[1]
-        slots = threading.BoundedSemaphore(1)
-        slots.acquire()
-        handler = handler_class.__new__(handler_class)
-        handler.client_address = ("192.0.2.7", 1234)
-        handler.command = "POST"
-        handler.path = "/tasks"
-        handler.request_version = "HTTP/1.1"
-        handler.requestline = "POST /tasks HTTP/1.1"
-        handler.server = SimpleNamespace(task_slots=slots)
-        handler.headers = Message()
-        body = b'{"agent":"test_agent","task":"hello"}'
-        handler.headers["Content-Type"] = "application/json"
-        handler.headers["Content-Length"] = str(len(body))
-        handler.rfile = io.BytesIO(body)
-        handler.wfile = io.BytesIO()
-        with redirect_stderr(io.StringIO()):
-            handler.do_POST()
-        self.assertIn(b"503 Service Unavailable", handler.wfile.getvalue())
-        self.assertEqual(runner.chats, [])
-
     def test_cleanup_does_not_wait_for_active_session(self):
         session_id = "a" * 16
         chat = FakeChat("worker-" + session_id)
@@ -161,7 +135,7 @@ class TaskSessionTests(unittest.TestCase):
             server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
                                      last_prune=time.monotonic(), live_lock=threading.RLock(),
                                      session_lock=lambda _session_id: lock,
-                                     task_slots=threading.BoundedSemaphore(4), pending_expired=set())
+                                     pending_expired=set())
             result = []
 
             def post():
@@ -201,7 +175,7 @@ class TaskSessionTests(unittest.TestCase):
             server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
                                      last_prune=time.monotonic(), live_lock=threading.RLock(),
                                      session_lock=lambda _session_id: lock,
-                                     task_slots=threading.BoundedSemaphore(4), pending_expired=set())
+                                     pending_expired=set())
 
             def post(payload):
                 return self._post_to_handler(handler_class, server, payload)
@@ -247,7 +221,6 @@ class TaskSessionTests(unittest.TestCase):
             server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
                                      last_prune=time.monotonic(), live_lock=threading.RLock(),
                                      session_lock=lambda _session_id: threading.RLock(),
-                                     task_slots=threading.BoundedSemaphore(4),
                                      pending_expired=set())
 
             def post(role):
@@ -311,7 +284,6 @@ class TaskSessionTests(unittest.TestCase):
             server = SimpleNamespace(store=SessionStore(directory), live={}, idle_seconds=300,
                                      last_prune=time.monotonic(), live_lock=threading.RLock(),
                                      session_lock=lambda _session_id: threading.RLock(),
-                                     task_slots=threading.BoundedSemaphore(4),
                                      pending_expired=set())
 
             def post(path, payload):
@@ -647,84 +619,6 @@ class ConversationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "history"):
                 conversation.ask("hello")
             self.assertEqual(conversation.messages, [])
-
-
-class DockerChatTests(unittest.TestCase):
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_worker_log_is_saved_after_each_turn_without_duplicate_lines(self, run):
-        from popot_agents.orchestrator.main import DockerChat
-
-        answer = SimpleNamespace(returncode=0, stdout='{"answer":"ok"}', stderr="")
-        first = 'first\n'
-        second = 'first\nsecond\n'
-        run.side_effect = [
-            answer, SimpleNamespace(returncode=0, stdout=first),
-            answer, SimpleNamespace(returncode=0, stdout=second),
-            SimpleNamespace(returncode=0, stdout=second),
-            SimpleNamespace(returncode=0, stdout=""),
-        ]
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-                "os.environ", {"AGENT_WORKER_LOG_DIR": directory}):
-            chat = DockerChat("popot-chat-abc123abc123abcd", 10)
-            chat.send("one")
-            path = Path(directory) / "abc123abc123abcd.log"
-            self.assertEqual(path.read_text(), first)
-            chat.send("two")
-            chat.close()
-            self.assertEqual(path.read_text(), second)
-
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_worker_logs_survive_container_removal(self, run):
-        from popot_agents.orchestrator.main import DockerChat
-
-        run.side_effect = [
-            SimpleNamespace(returncode=0, stdout='{"event":"model_request"}\n', stderr=""),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-        ]
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-                "os.environ", {"AGENT_WORKER_LOG_DIR": directory}):
-            DockerChat("popot-chat-abc123abc123abcd", 10).close()
-            log_file = Path(directory) / "abc123abc123abcd.log"
-            self.assertIn('"event":"model_request"', log_file.read_text())
-        self.assertEqual(run.call_args_list[0].args[0][:2], ["docker", "logs"])
-        self.assertEqual(run.call_args_list[1].args[0],
-                         ["docker", "rm", "-f", "popot-chat-abc123abc123abcd"])
-
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_starts_one_container_then_executes_messages_and_stops_it(self, run):
-        run.side_effect = [
-            subprocess.CompletedProcess([], 0, "container-id\n", ""),
-            subprocess.CompletedProcess([], 0, '{"status":"ok"}', ""),
-            subprocess.CompletedProcess([], 0, '{"status":"ok"}', ""),
-            subprocess.CompletedProcess([], 0, '{"answer":"hello"}', ""),
-            subprocess.CompletedProcess([], 0, "", ""),
-        ]
-        runner = DockerAgentRunner(network="bridge")
-        output = io.StringIO()
-        with redirect_stderr(output):
-            chat = runner.start_chat("abc123")
-        self.assertIn("chat worker popot-chat-abc123 ready", output.getvalue())
-        chat.restore([{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}])
-        self.assertEqual(chat.send("hi"), {"answer": "hello"})
-        chat.close()
-        commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(commands[0][:3], ["docker", "run", "--rm"])
-        self.assertIn("--detach", commands[0])
-        self.assertIn("popot.chat_id=abc123", commands[0])
-        self.assertEqual(commands[2][:3], ["docker", "exec", "--interactive"])
-        self.assertEqual(commands[3][:3], ["docker", "exec", "--interactive"])
-        self.assertEqual(commands[4][:3], ["docker", "rm", "-f"])
-
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_reconnects_owned_container_after_api_restart(self, run):
-        run.side_effect = [
-            subprocess.CompletedProcess([], 125, "", "container name already in use"),
-            subprocess.CompletedProcess([], 0, "abc123\n", ""),
-            subprocess.CompletedProcess([], 0, '{"status":"ok"}', ""),
-        ]
-        chat = DockerAgentRunner(network="bridge").start_chat("abc123")
-        self.assertEqual(chat.container_name, "popot-chat-abc123")
-        self.assertEqual(run.call_args_list[1].args[0][:2], ["docker", "inspect"])
 
 
 if __name__ == "__main__":

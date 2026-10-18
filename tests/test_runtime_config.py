@@ -29,19 +29,15 @@ class RuntimeConfigTests(unittest.TestCase):
 
     def test_expanded_budget_reaches_worker_and_ax_transport(self):
         from popot_agents.runtime_config import RUNTIME
-        from popot_agents.orchestrator.main import DockerAgentRunner, load_agents
+        from ax_local.api.ax_runner import AxAgentRunner
         from ax_local.config import AX_CONFIG
-        command = DockerAgentRunner()._docker_command('budget-test', False)
-        self.assertIn('HARNESS_TURN_TIMEOUT_SECONDS=885', command)
-        self.assertEqual(command[command.index('--memory') + 1], '1536m')
-        self.assertEqual(float(command[command.index('--cpus') + 1]), 2)
-        from popot_agents.orchestrator.docker_config import get_docker_config
-        self.assertEqual(get_docker_config()['max_concurrent_tasks'], 3)
+        runner = AxAgentRunner('worker@sha256:' + 'a' * 64, 'test', 'http://model/v1')
+        manifest = runner.task_manifest('0123456789abcdef')
+        env = {item['name']: item['value'] for item in manifest['spec']['env']}
+        self.assertEqual(env['HARNESS_TURN_TIMEOUT_SECONDS'], '885')
+        self.assertEqual(manifest['spec']['resources'], AX_CONFIG['task_resources'])
         self.assertGreater(AX_CONFIG['route_timeout_seconds'],
                            RUNTIME['timeouts']['max_turn_seconds'] + AX_CONFIG['response_margin_seconds'])
-        agents_path = Path(__file__).resolve().parents[1] / 'config/agents.json'
-        for runner in load_agents(str(agents_path)).values():
-            self.assertEqual(runner.timeout_seconds, RUNTIME['timeouts']['turn_seconds'])
 
     def test_ax_mcp_inherits_shared_transport_budget(self):
         compose = Path(__file__).resolve().parents[1] / 'ax_local/compose.yaml'
@@ -56,14 +52,10 @@ class RuntimeConfigTests(unittest.TestCase):
                     + ax['restore_timeout_seconds'] + ax['response_margin_seconds'])
         self.assertGreater(RUNTIME['timeouts']['mcp_upstream_seconds'], required)
 
-    def test_shared_worker_budget_applies_to_docker_and_ax(self):
+    def test_shared_worker_budget_applies_to_ax(self):
         from popot_agents.runtime_config import RUNTIME
-        from popot_agents.orchestrator.main import DockerAgentRunner
         from ax_local.api.ax_runner import AxAgentRunner
         with patch.dict(RUNTIME['timeouts'], {'turn_response_margin_seconds': 9}):
-            command = DockerAgentRunner()._docker_command('test', False,
-                role_config={'timeout_seconds': 120})
-            self.assertIn('HARNESS_TURN_TIMEOUT_SECONDS=111', command)
             runner = AxAgentRunner("worker@sha256:" + "a" * 64, "test", "http://model/v1")
             manifest = runner.task_manifest('0123456789abcdef', {'timeout_seconds': 120})
             env = {item['name']: item['value'] for item in manifest['spec']['env']}
@@ -202,21 +194,15 @@ class RuntimeConfigTests(unittest.TestCase):
                                     env={**os.environ, "POPOT_RUNTIME_CONFIG": str(path)})
         self.assertEqual(json.loads(result.stdout), [77777, 14, 22222, 90])
 
-    def test_agent_profile_can_override_resources_and_model_parameters(self):
+    def test_ax_profile_model_parameters_reach_harness(self):
         from popot_agents.runtime_config import RUNTIME
-        from popot_agents.orchestrator.main import DockerAgentRunner
         from popot_agents.worker.http_harness import run_http
 
-        runner = DockerAgentRunner(
-            resources={"memory": "2g", "cpus": 2, "pids_limit": 128},
-            model_parameters={"temperature": 0.3, "max_tokens": 512},
-        )
-        command = runner._docker_command("popot-chat-test", detached=True)
-        self.assertEqual(command[command.index("--memory") + 1], "2g")
-        self.assertEqual(command[command.index("--cpus") + 1], "2")
-        self.assertEqual(command[command.index("--pids-limit") + 1], "128")
-        self.assertIn('HARNESS_MODEL_PARAMETERS_JSON={"temperature": 0.3, "max_tokens": 512}',
-                      command)
+        from ax_local.api.ax_runner import AxAgentRunner
+        runner = AxAgentRunner('worker@sha256:' + 'a' * 64, 'test', 'http://model/v1',
+                              model_parameters={"temperature": 0.3, "max_tokens": 512})
+        manifest = runner.task_manifest('0123456789abcdef')
+        env = {item['name']: item['value'] for item in manifest['spec']['env']}
         calls = []
 
         def urlopen(call, timeout):
@@ -225,7 +211,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
         with patch.dict(os.environ, {
             "HARNESS_BASE_URL": "https://model.example/v1", "HARNESS_MODEL": "test",
-            "HARNESS_MODEL_PARAMETERS_JSON": json.dumps(runner.model_parameters),
+            "HARNESS_MODEL_PARAMETERS_JSON": env["HARNESS_MODEL_PARAMETERS_JSON"],
         }), patch("urllib.request.urlopen", side_effect=urlopen):
             self.assertEqual(run_http("hello"), "ok")
         self.assertEqual(calls[0][0]["temperature"], 0.3)
@@ -245,7 +231,7 @@ class RuntimeConfigTests(unittest.TestCase):
         urlopen.assert_not_called()
 
     def test_reasoning_parameters_reach_model(self):
-        from popot_agents.orchestrator.main import DockerAgentRunner
+        from ax_local.api.ax_runner import AxAgentRunner
         from popot_agents.worker.http_harness import run_http
 
         for reasoning in ({'effort': 'high', 'exclude': True},
@@ -253,10 +239,10 @@ class RuntimeConfigTests(unittest.TestCase):
                           {'enabled': True}, {'enabled': False}):
             with self.subTest(reasoning=reasoning):
                 parameters = {'reasoning': reasoning, 'max_tokens': 4096}
-                runner = DockerAgentRunner(model_parameters=parameters)
-                command = runner._docker_command('reasoning-test', detached=True)
-                env_entry = next(item for item in command
-                                 if item.startswith('HARNESS_MODEL_PARAMETERS_JSON='))
+                runner = AxAgentRunner('worker@sha256:' + 'a' * 64, 'test', 'http://model/v1',
+                                       model_parameters=parameters)
+                manifest = runner.task_manifest('0123456789abcdef')
+                env = {item['name']: item['value'] for item in manifest['spec']['env']}
                 calls = []
 
                 def respond(call, timeout):
@@ -265,7 +251,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
                 with patch.dict(os.environ, {
                     'HARNESS_BASE_URL': 'http://model.test/v1', 'HARNESS_MODEL': 'test',
-                    'HARNESS_MODEL_PARAMETERS_JSON': env_entry.partition('=')[2],
+                    'HARNESS_MODEL_PARAMETERS_JSON': env['HARNESS_MODEL_PARAMETERS_JSON'],
                 }, clear=True), patch('urllib.request.urlopen', side_effect=respond):
                     self.assertEqual(run_http('hello'), 'ok')
                 self.assertEqual(calls[0]['reasoning'], reasoning)
@@ -288,16 +274,16 @@ class RuntimeConfigTests(unittest.TestCase):
                 urlopen.assert_not_called()
 
     def test_nvidia_thinking_parameters_reach_model(self):
-        from popot_agents.orchestrator.main import DockerAgentRunner
+        from ax_local.api.ax_runner import AxAgentRunner
         from popot_agents.worker.http_harness import run_http
 
         for enabled in (True, False):
             parameters = {'chat_template_kwargs': {'enable_thinking': enabled}}
             with self.subTest(enabled=enabled):
-                runner = DockerAgentRunner(model_parameters=parameters)
-                command = runner._docker_command('thinking-test', detached=True)
-                env_entry = next(item for item in command
-                                 if item.startswith('HARNESS_MODEL_PARAMETERS_JSON='))
+                runner = AxAgentRunner('worker@sha256:' + 'a' * 64, 'test', 'http://model/v1',
+                                       model_parameters=parameters)
+                manifest = runner.task_manifest('0123456789abcdef')
+                env = {item['name']: item['value'] for item in manifest['spec']['env']}
                 calls = []
 
                 def respond(call, timeout):
@@ -306,7 +292,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
                 with patch.dict(os.environ, {
                     'HARNESS_BASE_URL': 'http://model.test/v1', 'HARNESS_MODEL': 'test',
-                    'HARNESS_MODEL_PARAMETERS_JSON': env_entry.partition('=')[2],
+                    'HARNESS_MODEL_PARAMETERS_JSON': env['HARNESS_MODEL_PARAMETERS_JSON'],
                 }, clear=True), patch('urllib.request.urlopen', side_effect=respond):
                     self.assertEqual(run_http('hello'), 'ok')
                 self.assertEqual(calls[0]['chat_template_kwargs'], parameters['chat_template_kwargs'])

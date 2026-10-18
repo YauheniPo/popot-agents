@@ -93,12 +93,6 @@
 Каталог копируется в `/app/skills` образов API и worker. Путь к локальному клону
 автора на хосте контейнерам не нужен.
 
-Docker:
-
-```bash
-docker compose up --build -d worker-image orchestrator mcp-server
-```
-
 AX (из корня репозитория):
 
 ```bash

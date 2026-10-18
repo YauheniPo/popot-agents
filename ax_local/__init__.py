@@ -1,1 +1,1 @@
-"""Local AX comparison backend for popot-agents."""
+"""Local AX runtime for popot-agents."""
