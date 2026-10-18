@@ -1,6 +1,28 @@
 name: popot-ax-local
 
 services:
+  omniroute:
+    image: diegosouzapw/omniroute:3.8.51
+    profiles: [omniroute]
+    environment:
+      DATA_DIR: /app/data
+      REQUIRE_API_KEY: "true"
+      INITIAL_PASSWORD: ${OMNIROUTE_INITIAL_PASSWORD:-}
+    ports:
+      - "127.0.0.1:20128:20128"
+    volumes:
+      - omniroute-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 40s
+    restart: unless-stopped
+
   db:
     image: postgres:17
     environment:
@@ -75,6 +97,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  omniroute-data:
   ax-postgres:
 
 networks:

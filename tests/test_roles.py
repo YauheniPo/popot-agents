@@ -223,16 +223,17 @@ class FeatureTeamConfigTests(unittest.TestCase):
         config = Path(__file__).resolve().parents[1] / "config"
         roles = load_roles(config / "roles.json", load_agents(config / "agents.json"))
         expected = {
-            "product_manager", "product_designer", "tech_lead",
-            "backend_engineer", "frontend_engineer", "qa_engineer", "data_analyst",
+            "tech_lead", "backend_engineer", "frontend_engineer", "qa_engineer",
         }
         self.assertTrue(expected.issubset(roles))
+        for removed in ("local_analyst", "product_manager", "product_designer", "data_analyst"):
+            self.assertNotIn(removed, roles)
         for name in expected:
             self.assertGreater(len(roles[name]["instructions"]), 80, name)
-        self.assertIn("calculate", roles["data_analyst"]["tools"])
-        self.assertEqual(roles["product_designer"]["tools"], [])
+        self.assertIn("calculate", roles["analyst"]["tools"])
         self.assertEqual(roles["backend_engineer"]["env_names"],
-                         ["GITHUB_PERSONAL_ACCESS_TOKEN", "COGNEE_API_URL", "COGNEE_PASSWORD"])
+                         ["GITHUB_PERSONAL_ACCESS_TOKEN", "COGNEE_API_URL", "COGNEE_PASSWORD",
+                          "GITGUARDIAN_API_KEY", "SONAR_TOKEN"])
 
     def test_demo_cron_role_has_daily_utc_time_task(self):
         config = Path(__file__).resolve().parents[1] / "config"

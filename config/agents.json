@@ -6,10 +6,22 @@
     "model_env": "OPENROUTER_MODEL",
     "model_parameters": {"reasoning": {"enabled": true, "exclude": false}}
   },
-  "ollama": {
+  "omniroute": {
+    "session_mode": "http",
+    "environment": {"HARNESS_BASE_URL": "http://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
+    "env_names": ["OMNIROUTE_API_KEY"],
+    "model_env": "OMNIROUTE_MODEL"
+  },
+  "omniroute_code": {
+    "session_mode": "http",
+    "environment": {"HARNESS_BASE_URL": "http://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
+    "env_names": ["OMNIROUTE_API_KEY"],
+    "model_env": "OMNIROUTE_CODE_MODEL"
+  },
+  "ollama_local": {
     "session_mode": "http",
     "environment": {"HARNESS_BASE_URL": "http://host.docker.internal:11434/v1"},
-    "model_env": "OLLAMA_MODEL"
+    "model_env": "OLLAMA_LOCAL_MODEL"
   },
   "ollama_cloud": {
     "session_mode": "http",

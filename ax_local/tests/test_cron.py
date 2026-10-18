@@ -46,7 +46,7 @@ class FakeRunner:
 
 class CronTests(unittest.TestCase):
     def test_each_scheduled_role_uses_its_own_profile(self):
-        runners = {name: FakeRunner() for name in ('openrouter', 'ollama')}
+        runners = {name: FakeRunner() for name in ('openrouter', 'ollama_local')}
         roles = {name + '_role': {
             'agent': name, 'instructions': '', 'tools': [],
             'cron': [{'schedule': '* * * * *', 'task': name + ' report'}],

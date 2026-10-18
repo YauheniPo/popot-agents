@@ -54,7 +54,9 @@
   "role_env_names": [
     "GITHUB_PERSONAL_ACCESS_TOKEN",
     "COGNEE_API_URL",
-    "COGNEE_PASSWORD"
+    "COGNEE_PASSWORD",
+    "GITGUARDIAN_API_KEY",
+    "SONAR_TOKEN"
   ],
   "memory": {
     "summary_attempts": 2,

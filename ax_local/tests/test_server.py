@@ -16,7 +16,9 @@ class AxServerTests(unittest.TestCase):
             'AX_LOCAL_SESSION_BACKEND': 'file',
             'OPENROUTER_MODEL': 'role-cloud-model',
             'OPENROUTER_API_KEY': 'private-cloud-key',
-            'OLLAMA_MODEL': 'role-local-model',
+            'OMNIROUTE_MODEL': 'ax-free',
+            'OMNIROUTE_CODE_MODEL': 'ax-code-free',
+            'OMNIROUTE_API_KEY': 'private-gateway-key',
             # Stale overrides must not replace the role's profile.
             'AX_LOCAL_PROVIDER': 'openrouter', 'AX_LOCAL_MODEL': 'wrong-model',
             'AX_LOCAL_PROXY_TOKEN': 'old-global-capability',
@@ -25,19 +27,21 @@ class AxServerTests(unittest.TestCase):
              patch('ax_local.api.server.create_server') as create:
             server = make_server()
         roles = create.call_args.kwargs['roles']
-        self.assertEqual(roles['local_analyst']['agent'], 'ollama')
+        self.assertEqual(roles['analyst']['agent'], 'omniroute')
         runners = create.call_args.args[0]
-        self.assertEqual(set(runners), {'openrouter', 'ollama'})
+        self.assertEqual(set(runners), {'openrouter', 'omniroute', 'omniroute_code'})
         self.assertEqual(runners['openrouter'].model, 'role-cloud-model')
-        self.assertEqual(runners['ollama'].model, 'role-local-model')
-        self.assertIs(runners['openrouter'].worker_queue, runners['ollama'].worker_queue)
-        self.assertNotEqual(runners['openrouter'].proxy_token, runners['ollama'].proxy_token)
+        self.assertEqual(runners['omniroute'].model, 'ax-free')
+        self.assertEqual(runners['omniroute_code'].model, 'ax-code-free')
+        self.assertIs(runners['openrouter'].worker_queue, runners['omniroute_code'].worker_queue)
+        self.assertIs(runners['omniroute'].worker_queue, runners['omniroute_code'].worker_queue)
+        self.assertNotEqual(runners['omniroute'].proxy_token, runners['omniroute_code'].proxy_token)
         queue = runners['openrouter'].worker_queue
         leases = [(f'occupied-{index}', queue.acquire(f'occupied-{index}'))
                   for index in range(queue.max_workers)]
-        with patch.object(runners['ollama'], '_run') as run:
+        with patch.object(runners['omniroute_code'], '_run') as run:
             with self.assertRaises(TimeoutError):
-                runners['ollama'].start_chat('0123456789abcdef', deadline=time.monotonic() + 0.03)
+                runners['omniroute_code'].start_chat('0123456789abcdef', deadline=time.monotonic() + 0.03)
             run.assert_not_called()
         for name, lease in leases:
             queue.release(name, lease)
@@ -47,6 +51,7 @@ class AxServerTests(unittest.TestCase):
             self.assertIs(runner.delegation, server.delegation)
             manifest = runner.task_manifest('0123456789abcdef')
             self.assertNotIn('private-cloud-key', json.dumps(manifest))
+            self.assertNotIn('private-gateway-key', json.dumps(manifest))
             runner.shutdown_worker_queue()
 
     def test_missing_used_model_is_reported_without_falling_back_to_another_provider(self):
@@ -57,7 +62,7 @@ class AxServerTests(unittest.TestCase):
             'OPENROUTER_MODEL': 'cloud-model', 'OPENROUTER_API_KEY': 'test-key',
         }
         with patch.dict(os.environ, environment, clear=True), \
-             self.assertRaisesRegex(ValueError, 'ollama.*OLLAMA_MODEL'):
+             self.assertRaisesRegex(ValueError, 'omniroute.*OMNIROUTE_MODEL'):
             make_server()
 
     def test_control_plane_host_follows_ax_context(self):
@@ -69,16 +74,18 @@ class AxServerTests(unittest.TestCase):
             "AX_LOCAL_WORKER_IMAGE": "localhost:5001/popot-agent-ax@sha256:" + "a" * 64,
             "OPENROUTER_MODEL": "selected-model",
             "OPENROUTER_API_KEY": "test-key",
-            "OLLAMA_MODEL": "local-model",
+            "OMNIROUTE_MODEL": "ax-free",
+            "OMNIROUTE_CODE_MODEL": "ax-code-free",
+            "OMNIROUTE_API_KEY": "gateway-key",
             "AX_LOCAL_BASE_URL": "http://172.18.0.5:8004/v1",
             "AX_LOCAL_SESSION_BACKEND": "file",
         }
         with patch.dict(os.environ, environment), patch("ax_local.api.server.create_server") as create:
             server = make_server()
         roles = create.call_args.kwargs["roles"]
-        self.assertEqual(roles["backend_engineer"]["agent"], "openrouter")
+        self.assertEqual(roles["backend_engineer"]["agent"], "omniroute_code")
         self.assertIn("bash", roles["backend_engineer"]["tools"])
-        self.assertEqual(set(create.call_args.args[0]), {"openrouter", "ollama"})
+        self.assertEqual(set(create.call_args.args[0]), {"openrouter", "omniroute", "omniroute_code"})
         self.assertNotIn("allowed_roles", server.delegation.policy)
         self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer"])
         env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
@@ -94,7 +101,9 @@ class AxServerTests(unittest.TestCase):
             "AX_LOCAL_WORKER_IMAGE": "localhost:5001/popot-agent-ax@sha256:" + "a" * 64,
             "OPENROUTER_MODEL": "selected-model",
             "OPENROUTER_API_KEY": "test-key",
-            "OLLAMA_MODEL": "local-model",
+            "OMNIROUTE_MODEL": "ax-free",
+            "OMNIROUTE_CODE_MODEL": "ax-code-free",
+            "OMNIROUTE_API_KEY": "gateway-key",
             "AX_LOCAL_BASE_URL": "http://172.18.0.5:8004/v1",
             "AX_LOCAL_SESSION_BACKEND": "file",
             "AX_LOCAL_BIND_HOST": "0.0.0.0",
@@ -119,7 +128,7 @@ class AxServerTests(unittest.TestCase):
                 'OPENROUTER_MODEL': 'test', 'OPENROUTER_API_KEY': 'test-key',
                 'NOUS_MODEL': 'test', 'NOUS_API_KEY': 'test-key',
                 'NVIDIA_MODEL': 'test', 'NVIDIA_API_KEY': 'test-key',
-                'OLLAMA_MODEL': 'local-model',
+                'OLLAMA_LOCAL_MODEL': 'local-model',
                 'AX_LOCAL_BASE_URL': 'http://model.test/v1',
                 'AX_LOCAL_SESSION_BACKEND': 'file',
             }

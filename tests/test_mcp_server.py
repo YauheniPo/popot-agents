@@ -96,13 +96,13 @@ class GatewayTests(unittest.TestCase):
 
         client = OrchestratorClient(self.base_url)
         with patch("urllib.request.urlopen", side_effect=self.urlopen):
-            resumed = client.run_task("что еще добавишь?", role="product_manager",
+            resumed = client.run_task("что еще добавишь?", role="planner",
                                       session_id="d7ed630a2ce24092")
         self.assertEqual(resumed["sessionId"], "d7ed630a2ce24092")
         self.assertEqual(resumed["container"], "popot-chat-d7ed630a2ce24092")
         self.assertEqual(self.calls, [("POST", "/messages", {
             "message": "что еще добавишь?", "sessionId": "d7ed630a2ce24092",
-            "role": "product_manager",
+            "role": "planner",
         })])
 
     def test_run_task_with_empty_session_id_starts_new_chat(self):
@@ -112,13 +112,13 @@ class GatewayTests(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=self.urlopen):
             for session_id in ("", "   "):
                 with self.subTest(session_id=session_id):
-                    result = client.run_task("1+3?", role="product_manager",
+                    result = client.run_task("1+3?", role="planner",
                                              session_id=session_id)
                     self.assertEqual(result["sessionId"], "task123")
                     self.assertEqual(result["container"], "popot-chat-task123")
         self.assertEqual(self.calls, [
-            ("POST", "/tasks", {"task": "1+3?", "role": "product_manager"}),
-            ("POST", "/tasks", {"task": "1+3?", "role": "product_manager"}),
+            ("POST", "/tasks", {"task": "1+3?", "role": "planner"}),
+            ("POST", "/tasks", {"task": "1+3?", "role": "planner"}),
         ])
 
     def test_tool_errors_keep_orchestrator_status_and_message(self):
@@ -203,13 +203,13 @@ class GatewayTests(unittest.TestCase):
                 {"answer": "task done", "sessionId": "task123",
                  "container": "popot-chat-task123"})
             continued = FakeMCPServer.instance.tools["run_task"](
-                "что еще добавишь?", role="product_manager",
+                "что еще добавишь?", role="planner",
                 sessionId="d7ed630a2ce24092")
             self.assertEqual(continued["sessionId"], "d7ed630a2ce24092")
             self.assertEqual(continued["container"], "popot-chat-d7ed630a2ce24092")
             self.assertEqual(self.calls[-1], ("POST", "/messages", {
                 "message": "что еще добавишь?", "sessionId": "d7ed630a2ce24092",
-                "role": "product_manager",
+                "role": "planner",
             }))
             self.assertEqual(FakeMCPServer.instance.tools["run_task"](
                 "continue", session_id="d7ed630a2ce24092")["sessionId"],
@@ -219,10 +219,10 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(message["sessionId"], "d7ed630a2ce24092")
             self.assertEqual(message["container"], "popot-chat-d7ed630a2ce24092")
             self.assertEqual(FakeMCPServer.instance.tools["run_task"](
-                "1+3?", role="product_manager", sessionId="")["sessionId"],
+                "1+3?", role="planner", sessionId="")["sessionId"],
                 "task123")
             self.assertEqual(self.calls[-1], ("POST", "/tasks", {
-                "task": "1+3?", "role": "product_manager",
+                "task": "1+3?", "role": "planner",
             }))
             self.assertEqual(FakeMCPServer.instance.tools["run_task"](
                 "continue", sessionId="", session_id="d7ed630a2ce24092")["sessionId"],

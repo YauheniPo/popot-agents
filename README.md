@@ -17,6 +17,7 @@ Use Python 3.11+ for the AX scripts, a running Docker daemon, Git, Go and kubect
 ```bash
 cp .env.example .env
 # Set POPOT_DB_PASSWORD and the credentials/models for the roles you use.
+# Analyst and engineering roles use OmniRoute: complete its setup below first.
 bash ax_local/up.sh
 ```
 
@@ -93,11 +94,13 @@ Supported fields are `effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhig
 Choose either `effort` or `reasoning.max_tokens`, not both. Use
 `{"enabled": true}` for provider defaults. Omitting `reasoning` leaves provider
 behavior unchanged. The `openrouter` and `nous` profiles explicitly set
-`{"enabled": true, "exclude": false}`. Their configured models were checked on
+`{"enabled": true, "exclude": false}`. The earlier models were checked on
 2026-10-10 against each provider's `/v1/models` catalog: `openrouter/free` and
 `inclusionai/ling-3.0-flash-fin:free` advertise `reasoning` support. A live
 OpenRouter probe returned reasoning; Nous chat completion requests returned
-HTTP 404 both with and without reasoning, despite the model being listed.
+HTTP 404 both with and without reasoning for that old model. On 2026-10-18,
+`upstage/solar-mini4:free` passed two tool/result/answer turns through OmniRoute
+and replaced Ling in the local `NOUS_MODEL` setting.
 Ollama's configured `qwen2.5-coder:14b` does not advertise a separate thinking
 mode; the `ollama_cloud` profile has
 no model selected in the local environment and keep reasoning unset.
@@ -239,21 +242,18 @@ The feature team roles are:
 | Role | Responsibility | Built-in tools |
 | --- | --- | --- |
 | `planner` | Discuss requests, draft versioned specs, delegate execution and decide acceptance or rework from specialist evidence | `calculate`, `read_file`, `write_file`; Cognee memory |
-| `product_manager` | User problem, scope, stories, acceptance and success criteria | `calculate` |
-| `product_designer` | User journey, screen states, accessibility and UX copy | — |
 | `tech_lead` | Architecture, contracts, task split and engineering risks | `calculate` |
 | `backend_engineer` | Clone repositories, edit backend code, run commands and inspect Git | `bash`, `read_file`, `write_file`, `git_clone`, `download_file`, `calculate`; Fetch, Git and GitHub MCP |
 | `frontend_engineer` | UI components, state, API integration and accessibility | — |
 | `code_reviewer` | Independent review of correctness, regressions, security and requirements | GitHub MCP reads and inline PR review comments |
 | `qa_engineer` | Test scenarios, expected results and regression risks | — |
-| `data_analyst` | Metrics, events, funnels and experiments | `calculate`, `utc_time` |
 
-The earlier `chat`, `analyst`, and `local_analyst` roles remain available.
-Feature team roles use the `openrouter` agent profile by default. Change a role's
-`agent` field to another configured profile if needed, and set that profile's
-model and credentials in `.env` as described below. For example:
+The `chat` and `analyst` roles also remain available. `analyst` uses the
+`omniroute` profile; backend, frontend and code review use `omniroute_code`.
+Other roles use `openrouter`. Change a role's `agent` field to another configured
+profile if needed, and set that profile's model and credentials in `.env`.
 
-Select `product_manager` or `qa_engineer` in the MCP request above to use those roles.
+Select `planner` or `qa_engineer` in the MCP request above to use those roles.
 
 The task and chat responses include `sessionId`, `role`, and `agent`; send only
 `sessionId` on later messages. The role and
@@ -489,7 +489,9 @@ scheduled work uses the receiving role's own profile.
 | Profile | Provider | Variables |
 | --- | --- | --- |
 | `openrouter` | OpenRouter chat API | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
-| `ollama` | Local Ollama chat API | `OLLAMA_MODEL` |
+| `omniroute` | Local OmniRoute gateway | `OMNIROUTE_API_KEY`, `OMNIROUTE_MODEL` |
+| `omniroute_code` | OmniRoute combo for code | `OMNIROUTE_API_KEY`, `OMNIROUTE_CODE_MODEL` |
+| `ollama_local` | Local Ollama chat API | `OLLAMA_LOCAL_MODEL` |
 | `ollama_cloud` | Ollama Cloud chat API | `OLLAMA_API_KEY`, `OLLAMA_CLOUD_MODEL` |
 | `nous` | Nous inference chat API | `NOUS_API_KEY`, `NOUS_MODEL` |
 | `nvidia_nim` | NVIDIA NIM chat API | `NVIDIA_API_KEY`, `NVIDIA_MODEL` |
@@ -498,6 +500,12 @@ The proxy reaches local Ollama through `host.docker.internal:11434`; change the
 profile's `HARNESS_BASE_URL` if your host uses another endpoint. AX uses the HTTP
 harness and does not deploy custom Claude/Hermes CLI images. The old standalone
 Docker profiles `ollama_claude` and `ollama_claude_local` have been removed.
+
+For routing across free provider models, follow the optional
+[OmniRoute setup for AX](ax_local/README.md#omniroute-для-ax). It uses named
+combos of explicitly selected models. `analyst` uses `ax-free`; engineers and
+the reviewer use `ax-code-free`. Configure and start the gateway before
+starting AX, or assign those roles to another configured profile.
 
 ## Local checks
 
