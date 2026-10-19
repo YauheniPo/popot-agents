@@ -2,7 +2,7 @@ name: popot-ax-local
 
 services:
   omniroute:
-    image: diegosouzapw/omniroute:3.8.51
+    image: diegosouzapw/omniroute:${OMNIROUTE_VERSION:?Use bash compose.sh to load pyproject.toml versions}
     profiles: [omniroute]
     environment:
       DATA_DIR: /app/data
@@ -24,7 +24,8 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres:17
+    image: postgres:${POSTGRES_VERSION:?Use bash compose.sh to load pyproject.toml versions}
+    restart: unless-stopped
     environment:
       POSTGRES_DB: popot_agents_ax
       POSTGRES_USER: popot
@@ -44,6 +45,9 @@ services:
     build:
       context: ..
       dockerfile: ax_local/docker/api.Dockerfile
+      additional_contexts:
+        python-base: docker-image://${PYTHON_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
+        go-base: docker-image://${GO_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
     env_file: ../.env
     depends_on:
       db:
@@ -85,6 +89,8 @@ services:
     build:
       context: ..
       dockerfile: docker/mcp.Dockerfile
+      additional_contexts:
+        python-base: docker-image://${PYTHON_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
     depends_on:
       api:
         condition: service_healthy

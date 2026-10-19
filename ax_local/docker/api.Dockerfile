@@ -1,10 +1,10 @@
-FROM --platform=$BUILDPLATFORM python:3.12-slim AS build-versions
+FROM --platform=$BUILDPLATFORM python-base AS build-versions
 WORKDIR /build
 COPY pyproject.toml ./
 COPY ax_local/cluster/build_versions.py ax_local/cluster/build_versions.py
 RUN python ax_local/cluster/build_versions.py > /build-versions.env
 
-FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS ax-cli
+FROM --platform=$BUILDPLATFORM go-base AS ax-cli
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -16,13 +16,14 @@ WORKDIR /src/ax
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax ./cmd/ax
 
-FROM python:3.12-slim
+FROM python-base
 LABEL com.popot.project="popot-agents"
 ARG TARGETARCH
-ARG KUBECTL_VERSION=v1.35.3
+COPY --from=build-versions /build-versions.env /build-versions.env
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+RUN . /build-versions.env \
+    && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
       -o /usr/local/bin/kubectl \
     && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" \
       -o /tmp/kubectl.sha256 \

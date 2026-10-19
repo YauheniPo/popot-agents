@@ -346,7 +346,7 @@ WorkerPool в соответствующем пространстве.
 
 Необязательный профиль `omniroute` использует цепочку
 `AX worker → AX API proxy → OmniRoute → провайдер`.
-Docker-сервис закреплён на `diegosouzapw/omniroute:3.8.51`, панель доступна только
+Версия Docker-сервиса задаётся `OMNIROUTE_VERSION` в `pyproject.toml`, панель доступна только
 на `http://127.0.0.1:20128`. Настройки, ключи провайдеров и история шлюза хранятся
 в volume `omniroute-data`. Это один экземпляр без Redis: rate limiter использует
 in-memory fallback, его локальное состояние сбрасывается при перезапуске.
@@ -377,7 +377,7 @@ Hosted-доступ NVIDIA здесь используется для локал
    Запустите только шлюз из корня репозитория:
 
    ```bash
-   docker compose --env-file .env -f ax_local/compose.yaml up -d --wait --wait-timeout 180 omniroute
+   bash compose.sh --env-file .env -f ax_local/compose.yaml up -d --wait --wait-timeout 180 omniroute
    ```
 
 2. Откройте панель. В **Providers** добавьте свои ключи провайдеров, а в
@@ -663,7 +663,7 @@ API. Например, `mcp_discovery_failed` означает сбой подк
 дочерней роли до вызова модели. Полный текст исключения в A2A-ответ не попадает.
 
 ```bash
-docker compose --env-file .env -f ax_local/compose.yaml logs --tail=500 api | grep '"event": "ax_delegation"'
+bash compose.sh --env-file .env -f ax_local/compose.yaml logs --tail=500 api | grep '"event": "ax_delegation"'
 ```
 
 Каждое делегирование создаёт новую сессию. Дочерний воркер завершается после
@@ -704,15 +704,21 @@ Docker-образы устанавливают SDK автоматически. �
 
 ## Подготовка
 
-Версии исходников AX, Substrate и `ko` задаются в одном файле
+Версии AX, Substrate, `ko`, `kubectl`, OmniRoute, Holmes, Cognee, PostgreSQL,
+nginx и базовых образов Python/Go/Node задаются в одном файле
 `pyproject.toml`, в секции `[tool.popot.build]`. Её читает
 `ax_local/cluster/build_versions.py`; bootstrap и оба AX Dockerfile получают
-от него проверенные shell-переменные, а проверки локальных патчей — словарь.
-Compose и обычный `docker build` используют те же значения без передачи build args.
+от него проверенные shell-переменные, а проверки локальных патчей и Holmes — словарь.
+Для Compose используйте `bash compose.sh --env-file .env -f ax_local/compose.yaml ...`:
+обёртка загружает версии и передаёт образы в Dockerfile через именованные build contexts.
+`up.sh`, bootstrap и `rebuild-worker.sh` делают это автоматически. Для ручного
+`docker build` передайте `--build-context python-base=docker-image://<PYTHON_IMAGE>`
+и `--build-context go-base=docker-image://<GO_IMAGE>` из этой секции.
 При обновлении AX меняйте `AX_VERSION` и
 `AX_COMMIT` вместе и проверяйте совместимость Substrate и наших патчей.
 
-Нужны работающий Docker Desktop, `git`, Go 1.27.1+, `kubectl` и Python 3.11+.
+Нужны работающий Docker Desktop с BuildKit и Compose 2.17+, `git`, Go 1.27.1+,
+`kubectl` и Python 3.11+.
 Команда `python3` в текущем окружении должна запускать Python 3.11 или новее:
 AX-скрипты используют встроенный `tomllib`. `up.sh` проверяет версию Python и
 настройки сборки до запуска контейнеров. В Docker версии читает отдельный
@@ -771,7 +777,7 @@ Bootstrap фиксирует AX на `v0.3.1`, Substrate — на commit из е
 Проверьте контейнеры и вызов существующего MCP инструмента:
 
 ```bash
-docker compose --env-file .env -f ax_local/compose.yaml ps db api mcp-server
+bash compose.sh --env-file .env -f ax_local/compose.yaml ps db api mcp-server
 curl --fail-with-body -sS http://127.0.0.1:8003/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
@@ -782,7 +788,7 @@ curl --fail-with-body -sS http://127.0.0.1:8003/mcp \
 Логи API и MCP при проверке:
 
 ```bash
-docker compose --env-file .env -f ax_local/compose.yaml logs -f api mcp-server
+bash compose.sh --env-file .env -f ax_local/compose.yaml logs -f api mcp-server
 ```
 
 Таймаут одного запроса к модели задаётся в
@@ -810,9 +816,9 @@ AX-прокси вычитает `proxy.response_margin_seconds` из `ax_local/
 затянулось, проверяйте фазу Task в другом терминале, пока запрос выполняется:
 
 ```bash
-docker compose --env-file .env -f ax_local/compose.yaml exec -T api \
+bash compose.sh --env-file .env -f ax_local/compose.yaml exec -T api \
   ax --context=kind-popot-ax --atespace=ate-demo-counter get tasks
-docker compose --env-file .env -f ax_local/compose.yaml logs --since=10m api \
+bash compose.sh --env-file .env -f ax_local/compose.yaml logs --since=10m api \
   | rg 'AX task|POST /tasks'
 ```
 
@@ -928,6 +934,67 @@ work budget expires. A final model timeout also returns a partial result; it
 never repeats external writes. Partial turns are marked failed in Cognee and
 are not captured as completed project knowledge. A missing response does not
 undo already published GitHub reviews/comments; inspect them before retrying.
+
+### HolmesGPT: диагностика AX в kind
+
+Запуск по запросу из корня репозитория, после `bash ax_local/up.sh` и запуска
+OmniRoute:
+
+```bash
+python3 -m ax_local.cluster.holmes "Почему перезапускаются AX workers? Проверь состояние, события и логи."
+```
+
+Команда запускает Kubernetes Job в `ax-diagnostics`, используя официальный образ
+`robustadev/holmes` с версией `HOLMES_VERSION` из `pyproject.toml`. Постоянно работающий сервис и доступ к Docker socket
+не требуются. Holmes использует свой цикл работы с инструментами; эта команда
+пока вызывается из терминала, отдельной роли/MCP-инструмента в AX нет.
+При первом запуске команда скачивает образ через Docker и импортирует его
+в containerd локального kind-узла; последующие запуски используют этот кеш.
+В pod Docker socket и административный kubeconfig хоста не передаются:
+`kubectl` использует только токен своего ServiceAccount.
+
+В корневом `.env` модель задаётся точным OmniRoute ID:
+
+```dotenv
+HOLMES_MODEL=nvidia/nvidia/nemotron-3-super-120b-a12b
+```
+
+Первый `nvidia/` — ID провайдера OmniRoute; оставшаяся часть — ID модели NVIDIA.
+Holmes использует OpenAI-совместимый endpoint шлюза на
+`http://host.docker.internal:20128/v1` и `OMNIROUTE_API_KEY` из `.env`.
+Ключ передаётся через stdin в Kubernetes Secret, в аргументы команд и ConfigMap
+не попадает. Платные/автоматические маршруты ограничены разрешениями этого ключа.
+Выбран только Nemotron Super, без перехода на более слабые модели; недоступность
+его dev-квоты может завершить расследование ошибкой. Основа выбора —
+`reports/vps-models-20261018T122551Z/recommendations.json` и проверка tool calling;
+отчёт измеряет надёжность и задержки, а не сравнительное качество SRE-расследований.
+
+ServiceAccount `ax-diagnostics/holmes` получает только `get/list/watch` для
+`pods`, `pods/log`, `events` в `ax-system`, `ate-system` и namespace `atespace`
+из `ax_local/config.json` (сейчас `ate-demo-counter`). Граница доступа — namespace:
+все pod внутри этих трёх namespace доступны. Чтение secrets, других namespace,
+nodes, `exec` и изменения ресурсов не разрешены. Встроенные toolsets Holmes
+не загружаются: доступны только четыре инструмента состояния, событий, текущих
+и предыдущих логов pod. Prometheus, Docker Compose и production-кластеры
+к этому запуску не подключены.
+
+Цикл расследования ограничен 12 шагами и 4096 выходными токенами на запрос;
+время жизни Job — 10 минут. Состояние и логи сохраняются
+на сутки, затем Job удаляет Kubernetes TTL controller. `up.sh` не запускает
+расследования автоматически. Namespace, RBAC, конфигурация и Secret создаются
+повторяемо при каждом вызове; после удаления kind-кластера команда создаст их
+заново из репозитория и локального `.env`.
+
+Проверка ограничений:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest ax_local.tests.test_holmes
+kubectl --kubeconfig=ax_local/.local/kubeconfig --context=kind-popot-ax auth can-i list pods -n ax-system --as=system:serviceaccount:ax-diagnostics:holmes
+kubectl --kubeconfig=ax_local/.local/kubeconfig --context=kind-popot-ax auth can-i get secrets -n ax-system --as=system:serviceaccount:ax-diagnostics:holmes
+```
+
+Ожидается `yes` для pod и `no` для secrets. Изменение модели применяется к
+следующему запуску команды.
 
 ### Мониторинг ресурсов локального кластера
 

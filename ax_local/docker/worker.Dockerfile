@@ -1,10 +1,10 @@
-FROM --platform=$BUILDPLATFORM python:3.12-slim AS build-versions
+FROM --platform=$BUILDPLATFORM python-base AS build-versions
 WORKDIR /build
 COPY pyproject.toml ./
 COPY ax_local/cluster/build_versions.py ax_local/cluster/build_versions.py
 RUN python ax_local/cluster/build_versions.py > /build-versions.env
 
-FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS ax-runner
+FROM --platform=$BUILDPLATFORM go-base AS ax-runner
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -16,7 +16,7 @@ WORKDIR /src/ax
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax-task-runner ./cmd/ax-task-runner
 
-FROM python:3.12-slim
+FROM python-base
 LABEL com.popot.project="popot-agents"
 RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*

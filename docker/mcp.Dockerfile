@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python-base
 LABEL com.popot.project="popot-agents"
 
 COPY pyproject.toml /build/pyproject.toml

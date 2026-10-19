@@ -19,7 +19,7 @@ if [[ ! -s "$LOCAL/kubeconfig" || ! -s "$LOCAL/kubeconfig-container" || \
     "$LOCAL/kubeconfig" "$ROOT/ax_local/config.json"
   python3 "$ROOT/ax_local/cluster/worker_health.py"
   bash "$ROOT/memory/up.sh"
-  docker compose --env-file "$ROOT/.env" -f "$ROOT/ax_local/compose.yaml" \
+  bash "$ROOT/compose.sh" --env-file "$ROOT/.env" -f "$ROOT/ax_local/compose.yaml" \
     up --build -d --wait --wait-timeout 300 mcp-server
 else
   CLUSTER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["context"].removeprefix("kind-"))' "$ROOT/ax_local/config.json")"

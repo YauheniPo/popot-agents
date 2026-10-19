@@ -29,6 +29,7 @@ class UpScriptTests(unittest.TestCase):
         cluster.mkdir()
         shutil.copyfile(SOURCE.parent / 'cluster/build_versions.py', cluster / 'build_versions.py')
         shutil.copyfile(SOURCE.parent.parent / 'pyproject.toml', self.root / 'pyproject.toml')
+        shutil.copyfile(SOURCE.parent.parent / 'compose.sh', self.root / 'compose.sh')
         shutil.copyfile(SOURCE.parent / "cluster" / "router_timeout.py",
                         cluster / "router_timeout.py")
         (cluster / "worker_health.py").write_text(

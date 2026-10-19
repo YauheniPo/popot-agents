@@ -23,6 +23,8 @@ bash ax_local/up.sh
 
 The launcher starts AX, memory and resource monitoring. The MCP endpoint is
 **http://127.0.0.1:8003/mcp** (`AX_MCP_PUBLISH_PORT` overrides the published port).
+For on-demand diagnosis of AX pods in kind, see
+[HolmesGPT setup](ax_local/README.md#holmesgpt-диагностика-ax-в-kind).
 The API listens on port 8002 inside Compose; it is not published on the host.
 See [operations and monitoring](ax_local/README.md) and the
 [interactive architecture](ax_local/architecture.html).
@@ -63,7 +65,8 @@ its indexed graph. Memory persists independently of AX Tasks. See
 | [config/agents.json](config/agents.json) | HTTP provider endpoints, model variable names and model parameters |
 | [config/roles.json](config/roles.json) | Role instructions, tools, permissions, skills, delegation and schedules |
 | [ax_local/config.json](ax_local/config.json) | kind context, WorkerPool, Task resources, queue, snapshots, AX timeouts, delegation and proxy |
-| [pyproject.toml](pyproject.toml) | Python dependencies and pinned AX/Substrate/ko build versions |
+| [pyproject.toml](pyproject.toml) | Python dependencies and pinned service, runtime and build versions |
+| [compose.sh](compose.sh) | Docker Compose with versions loaded from pyproject.toml |
 | `.env` | Credentials, selected model names and published MCP port |
 
 Workers and MCP read the shared runtime file; only the AX deployment needs
@@ -331,8 +334,14 @@ Cognee adapter. The gateway and AX worker images install this group. The worker 
 uses the SDK's automatic protocol negotiation: modern servers use `2026-07-28`,
 and older servers use the supported initialize handshake. The gateway accepts
 both `2026-07-28` and the existing `2025-11-25` curl requests.
-The same file's `[tool.popot.build]` section pins AX, Substrate and ko for
-AX image builds and local cluster scripts. Those host scripts require Python 3.11+.
+The same file's `[tool.popot.build]` section pins AX, Substrate, ko, kubectl,
+OmniRoute, Holmes, Cognee, PostgreSQL, nginx and the Python/Go/Node base images.
+Cognee also pins the UI source commit and archive SHA256; update its version,
+commit and checksum together. Launchers load these values automatically.
+For Compose commands, use `bash compose.sh --env-file .env -f <compose-file> ...`.
+The wrapper requires Python 3.11+ and passes the pins to Docker Compose, which
+supplies Dockerfile build contexts and arguments. Versions in `pyproject.toml` take precedence
+over the shell and `.env`.
 
 The reference Fetch/Git servers still require SDK 1.x. Their `mcp-tools` group
 is installed separately in `/opt/mcp-tools` inside each worker image; roles call
