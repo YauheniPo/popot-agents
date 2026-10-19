@@ -10,7 +10,12 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-AX_COMMIT = "e70162a34037c221fe6fadefd98308c05a4ad8f3"
+if __package__:
+    from .build_versions import BUILD_VERSIONS
+else:
+    from build_versions import BUILD_VERSIONS
+
+AX_COMMIT = BUILD_VERSIONS['AX_COMMIT']
 MARKER = "// BuildActorTemplate constructs a Substrate ActorTemplate"
 CONTAINER = '\t\t\tName:    "guest",'
 SECURITY = '\t\t\tSecurityContext: popotToolSecurityContext(image, envMap),\n'
@@ -68,7 +73,7 @@ def main() -> None:
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.checkout,
                           capture_output=True, text=True, check=True).stdout.strip()
     if head != AX_COMMIT:
-        raise ValueError("Unexpected AX checkout; tool-user patch requires the pinned v0.3.1 commit")
+        raise ValueError(f"Unexpected AX checkout; tool-user patch requires the pinned {BUILD_VERSIONS['AX_VERSION']} commit")
     path = args.checkout / "internal/substrate/client.go"
     source = path.read_text(encoding="utf-8")
     updated = patched_source(source)

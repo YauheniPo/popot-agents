@@ -3,10 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOCAL="${ROOT}/ax_local/.local"
-AX_VERSION="v0.3.1"
-AX_COMMIT="e70162a34037c221fe6fadefd98308c05a4ad8f3"
-SUBSTRATE_COMMIT="672533541dbfcd29084e4de2475267088bda3651"
-KO_VERSION="v0.19.1"
+source "$ROOT/ax_local/docker/versions.env"
 REGISTRY="localhost:5001"
 
 for program in docker git go kubectl python3; do
@@ -43,7 +40,7 @@ if [[ "$(git -C "$LOCAL/src/substrate" rev-parse HEAD)" != "$SUBSTRATE_COMMIT" ]
   git -C "$LOCAL/src/substrate" checkout --detach FETCH_HEAD
 fi
 if [[ "$(git -C "$LOCAL/src/substrate" rev-parse HEAD)" != "$SUBSTRATE_COMMIT" ]]; then
-  echo "Substrate checkout does not match the AX v0.3.1 pin" >&2
+  echo "Substrate checkout does not match the AX $AX_VERSION pin" >&2
   exit 1
 fi
 

@@ -13,6 +13,27 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_metrics_role_is_task_identity_and_defaults_to_unassigned(self):
+        from ax_local.worker.process_metrics import ProcessMetrics, make_payload
+        sample = dict(pid=41, name='python', start_ticks=900, cpu_seconds=2.5,
+                      rss_bytes=8192, virtual_bytes=16384, threads=3)
+        for config, expected in [({'_ax_role': 'backend_engineer',
+                                  'instructions': 'private instructions'}, 'backend_engineer'),
+                                 ({}, 'unassigned')]:
+            manifest = self.runner.task_manifest('0123456789abcdef', config)
+            env = {item['name']: item['value'] for item in manifest['spec']['env']}
+            with patch.dict(os.environ, env, clear=True):
+                exporter = ProcessMetrics.from_env()
+            payload = make_payload([sample], task=exporter.task, role=exporter.role,
+                                   timestamp_ns=123456789)
+            metrics = payload['resourceMetrics'][0]['scopeMetrics'][0]['metrics']
+            for metric in metrics:
+                point = metric.get('sum', metric.get('gauge'))['dataPoints'][0]
+                labels = {a['key']: a['value']['stringValue'] for a in point['attributes']}
+                self.assertEqual(labels['role'], expected)
+                self.assertEqual(labels['task'], 'popot-chat-0123456789abcdef')
+            self.assertNotIn('private instructions', json.dumps(payload))
+
     def test_memory_dns_outage_does_not_prevent_worker_startup(self):
         with patch.dict(RUNTIME, {'role_env_names': ['COGNEE_API_URL', 'COGNEE_PASSWORD']}), \
              patch.dict(os.environ, {'COGNEE_API_URL': 'http://cognee:8000',

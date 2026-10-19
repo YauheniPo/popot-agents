@@ -2,11 +2,11 @@ FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm AS ax-runner
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG AX_VERSION=v0.3.1
-ARG AX_COMMIT=e70162a34037c221fe6fadefd98308c05a4ad8f3
-RUN git clone --depth 1 --branch "$AX_VERSION" https://github.com/google/ax.git /src/ax
+COPY ax_local/docker/versions.env /build-versions.env
+RUN . /build-versions.env \
+    && git clone --depth 1 --branch "$AX_VERSION" https://github.com/google/ax.git /src/ax \
+    && test "$(git -C /src/ax rev-parse HEAD)" = "$AX_COMMIT"
 WORKDIR /src/ax
-RUN test "$(git rev-parse HEAD)" = "$AX_COMMIT"
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax-task-runner ./cmd/ax-task-runner
 
@@ -14,7 +14,7 @@ FROM python:3.12-slim
 LABEL com.popot.project="popot-agents"
 RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir mcp==1.30.0 mcp-server-fetch==2026.8.18 mcp-server-git==2026.8.18
+RUN pip install --no-cache-dir mcp==1.30.0 mcp-server-fetch==2026.8.18 mcp-server-git==2026.8.18 a2a-sdk==1.2.2
 RUN useradd --create-home --uid 10001 agent && mkdir /workspace
 COPY --from=ax-runner /ax-task-runner /usr/local/bin/ax-task-runner
 COPY --from=ax-runner /src/ax/cmd/ax-task-runner/antigravity_bootstrap.py /usr/local/bin/antigravity_bootstrap.py

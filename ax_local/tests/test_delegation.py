@@ -1,5 +1,6 @@
 """Delegation must enforce API-side authority and clean up child actors."""
 
+import asyncio
 import io
 import json
 import subprocess
@@ -79,7 +80,7 @@ class DelegationTests(unittest.TestCase):
         return self.service.dispatch(token or self.token, role, "SendMessage", {
             "message": {"messageId": message_id, "role": "ROLE_USER",
                         "parts": [{"text": task}]},
-            "configuration": {"blocking": False},
+            "configuration": {"returnImmediately": True},
         })["task"]
 
     def wait_task(self, task_id, token=None, role="backend_engineer"):
@@ -391,7 +392,7 @@ class DelegationTests(unittest.TestCase):
 
     def test_worker_retries_lost_submission_response_without_duplicate_actor(self):
         import json
-        from urllib import request, error
+        import httpx
         from ax_local.worker.delegation import make_tools
         server = start_a2a_server(self.service, "127.0.0.1", 0)
         self.addCleanup(server.server_close)
@@ -400,20 +401,20 @@ class DelegationTests(unittest.TestCase):
                             "AX_DELEGATION_TOKEN": self.token,
                             "AX_DELEGATION_ROLES": '["backend_engineer"]',
                             "AX_DELEGATION_POLL_SECONDS": "0.01"})
-        original = request.urlopen
+        from ax_local.worker.delegation import BoundedHTTPTransport
+        original = BoundedHTTPTransport.handle_async_request
         messages = []
-        def drop_response(call, **kwargs):
-            response = original(call, **kwargs)
-            body = json.loads(call.data)
+        async def drop_response(transport, call):
+            response = await original(transport, call)
+            body = json.loads(call.content)
             if body["method"] == "SendMessage":
                 messages.append(body["params"]["message"]["messageId"])
                 if len(messages) == 1:
-                    response.read()
-                    response.close()
-                    raise error.URLError("lost response")
+                    await response.aclose()
+                    raise httpx.ReadError("lost response", request=call)
             return response
         with self.service.turn(self.parent, 5), \
-             patch("ax_local.worker.delegation.request.urlopen", side_effect=drop_response):
+             patch.object(BoundedHTTPTransport, "handle_async_request", new=drop_response):
             result = json.loads(tools["delegate_task"]["call"](
                 {"role": "backend_engineer", "task": "retry"}, timeout_seconds=2, call_id="tool-call"))
         self.assertEqual(result["state"], "TASK_STATE_COMPLETED")
@@ -441,6 +442,179 @@ class DelegationTests(unittest.TestCase):
                 result = json.load(response)
             self.assertEqual(result["id"], 1)
             self.wait_task(result["result"]["task"]["id"])
+
+    def test_protocol_validation_rejects_malformed_history_length_before_starting_worker(self):
+        from urllib import request
+        server = start_a2a_server(self.service, "127.0.0.1", 0)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        body = {"jsonrpc": "2.0", "id": "bad-history", "method": "SendMessage", "params": {
+            "message": {"messageId": "bad-history", "role": "ROLE_USER",
+                        "parts": [{"text": "must not run"}]},
+            "configuration": {"returnImmediately": True, "historyLength": "invalid"}}}
+        call = request.Request(f"http://127.0.0.1:{server.server_port}/a2a/backend_engineer",
+                               data=json.dumps(body).encode(), headers={
+            "Content-Type": "application/json", "A2A-Version": "1.0",
+            "Authorization": "Bearer " + self.token})
+        with self.service.turn(self.parent, 5), request.urlopen(call) as response:
+            result = json.load(response)
+            self.assertIn("error", result)
+            self.assertEqual(result["error"]["code"], -32602)
+            self.assertEqual(self.runner.chats, [])
+
+    def sdk_server(self):
+        server = start_a2a_server(self.service, "127.0.0.1", 0)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.service.base_url = f"http://127.0.0.1:{server.server_port}"
+        return self.service.base_url + "/a2a/backend_engineer"
+
+    def test_official_sdk_discovers_card_submits_polls_and_cancels(self):
+        import httpx
+        from a2a.client.card_resolver import A2ACardResolver
+        from a2a.client.transports.jsonrpc import JsonRpcTransport
+        from a2a.types import a2a_pb2 as types
+        from a2a.utils.errors import TaskNotFoundError, UnsupportedOperationError
+        url = self.sdk_server()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.runner.callback = lambda *_: release.wait(2)
+
+        async def check():
+            async with httpx.AsyncClient(headers={"A2A-Version": "1.0",
+                     "Authorization": "Bearer " + self.token}, trust_env=False) as http:
+                card = await A2ACardResolver(http, url).get_agent_card()
+                self.assertEqual(card.supported_interfaces[0].protocol_version, "1.0")
+                self.assertEqual(card.supported_interfaces[0].url, url)
+                transport = JsonRpcTransport(http, card, card.supported_interfaces[0].url)
+                params = types.SendMessageRequest(message=types.Message(
+                    message_id="sdk-cancel", role=types.ROLE_USER,
+                    parts=[types.Part(text="wait for cancellation")]),
+                    configuration=types.SendMessageConfiguration(return_immediately=True))
+                task = (await transport.send_message(params)).task
+                again = (await transport.send_message(params)).task
+                self.assertEqual(task.id, again.id)
+                with self.assertRaises(TaskNotFoundError):
+                    await transport.get_task(types.GetTaskRequest(id="unknown"))
+                with self.assertRaises(UnsupportedOperationError):
+                    await transport.list_tasks(types.ListTasksRequest())
+                canceled = await transport.cancel_task(types.CancelTaskRequest(id=task.id))
+                self.assertEqual(canceled.status.state, types.TASK_STATE_CANCELED)
+                polled = await transport.get_task(types.GetTaskRequest(id=task.id))
+                self.assertEqual(polled.status.state, types.TASK_STATE_CANCELED)
+                release.set()
+        with self.service.turn(self.parent, 5):
+            asyncio.run(check())
+        self.assertLessEqual(len(self.runner.chats), 1)
+        self.assertTrue(all(chat.closed for chat in self.runner.chats))
+
+    def test_sdk_blocking_submission_waits_for_result_without_blocking_other_requests(self):
+        import httpx
+        from a2a.client.transports.jsonrpc import JsonRpcTransport
+        from a2a.types import a2a_pb2 as types
+        url = self.sdk_server()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.runner.callback = lambda *_: release.wait(2)
+
+        async def check():
+            async with httpx.AsyncClient(headers={"A2A-Version": "1.0",
+                     "Authorization": "Bearer " + self.token}, trust_env=False) as http:
+                client = JsonRpcTransport(http, types.AgentCard(), url)
+                pending = asyncio.create_task(client.send_message(types.SendMessageRequest(
+                    message=types.Message(message_id="sdk-blocking", role=types.ROLE_USER,
+                                          parts=[types.Part(text="blocking result")]))))
+                self.assertTrue(await asyncio.to_thread(self.runner.entered.wait, 1))
+                self.assertFalse(pending.done())
+                task_id = self.runner.chats[0].session_id
+                polled = await asyncio.wait_for(client.get_task(
+                    types.GetTaskRequest(id=task_id)), timeout=1)
+                self.assertEqual(polled.status.state, types.TASK_STATE_WORKING)
+                release.set()
+                result = await asyncio.wait_for(pending, timeout=1)
+                self.assertEqual(result.task.status.state, types.TASK_STATE_COMPLETED)
+                self.assertEqual(result.task.artifacts[0].parts[0].text, "child result: blocking result")
+        with self.service.turn(self.parent, 5):
+            asyncio.run(check())
+
+    def test_http_authority_version_and_request_size_are_enforced(self):
+        import httpx
+        url = self.sdk_server()
+        body = {"jsonrpc": "2.0", "id": "guard", "method": "SendMessage", "params": {
+            "message": {"messageId": "guard", "role": "ROLE_USER", "parts": [{"text": "deny"}]},
+            "configuration": {"returnImmediately": True}}}
+        with httpx.Client(trust_env=False) as http:
+            self.assertEqual(http.post(url, json=body).status_code, 403)
+            with self.service.turn(self.parent, 5):
+                headers = {"A2A-Version": "1.0", "Authorization": "Bearer " + self.token}
+                self.assertEqual(http.post(url.replace("backend_engineer", "qa_engineer"),
+                                           json=body, headers=headers).status_code, 403)
+                wrong_version = http.post(url, json=body, headers={**headers, "A2A-Version": "2.0"})
+                self.assertEqual(wrong_version.json()["error"]["code"], -32009)
+                with patch.dict("ax_local.api.a2a_sdk.RUNTIME", {"limits": {"request_bytes": 16}}):
+                    self.assertEqual(http.post(url, content=b"x" * 17, headers=headers).status_code, 413)
+                self.assertEqual(self.runner.chats, [])
+
+    def test_sdk_cannot_read_another_parents_child_or_expose_storage_exceptions(self):
+        import httpx
+        url = self.sdk_server()
+        other = "1111111111111111"
+        other_token = self.service.worker_environment(other, self.roles["tech_lead"])["AX_DELEGATION_TOKEN"]
+        with self.service.turn(self.parent, 5), self.service.turn(other, 5):
+            task = self.wait_task(self.send()["id"])
+            body = {"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": task["id"]}}
+            with httpx.Client(trust_env=False) as http:
+                headers = {"A2A-Version": "1.0", "Authorization": "Bearer " + other_token}
+                self.assertEqual(http.post(url, json=body, headers=headers).json()["error"]["code"], -32001)
+                with patch.object(self.store, "get", side_effect=OSError("private-db-credential")):
+                    response = http.post(url, json=body, headers=headers)
+                    self.assertEqual(response.json()["error"]["code"], -32603)
+                    self.assertNotIn("private-db-credential", response.text)
+
+    def test_worker_deadline_sends_sdk_cancel_and_releases_child(self):
+        from ax_local.worker.delegation import make_tools
+        url = self.sdk_server()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.runner.callback = lambda *_: release.wait(2)
+        tools = make_tools({"AX_DELEGATION_URL": url.rsplit("/a2a/", 1)[0],
+                           "AX_DELEGATION_TOKEN": self.token,
+                           "AX_DELEGATION_ROLES": '["backend_engineer"]',
+                           "AX_DELEGATION_POLL_SECONDS": "0.01"})
+        with self.service.turn(self.parent, 5):
+            started = time.monotonic()
+            result = json.loads(tools["delegate_task"]["call"](
+                {"role": "backend_engineer", "task": "timeout"},
+                timeout_seconds=0.2, call_id="deadline"))
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertIn("error", result)
+            self.assertEqual(self.store.get(result["sessionId"])["roleConfig"]["_ax_delegation"]["state"],
+                             "TASK_STATE_CANCELED")
+            self.assertTrue(self.runner.chats[0].closed)
+            release.set()
+
+    def test_nested_workers_delegate_over_sdk_http(self):
+        from ax_local.worker.delegation import make_tools
+        self.sdk_server()
+        results = []
+        def callback(chat, _task):
+            if chat.config["_ax_role"] == "backend_engineer":
+                env = self.service.worker_environment(chat.session_id, chat.config)
+                env["AX_DELEGATION_POLL_SECONDS"] = "0.01"
+                results.append(json.loads(make_tools(env)["delegate_task"]["call"](
+                    {"role": "qa_engineer", "task": "nested SDK"},
+                    timeout_seconds=2, call_id="nested")))
+        self.runner.callback = callback
+        env = self.service.worker_environment(self.parent, self.roles["tech_lead"])
+        env["AX_DELEGATION_POLL_SECONDS"] = "0.01"
+        with self.service.turn(self.parent, 5):
+            result = json.loads(make_tools(env)["delegate_task"]["call"](
+                {"role": "backend_engineer", "task": "delegate onward"},
+                timeout_seconds=3, call_id="parent"))
+        self.assertEqual(result["state"], "TASK_STATE_COMPLETED")
+        self.assertEqual(results[0]["answer"], "child result: nested SDK")
+        self.assertEqual(len(self.runner.chats), 2)
+        self.assertTrue(all(chat.closed for chat in self.runner.chats))
 
 
 if __name__ == "__main__":

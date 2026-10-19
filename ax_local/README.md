@@ -449,16 +449,34 @@ docker compose --env-file .env -f ax_local/compose.yaml logs --tail=500 api | gr
 файловых и shell-инструментов: их ответы содержат предложения и сценарии,
 а выполнение проверок требует отдельно настроенных инструментов роли.
 
-Локальный адаптер реализует ограниченный набор
-[A2A 1.0 JSON-RPC](https://a2a-protocol.org/latest/specification/):
-`SendMessage` с неблокирующей отправкой текстовой задачи, `GetTask`,
+Клиент worker и HTTP/JSON-RPC сервер используют официальный
+[A2A Python SDK](https://github.com/a2aproject/a2a-python) `1.2.2`
+с протоколом [A2A 1.0](https://a2a-protocol.org/latest/specification/).
+Наш слой отвечает за роли, запуск AX, хранение сессий, лимиты и отмену;
+SDK проверяет и сериализует протокольные сообщения и ошибки.
+Поддерживаются `SendMessage` для текстовой задачи, `GetTask`,
 `CancelTask`, Agent Card по `/a2a/ROLE/.well-known/agent-card.json` и текстовый
-результат как Artifact. Клиент использует заголовок `A2A-Version: 1.0`.
+результат как Artifact. Клиент использует заголовок `A2A-Version: 1.0`
+и `configuration.returnImmediately: true`, затем опрашивает `GetTask`.
+При отсутствии `returnImmediately` сервер ждёт завершения задачи,
+не блокируя остальные HTTP-запросы. Старое поле `blocking` не используется.
 Streaming, push notifications, загрузка файлов и полный набор операций A2A
 не реализованы. Токен делегирования действует только во время хода его
 агента; он не сохраняется в PostgreSQL и не передаётся shell/MCP-процессам.
 
+Docker-образы устанавливают SDK автоматически. Для локальных Python-проверок
+установите `python3 -m pip install 'a2a-sdk[http-server]==1.2.2' 'uvicorn==0.42.0'`.
+Проверка реальных sandbox без вызова модели: скопируйте
+`ax_local/tests/test_a2a_sdk_live.py` в `/tmp/test_a2a_sdk_live.py` контейнера API
+и выполните `docker exec -e AX_TEST_SDK_LIVE=1 popot-ax-local-api-1 python /tmp/test_a2a_sdk_live.py`.
+
 ## Подготовка
+
+Версии исходников AX, Substrate и `ko` задаются в одном файле
+`ax_local/docker/versions.env`. Его читают оба AX Dockerfile, bootstrap и
+проверки локальных патчей; Compose и обычный `docker build` используют те же
+значения без передачи build args. При обновлении AX меняйте `AX_VERSION` и
+`AX_COMMIT` вместе и проверяйте совместимость Substrate и наших патчей.
 
 Нужны работающий Docker Desktop, `git`, Go 1.27.1+, `kubectl` и Python 3.10+.
 Для выбранного провайдера подготовьте его ключ в `.env`, если он требуется.
@@ -679,3 +697,47 @@ work budget expires. A final model timeout also returns a partial result; it
 never repeats external writes. Partial turns are marked failed in Cognee and
 are not captured as completed project knowledge. A missing response does not
 undo already published GitHub reviews/comments; inspect them before retrying.
+
+### Мониторинг ресурсов локального кластера
+
+`bash ax_local/up.sh` настраивает существующий Prometheus и запускает Grafana:
+<http://127.0.0.1:3002/d/popot-resources>. Панель доступна локально без входа,
+с правами просмотра. Можно выбирать namespace, pod, role, task и имя процесса.
+Фильтр role ограничивает задачи и процессы sandbox; общие pod/контейнеры
+показывают ресурсы инфраструктуры и фильтруются отдельно через namespace/pod.
+
+- CPU и working-set память pod/контейнеров собираются с kubelet/cAdvisor
+  каждые 15 секунд; requests, limits и restarts — через kube-state-metrics.
+- Внутри активного sandbox harness каждые 5 секунд читает `/proc` и отправляет
+  CPU, RSS, virtual memory и число потоков каждого процесса в установленный
+  OpenTelemetry Collector. В метрики входят роль, Task, PID и имя процесса; аргументы
+  запуска, переменные окружения и содержимое файлов не собираются.
+- При suspend сбор внутри sandbox останавливается. Текущие показатели исчезают
+  с панели после 20 секунд без новых samples; история остаётся. Короткие процессы,
+  завершившиеся между samples, могут не попасть в метрики. CPU 100% означает
+  одно ядро; сумма RSS может повторно учитывать общие страницы памяти.
+- Панели по ролям показывают CPU, сумму RSS процессов, активные задачи и число
+  разных задач за выбранный период, включая завершённые и suspended. Список ролей
+  строится из истории метрик выбранного периода. Метка role добавляется новым
+  Task после обновления API и worker; старые samples без роли доступны при All,
+  но задним числом роли им не присваиваются. `unassigned` означает Task без роли.
+  Имя `popot-chat-<session_id>` используется для сессий любых ролей: это Task
+  внутри общего worker pod, а не отдельная роль `chat` или новый pod.
+- Prometheus хранит историю до 7 дней или 1 GB данных, в зависимости от того,
+  какой предел будет достигнут первым. Prometheus и Grafana используют PVC;
+  повторный `up.sh` и перезапуск pod сохраняют данные. Удаление kind-кластера
+  удаляет и его локальные volumes. При первом включении существующий TSDB
+  копируется на PVC с краткой остановкой записи только в Prometheus.
+
+Отдельно установить/обновить мониторинг:
+`python3 ax_local/cluster/resource_monitoring.py install`.
+После перезагрузки компьютера `up.sh` снова запускает соединение с Grafana;
+для запуска только соединения используйте
+`python3 ax_local/cluster/resource_monitoring.py forward`.
+Его лог: `ax_local/.local/resource-monitoring-forward.log`. Соединение слушает
+только `127.0.0.1` и автоматически восстанавливается после замены pod Grafana.
+Установщик проверяет локальный kind context; production-кластеры не поддерживает.
+
+Изменения сборщика процессов попадают в новые Task после
+`bash ax_local/rebuild-worker.sh`. Проверка без обращений к модели:
+`AX_TEST_LIVE=1 python3 -m unittest ax_local.tests.test_resource_monitoring_live`.
