@@ -62,6 +62,31 @@ the GitHub repository in SonarCloud for PR decoration. To enforce checks before
 merging, add **Python, AX and graph tests** and **SonarQube Cloud Quality Gate**
 to the repository's branch rules; this workflow does not change branch protection.
 
+## Security checks
+
+[Security](.github/workflows/security.yml) runs alongside CI:
+
+- **CodeQL** analyzes Python, JavaScript/TypeScript and GitHub Actions workflows
+  with the `security-extended` query suite on pushes, pull requests, manual runs
+  and weekly on Monday at 06:23 UTC. Findings appear under
+  [Security → Code scanning](https://github.com/YauheniPo/popot-agents/security/code-scanning).
+  Go snippets and fixtures are not included in this analysis.
+- **GitGuardian secret scan** scans pushed commits and same-repository pull
+  requests using the Actions secret `GITGUARDIAN_API_KEY`. A detected secret fails
+  the job; its SARIF report is uploaded to Code scanning even when the scan fails.
+  Fork and Dependabot pull requests are skipped because the API key is unavailable.
+  Secret values stay redacted; `.env` is not loaded by the workflow.
+- [Dependabot](.github/dependabot.yml) checks Python dependencies in
+  `pyproject.toml` and pinned GitHub Actions weekly and opens update pull requests.
+  Dependabot alerts and security updates must also be enabled in repository
+  settings; their status is independent of this file.
+
+GitHub secret scanning and push protection run through repository settings.
+They are separate from GitGuardian and help detect or block supported credentials.
+CodeQL and SARIF uploads use the job-scoped `GITHUB_TOKEN`; no personal GitHub
+PAT is required in Actions secrets. Keep CodeQL default setup disabled when using
+this versioned workflow. SonarCloud continues to report its own Quality Gate.
+
 ## Project memory and graph UI
 
 Run `bash memory/up.sh`, then rebuild the agent stack with
