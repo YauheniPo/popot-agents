@@ -9,6 +9,63 @@ from ax_local.api.server import kind_control_plane_host, make_server
 
 
 class AxServerTests(unittest.TestCase):
+    def test_harness2_model_is_required_only_when_a_role_enables_it(self):
+        environment = {
+            'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
+            'AX_LOCAL_BASE_URL': 'http://proxy.test/v1',
+            'AX_LOCAL_SESSION_BACKEND': 'file',
+            'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_API_KEY': 'test-gateway-key',
+        }
+        role = {'agent': 'omniroute_code', 'instructions': '', 'tools': [], 'harness2': {'enabled': True}}
+        for value in (None, '', '   '):
+            selected_env = dict(environment)
+            if value is not None:
+                selected_env['HARNESS2_IMPROVER_MODEL'] = value
+            with self.subTest(value=value), patch.dict(os.environ, selected_env, clear=True), \
+                 patch('ax_local.api.server.load_roles', return_value={'reviewer': role}), \
+                 patch('ax_local.api.server.create_server') as create:
+                with self.assertRaisesRegex(ValueError, 'HARNESS2_IMPROVER_MODEL.*\\.env'):
+                    make_server()
+                create.assert_not_called()
+        disabled = {**role, 'harness2': {'enabled': False}}
+        with patch.dict(os.environ, environment, clear=True), \
+             patch('ax_local.api.server.load_roles', return_value={'reviewer': disabled}), \
+             patch('ax_local.api.server.create_server') as create:
+            make_server()
+        runner = create.call_args.args[0]['omniroute_code']
+        self.assertEqual(runner.harness2_environment, {})
+        runner.shutdown_worker_queue()
+
+    def test_harness2_capability_is_sent_only_to_selected_roles(self):
+        environment = {
+            'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
+            'AX_LOCAL_BASE_URL': 'http://proxy.test/v1',
+            'AX_LOCAL_SESSION_BACKEND': 'file',
+            'OMNIROUTE_MODEL': 'ax-free', 'OMNIROUTE_CODE_MODEL': 'ax-code-free',
+            'OMNIROUTE_API_KEY': 'private-gateway-key',
+            'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
+        }
+        roles = {'reviewer': {'agent': 'omniroute_code', 'instructions': '', 'tools': [],
+                              'harness2': {'enabled': True}},
+                 'backend': {'agent': 'omniroute_code', 'instructions': '', 'tools': []}}
+        with patch.dict(os.environ, environment, clear=True), \
+             patch('ax_local.api.server.load_roles', return_value=roles), \
+             patch('ax_local.api.server.create_server') as create:
+            server = make_server()
+        runner = create.call_args.args[0]['omniroute_code']
+        try:
+            manifests = {name: runner.task_manifest('0123456789abcdef', role)
+                         for name, role in roles.items()}
+            env = {item['name']: item['value'] for item in manifests['reviewer']['spec']['env']}
+            self.assertEqual(env['HARNESS2_IMPROVER_MODEL'], 'ax-harness-free')
+            self.assertEqual(server.provider_routes[env['HARNESS2_PROXY_TOKEN']].model, 'ax-harness-free')
+            self.assertNotEqual(env['HARNESS2_PROXY_TOKEN'], env['AX_PROXY_TOKEN'])
+            self.assertNotIn('private-gateway-key', json.dumps(manifests))
+            ordinary = {item['name'] for item in manifests['backend']['spec']['env']}
+            self.assertNotIn('HARNESS2_PROXY_TOKEN', ordinary)
+        finally:
+            runner.shutdown_worker_queue()
+
     def test_role_profiles_select_models_and_share_one_worker_queue(self):
         environment = {
             'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
@@ -19,6 +76,7 @@ class AxServerTests(unittest.TestCase):
             'OMNIROUTE_MODEL': 'ax-free',
             'OMNIROUTE_CODE_MODEL': 'ax-code-free',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
+            'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
             # Stale overrides must not replace the role's profile.
             'AX_LOCAL_PROVIDER': 'openrouter', 'AX_LOCAL_MODEL': 'wrong-model',
             'AX_LOCAL_PROXY_TOKEN': 'old-global-capability',
@@ -29,14 +87,14 @@ class AxServerTests(unittest.TestCase):
         roles = create.call_args.kwargs['roles']
         self.assertEqual(roles['analyst']['agent'], 'omniroute')
         runners = create.call_args.args[0]
-        self.assertEqual(set(runners), {'openrouter', 'omniroute', 'omniroute_code'})
-        self.assertEqual(runners['openrouter'].model, 'role-cloud-model')
+        self.assertEqual(set(runners), {'omniroute', 'omniroute_code'})
+        for name in ('chat', 'planner', 'tech_lead', 'qa_engineer', 'cron_demo'):
+            self.assertEqual(roles[name]['agent'], 'omniroute')
         self.assertEqual(runners['omniroute'].model, 'ax-free')
         self.assertEqual(runners['omniroute_code'].model, 'ax-code-free')
-        self.assertIs(runners['openrouter'].worker_queue, runners['omniroute_code'].worker_queue)
         self.assertIs(runners['omniroute'].worker_queue, runners['omniroute_code'].worker_queue)
         self.assertNotEqual(runners['omniroute'].proxy_token, runners['omniroute_code'].proxy_token)
-        queue = runners['openrouter'].worker_queue
+        queue = runners['omniroute'].worker_queue
         leases = [(f'occupied-{index}', queue.acquire(f'occupied-{index}'))
                   for index in range(queue.max_workers)]
         with patch.object(runners['omniroute_code'], '_run') as run:
@@ -77,6 +135,7 @@ class AxServerTests(unittest.TestCase):
             "OMNIROUTE_MODEL": "ax-free",
             "OMNIROUTE_CODE_MODEL": "ax-code-free",
             "OMNIROUTE_API_KEY": "gateway-key",
+            "HARNESS2_IMPROVER_MODEL": "ax-harness-free",
             "AX_LOCAL_BASE_URL": "http://172.18.0.5:8004/v1",
             "AX_LOCAL_SESSION_BACKEND": "file",
         }
@@ -85,7 +144,7 @@ class AxServerTests(unittest.TestCase):
         roles = create.call_args.kwargs["roles"]
         self.assertEqual(roles["backend_engineer"]["agent"], "omniroute_code")
         self.assertIn("bash", roles["backend_engineer"]["tools"])
-        self.assertEqual(set(create.call_args.args[0]), {"openrouter", "omniroute", "omniroute_code"})
+        self.assertEqual(set(create.call_args.args[0]), {"omniroute", "omniroute_code"})
         self.assertNotIn("allowed_roles", server.delegation.policy)
         self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer"])
         env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
@@ -104,6 +163,7 @@ class AxServerTests(unittest.TestCase):
             "OMNIROUTE_MODEL": "ax-free",
             "OMNIROUTE_CODE_MODEL": "ax-code-free",
             "OMNIROUTE_API_KEY": "gateway-key",
+            "HARNESS2_IMPROVER_MODEL": "ax-harness-free",
             "AX_LOCAL_BASE_URL": "http://172.18.0.5:8004/v1",
             "AX_LOCAL_SESSION_BACKEND": "file",
             "AX_LOCAL_BIND_HOST": "0.0.0.0",

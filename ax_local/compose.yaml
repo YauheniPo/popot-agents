@@ -23,6 +23,31 @@ services:
     stop_grace_period: 40s
     restart: unless-stopped
 
+  omniroute-init:
+    image: ${PYTHON_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
+    profiles: [omniroute]
+    depends_on:
+      omniroute:
+        condition: service_healthy
+    environment:
+      OMNIROUTE_URL: http://omniroute:20128
+      OMNIROUTE_INITIAL_PASSWORD: ${OMNIROUTE_INITIAL_PASSWORD:-}
+      OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    command:
+      - python
+      - /bootstrap/omniroute.py
+      - --config
+      - /config/omniroute-settings.json
+      - --combos
+      - /config/omniroute-combos.json
+    volumes:
+      - ./omniroute.py:/bootstrap/omniroute.py:ro
+      - ../config:/config:ro
+    restart: "no"
+
   db:
     image: postgres:${POSTGRES_VERSION:?Use bash compose.sh to load pyproject.toml versions}
     restart: unless-stopped

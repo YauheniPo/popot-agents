@@ -239,7 +239,7 @@ class FeatureTeamConfigTests(unittest.TestCase):
         config = Path(__file__).resolve().parents[1] / "config"
         roles = load_roles(config / "roles.json", load_agents(config / "agents.json"))
         demo = roles["cron_demo"]
-        self.assertEqual(demo["agent"], "openrouter")
+        self.assertEqual(demo["agent"], "omniroute")
         self.assertEqual(demo["tools"], ["utc_time"])
         self.assertEqual(demo["cron"], [{"schedule": "0 9 * * *",
                                         "task": "Use utc_time and report the current UTC date and time."}])

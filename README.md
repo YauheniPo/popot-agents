@@ -17,7 +17,7 @@ Use Python 3.11+ for the AX scripts, a running Docker daemon, Git, Go and kubect
 ```bash
 cp .env.example .env
 # Set POPOT_DB_PASSWORD and the credentials/models for the roles you use.
-# Analyst and engineering roles use OmniRoute: complete its setup below first.
+# OmniRoute roles also need its dashboard password, gateway key and upstream keys.
 bash ax_local/up.sh
 ```
 
@@ -25,6 +25,8 @@ The launcher starts AX, memory and resource monitoring. The MCP endpoint is
 **http://127.0.0.1:8003/mcp** (`AX_MCP_PUBLISH_PORT` overrides the published port).
 For on-demand diagnosis of AX pods in kind, see
 [HolmesGPT setup](ax_local/README.md#holmesgpt-диагностика-ax-в-kind).
+For opt-in prompt refinement on a frozen PR, see
+[Harness² for AX roles](ax_local/README.md#harness2-для-ролей-ax).
 The API listens on port 8002 inside Compose; it is not published on the host.
 See [operations and monitoring](ax_local/README.md) and the
 [interactive architecture](ax_local/architecture.html).
@@ -64,6 +66,8 @@ its indexed graph. Memory persists independently of AX Tasks. See
 | [config/runtime.json](config/runtime.json) | Harness, session, model/tool/MCP budgets, message limits, logging and memory |
 | [config/agents.json](config/agents.json) | HTTP provider endpoints, model variable names and model parameters |
 | [config/roles.json](config/roles.json) | Role instructions, tools, permissions, skills, delegation and schedules |
+| [config/omniroute-settings.json](config/omniroute-settings.json) | OmniRoute settings, resilience, provider secret references and AX key policy |
+| [config/omniroute-combos.json](config/omniroute-combos.json) | Model order, fallback chains and their timeouts |
 | [ax_local/config.json](ax_local/config.json) | kind context, WorkerPool, Task resources, queue, snapshots, AX timeouts, delegation and proxy |
 | [pyproject.toml](pyproject.toml) | Python dependencies and pinned service, runtime and build versions |
 | [compose.sh](compose.sh) | Docker Compose with versions loaded from pyproject.toml |
@@ -96,14 +100,13 @@ Supported fields are `effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhig
 `max`), a positive integer `max_tokens`, and boolean `enabled`/`exclude`.
 Choose either `effort` or `reasoning.max_tokens`, not both. Use
 `{"enabled": true}` for provider defaults. Omitting `reasoning` leaves provider
-behavior unchanged. The `openrouter` and `nous` profiles explicitly set
-`{"enabled": true, "exclude": false}`. The earlier models were checked on
-2026-10-10 against each provider's `/v1/models` catalog: `openrouter/free` and
-`inclusionai/ling-3.0-flash-fin:free` advertise `reasoning` support. A live
-OpenRouter probe returned reasoning; Nous chat completion requests returned
-HTTP 404 both with and without reasoning for that old model. On 2026-10-18,
-`upstage/solar-mini4:free` passed two tool/result/answer turns through OmniRoute
-and replaced Ling in the local `NOUS_MODEL` setting.
+behavior unchanged. Active OmniRoute profiles and the direct `openrouter`
+profile disable reasoning and cap output at 8192 tokens. The direct OpenRouter
+model is pinned to `cohere/north-mini-code:free`; working roles use explicit
+OmniRoute fallback combos instead of the random `openrouter/free` pool.
+The optional `nous` profile retains its provider-default reasoning setting,
+but Solar Mini 4 is excluded from AX combos after malformed tool arguments in
+the 2026-10-20 experiment.
 Ollama's configured `qwen2.5-coder:14b` does not advertise a separate thinking
 mode; the `ollama_cloud` profile has
 no model selected in the local environment and keep reasoning unset.
@@ -112,25 +115,21 @@ Model/provider support still determines which options work, including whether
 reasoning can be disabled or returned. `openrouter/free` chooses models dynamically.
 See [OpenRouter reasoning parameters](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 
-The `nvidia_nim` profile uses `NVIDIA_MODEL=nvidia/nemotron-3-super-120b-a12b`
+The `nvidia_nim` profile uses `NVIDIA_MODEL=nvidia/nemotron-3.5-lightning-30b-a3b`
 in `.env.example` and the local `.env`, with NVIDIA's native thinking option:
 
 ```json
-"model_parameters": {"chat_template_kwargs": {"enable_thinking": true}}
+"model_parameters": {"max_tokens": 8192, "chat_template_kwargs": {"enable_thinking": false}}
 ```
 
 Only boolean `enable_thinking` is accepted inside `chat_template_kwargs`.
 This is a provider-specific option, distinct from OpenRouter's `reasoning` object.
-[Nemotron 3 Super](https://build.nvidia.com/nvidia/nemotron-3-super-120b-a12b/modelcard)
-supports tool use and configurable thinking. A live check on 2026-10-10 completed
-a tool-call/result/answer cycle and returned `reasoning_content`.
-The NVIDIA account's `/v1/models` catalog also listed
-[`moonshotai/kimi-k3`](https://build.nvidia.com/moonshotai/kimi-k3/modelcard) and
-[`deepseek-ai/deepseek-v4.1-flash`](https://build.nvidia.com/deepseek-ai/deepseek-v4.1-flash/modelcard).
-Kimi K3 passed the same short probe, but its required reasoning history across
-turns is not fully preserved by our session storage; it needs further harness
-work before use in persistent chats. DeepSeek did not respond within the probe's
-45-second deadline. These are availability/compatibility checks, not a quality benchmark.
+On 2026-10-20, Lightning passed a declared tool-call/result/answer cycle with
+thinking disabled, both directly and through OmniRoute. The old Nemotron 3 Super
+returned HTTP 404 with the configured account despite remaining in the catalog,
+so it was removed from active routes. These are availability/compatibility
+checks, not a quality benchmark. Enable thinking only after checking output
+budgets and multi-turn behavior for that exact model.
 Changing `NVIDIA_MODEL` configures the `nvidia_nim` profile. To use it in AX,
 set the relevant role's `agent` to `nvidia_nim` in `config/roles.json` and rebuild.
 
@@ -512,9 +511,11 @@ Docker profiles `ollama_claude` and `ollama_claude_local` have been removed.
 
 For routing across free provider models, follow the optional
 [OmniRoute setup for AX](ax_local/README.md#omniroute-для-ax). It uses named
-combos of explicitly selected models. `analyst` uses `ax-free`; engineers and
-the reviewer use `ax-code-free`. Configure and start the gateway before
-starting AX, or assign those roles to another configured profile.
+combos of explicitly selected models, recorded in `config/omniroute-combos.json`.
+Engineers and the reviewer use `ax-code-free`; other configured roles use
+`ax-free`. The launcher provisions the gateway from the repository configuration
+and `.env` secrets before starting AX. Assign those roles to another configured
+profile to run without OmniRoute.
 
 ## Local checks
 

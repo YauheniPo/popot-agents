@@ -23,6 +23,7 @@ class OmniRouteTests(unittest.TestCase):
             'OMNIROUTE_MODEL': 'ax-free',
             'OMNIROUTE_CODE_MODEL': 'ax-code-free',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
+            'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
             'OPENROUTER_MODEL': 'direct-provider-model',
             'OPENROUTER_API_KEY': 'direct-provider-key',
         }

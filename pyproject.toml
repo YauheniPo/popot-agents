@@ -9,6 +9,9 @@ ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.42.0"]
 
 [dependency-groups]
 mcp = ["mcp==2.3.0"]
+harness2 = [
+    "harness2 @ git+https://github.com/google-research/harness2@1cfe254e8d25b15f37048c3730134686abe60335",
+]
 # Official Fetch/Git servers still require SDK 1.x; install in a separate venv.
 mcp-tools = [
     "mcp==1.30.0",

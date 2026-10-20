@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certifi
     && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml /build/pyproject.toml
 RUN python -m pip install --no-cache-dir --upgrade 'pip>=25.1' \
-    && pip install --no-cache-dir --group /build/pyproject.toml:mcp a2a-sdk==1.2.2 \
+    && pip install --no-cache-dir --group /build/pyproject.toml:mcp --group /build/pyproject.toml:harness2 a2a-sdk==1.2.2 \
     && python -m venv /opt/mcp-tools \
     && /opt/mcp-tools/bin/pip install --no-cache-dir --upgrade 'pip>=25.1' \
     && /opt/mcp-tools/bin/pip install --no-cache-dir --group /build/pyproject.toml:mcp-tools \

@@ -1,6 +1,24 @@
-.venv/
-.idea/
+# Python environments and caches
+.venv*/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration and runtime state
 .env
+.env.*
+!.env.example
 .sessions/
 .workspaces/
+
+# Generated reports and coverage
+/reports/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor and OS files
+.idea/
+.DS_Store

@@ -6,13 +6,30 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
-from ax_local.cluster.holmes import IMAGE, MODEL, NAMESPACE, manifests, investigation_job, scope, wait_for_pod, ensure_image, main
+from ax_local.cluster.holmes import IMAGE, NAMESPACE, manifests, investigation_job, scope, wait_for_pod, ensure_image, main
 
 
 CONFIG = {'context': 'kind-popot-ax', 'atespace': 'ate-demo-counter'}
+TEST_MODEL = 'selected-free-combo'
 
 
 class HolmesTests(unittest.TestCase):
+    def test_model_is_required_before_any_cluster_or_image_actions(self):
+        for value in (None, '', '   '):
+            environment = {'OMNIROUTE_API_KEY': 'test-gateway-key'}
+            if value is not None:
+                environment['HOLMES_MODEL'] = value
+            with self.subTest(value=value), patch.dict(os.environ, environment, clear=True), \
+                 patch('sys.argv', ['holmes', 'Check AX']), \
+                 patch('ax_local.cluster.holmes.load_dotenv'), \
+                 patch('ax_local.cluster.holmes.subprocess.run',
+                       side_effect=AssertionError('Cluster access before HOLMES_MODEL validation')) as execute, \
+                 patch('ax_local.cluster.holmes.ensure_image') as image:
+                with self.assertRaisesRegex(ValueError, 'HOLMES_MODEL.*\\.env'):
+                    main()
+                execute.assert_not_called()
+                image.assert_not_called()
+
     def test_long_diagnosis_logs_keep_streaming_and_key_only_uses_stdin(self):
         def run(args, **kwargs):
             if 'nodes' in args:
@@ -24,7 +41,7 @@ class HolmesTests(unittest.TestCase):
                 output = {}
             return subprocess.CompletedProcess(args, 0, json.dumps(output))
 
-        with patch.dict(os.environ, {'OMNIROUTE_API_KEY': 'private-gateway-key', 'HOLMES_MODEL': MODEL}), \
+        with patch.dict(os.environ, {'OMNIROUTE_API_KEY': 'private-gateway-key', 'HOLMES_MODEL': TEST_MODEL}), \
              patch('sys.argv', ['holmes', 'Check AX']), \
              patch('ax_local.cluster.holmes.load_dotenv'), \
              patch('ax_local.cluster.holmes.manifests', return_value=[]), \
@@ -41,6 +58,10 @@ class HolmesTests(unittest.TestCase):
         secret = next(json.loads(call.kwargs['input']) for call in calls
                       if call.kwargs.get('input') and 'Secret' in call.kwargs['input'])
         self.assertEqual(secret['stringData']['api-key'], 'private-gateway-key')
+        job = next(json.loads(call.kwargs['input']) for call in calls
+                   if 'create' in call.args[0])
+        env = {item['name']: item.get('value') for item in job['spec']['template']['spec']['containers'][0]['env']}
+        self.assertEqual(env['HOLMES_MODEL'], TEST_MODEL)
 
     def test_cached_kind_image_does_not_trigger_a_download(self):
         with patch('ax_local.cluster.holmes.subprocess.run') as run:
@@ -97,7 +118,7 @@ class HolmesTests(unittest.TestCase):
         self.assertEqual(kubeconfig['clusters'][0]['cluster']['server'], 'https://kubernetes.default.svc')
         user = kubeconfig['users'][0]['user']
         self.assertEqual(user, {'tokenFile': '/var/run/secrets/kubernetes.io/serviceaccount/token'})
-        container = investigation_job('Check AX', MODEL)['spec']['template']['spec']['containers'][0]
+        container = investigation_job('Check AX', TEST_MODEL)['spec']['template']['spec']['containers'][0]
         env = {entry['name']: entry for entry in container['env']}
         self.assertEqual(env['KUBECONFIG']['value'], '/etc/popot-holmes/kubeconfig.json')
 
@@ -124,7 +145,7 @@ class HolmesTests(unittest.TestCase):
         self.assertNotIn('-o json', command)
 
     def test_job_uses_pinned_model_and_secret_without_host_credentials(self):
-        job = investigation_job('Check AX pods', MODEL)
+        job = investigation_job('Check AX pods', TEST_MODEL)
         self.assertEqual(job['metadata']['namespace'], NAMESPACE)
         self.assertEqual(job['spec']['backoffLimit'], 0)
         self.assertEqual(job['spec']['activeDeadlineSeconds'], 600)
@@ -133,7 +154,7 @@ class HolmesTests(unittest.TestCase):
         container = pod['containers'][0]
         self.assertEqual(container['image'], IMAGE)
         env = {entry['name']: entry for entry in container['env']}
-        self.assertEqual(env['HOLMES_MODEL']['value'], MODEL)
+        self.assertEqual(env['HOLMES_MODEL']['value'], TEST_MODEL)
         self.assertEqual(env['OPENAI_API_KEY']['valueFrom']['secretKeyRef'], {
             'name': 'holmes-omniroute', 'key': 'api-key'})
         self.assertFalse(any('hostPath' in volume for volume in pod['volumes']))

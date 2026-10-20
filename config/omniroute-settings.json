@@ -1,0 +1,69 @@
+{
+  "settings": {
+    "cloudEnabled": false,
+    "autoRefreshProviderQuota": true,
+    "autoRefreshProviderQuotaInterval": 180,
+    "mcpEnabled": false,
+    "a2aEnabled": false,
+    "comboAutoPromoteEnabled": false,
+    "customSystemPromptEnabled": false
+  },
+  "compression": {
+    "enabled": false,
+    "defaultMode": "off",
+    "preserveSystemPrompt": true
+  },
+  "resilience": {
+    "connectionCooldown": {
+      "apikey": {
+        "baseCooldownMs": 3000,
+        "useUpstreamRetryHints": true,
+        "maxBackoffSteps": 5
+      }
+    },
+    "providerBreaker": {
+      "apikey": {
+        "failureThreshold": 12,
+        "degradationThreshold": 7,
+        "resetTimeoutMs": 30000
+      }
+    },
+    "waitForCooldown": {
+      "enabled": true,
+      "maxRetries": 3,
+      "maxRetryWaitSec": 30
+    },
+    "comboCooldownWait": {
+      "enabled": true,
+      "maxWaitMs": 90000,
+      "maxAttempts": 5,
+      "budgetMs": 300000
+    },
+    "providerCooldown": {
+      "enabled": false
+    },
+    "quotaPreflight": {
+      "enabled": false
+    }
+  },
+  "providers": {
+    "openrouter": {
+      "name": "popot-ax-openrouter",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
+    },
+    "nvidia": {
+      "name": "popot-ax-nvidia",
+      "apiKeyEnv": "NVIDIA_API_KEY"
+    }
+  },
+  "apiKey": {
+    "name": "popot-ax-free",
+    "keyEnv": "OMNIROUTE_API_KEY",
+    "permissions": {
+      "compressionEnabled": false,
+      "cacheDefaultMode": "bypass",
+      "allowAutoCombos": false,
+      "scopes": ["self:usage"]
+    }
+  }
+}

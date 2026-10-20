@@ -1,0 +1,79 @@
+{
+  "ax-free": {
+    "name": "ax-free",
+    "description": "AX free-only development routes; verified tool/result/answer cycles on 2026-10-20. Thinking is disabled by AX profiles.",
+    "strategy": "priority",
+    "models": [
+      {
+        "kind": "model",
+        "providerId": "openrouter",
+        "model": "openrouter/cohere/north-mini-code:free"
+      },
+      {
+        "kind": "model",
+        "providerId": "nvidia",
+        "model": "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"
+      },
+      {
+        "kind": "model",
+        "providerId": "openrouter",
+        "model": "openrouter/nvidia/nemotron-3.5-lightning:free"
+      }
+    ],
+    "config": {
+      "targetTimeoutMs": 45000,
+      "comboTimeoutMs": 105000,
+      "maxGlobalAttempts": 3,
+      "maxSetRetries": 0,
+      "compressionMode": "off"
+    }
+  },
+  "ax-code-free": {
+    "name": "ax-code-free",
+    "description": "AX free-only coding routes; verified tool/result/answer cycles on 2026-10-20. Thinking is disabled by AX profiles.",
+    "strategy": "priority",
+    "models": [
+      {
+        "kind": "model",
+        "providerId": "openrouter",
+        "model": "openrouter/cohere/north-mini-code:free"
+      },
+      {
+        "kind": "model",
+        "providerId": "nvidia",
+        "model": "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"
+      },
+      {
+        "kind": "model",
+        "providerId": "openrouter",
+        "model": "openrouter/nvidia/nemotron-3.5-lightning:free"
+      }
+    ],
+    "config": {
+      "targetTimeoutMs": 45000,
+      "comboTimeoutMs": 105000,
+      "maxGlobalAttempts": 3,
+      "maxSetRetries": 0,
+      "compressionMode": "off"
+    }
+  },
+  "ax-harness-free": {
+    "name": "ax-harness-free",
+    "description": "Harness2 prompt optimizer: full-size free Super VL; thinking disabled by the HTTP profile.",
+    "strategy": "priority",
+    "models": [
+      {
+        "kind": "model",
+        "providerId": "openrouter",
+        "model": "openrouter/nvidia/nemotron-3.5-super-vl:free"
+      }
+    ],
+    "config": {
+      "targetTimeoutMs": 90000,
+      "comboTimeoutMs": 105000,
+      "maxGlobalAttempts": 1,
+      "maxSetRetries": 0,
+      "compressionMode": "off"
+    }
+  }
+}

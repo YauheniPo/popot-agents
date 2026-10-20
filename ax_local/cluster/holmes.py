@@ -19,7 +19,6 @@ from ax_local.cluster.build_versions import BUILD_VERSIONS
 ROOT = Path(__file__).resolve().parents[2]
 NAMESPACE = 'ax-diagnostics'
 IMAGE = 'robustadev/holmes:' + BUILD_VERSIONS['HOLMES_VERSION']
-MODEL = 'nvidia/nvidia/nemotron-3-super-120b-a12b'
 
 
 def scope(config):
@@ -172,6 +171,13 @@ def main():
     args = parser.parse_args()
     config = json.loads((ROOT / 'ax_local/config.json').read_text())
     scope(config)
+    load_dotenv(ROOT / '.env')
+    model = os.environ.get('HOLMES_MODEL', '').strip()
+    if not model:
+        raise ValueError('Set HOLMES_MODEL in .env before running Holmes')
+    key = os.environ.get('OMNIROUTE_API_KEY', '').strip()
+    if not key:
+        raise ValueError('Set OMNIROUTE_API_KEY in .env before running Holmes')
     command = ['kubectl', f'--kubeconfig={ROOT / "ax_local/.local/kubeconfig"}',
                f'--context={config["context"]}']
 
@@ -185,13 +191,6 @@ def main():
     if len(nodes) != 1 or nodes[0]['metadata']['name'] != expected:
         raise ValueError('Expected the single-node local AX kind cluster')
     ensure_image(expected, nodes[0]['status']['nodeInfo']['architecture'])
-    load_dotenv(ROOT / '.env')
-    key = os.environ.get('OMNIROUTE_API_KEY', '').strip()
-    if not key:
-        raise ValueError('Set OMNIROUTE_API_KEY in .env before running Holmes')
-    model = os.environ.get('HOLMES_MODEL', MODEL).strip()
-    if not model:
-        raise ValueError('HOLMES_MODEL must name an allowed OmniRoute model')
     print(kube('apply', '--server-side', '-f', '-', payload={
         'apiVersion': 'v1', 'kind': 'List', 'items': manifests(config)}).strip(), flush=True)
     kube('apply', '--server-side', '-f', '-', payload={

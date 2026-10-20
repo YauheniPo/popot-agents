@@ -50,6 +50,7 @@ class AxAgentRunner:
         self.proxy_token = proxy_token
         self.model_parameters = validate_model_parameters(
             {} if model_parameters is None else model_parameters, 'model_parameters')
+        self.harness2_environment = {}
         self.delegation = None
         self.worker_queue = worker_queue if worker_queue is not None else WorkerQueue(
             AX_CONFIG['max_workers'], AX_CONFIG['worker_queue_timeout_seconds'])
@@ -106,6 +107,8 @@ class AxAgentRunner:
         }
         if self.model_parameters:
             env['HARNESS_MODEL_PARAMETERS_JSON'] = json.dumps(self.model_parameters)
+        if role_config.get('harness2', {}).get('enabled'):
+            env.update(self.harness2_environment)
         if role_config.get("mcpServers") or set(role_config.get("tools", [])) & {
                 "bash", "git_clone", "read_file", "write_file", "download_file"}:
             env["POPOT_TOOLS_UID"] = "10001"
