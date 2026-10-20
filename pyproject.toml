@@ -8,7 +8,7 @@ dependencies = ["psycopg[binary]==3.3.6"]
 ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.42.0"]
 
 [dependency-groups]
-ci = ["pytest==9.1.1", "coverage==7.16.0", "mcp==1.30.0"]
+ci = ["pytest==9.1.1", "coverage==7.16.0", "mcp==2.3.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "ax_local/tests"]
