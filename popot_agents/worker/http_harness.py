@@ -214,7 +214,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         memory.run_complete = False
         if failed_delegations:
             answer = 'Незавершённые подзадачи:\n' + '\n'.join(failed_delegations.values())
-        return ('Частичный результат: лимит времени на работу исчерпан. '
+        return ('Частичный результат: лимит работы исчерпан. '
                 'Полнота проверки не подтверждена. Выполненные внешние действия '
                 'могли сохраниться; перед повтором проверьте их результаты.'
                 + ('\n\n' + answer.strip() if answer else ''))
@@ -222,7 +222,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     def completion(round_number, final):
         if final:
             messages.append({'role': 'system', 'content':
-                'The work time budget is exhausted. Return a concise partial result now. '
+                'The work budget is exhausted. Return a concise partial result now. '
                 'Do not call tools or repeat verification. State what current tool evidence '
                 'confirms, which actions already happened, and what remains unverified. '
                 'Do not claim the entire task completed. Use the user language.'})
@@ -230,6 +230,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         selected_schemas = [] if final else schemas
         if selected_schemas:
             body['tools'] = selected_schemas
+        if final:
+            body['tool_choice'] = 'none'
         call = request.Request(f"{base_url}/chat/completions",
             data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
         return _model_request(call, round_number=round_number, messages=messages,
@@ -239,6 +241,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     for round_number in range(1, role_config.get("max_tool_rounds",
                                              RUNTIME["model"]["default_max_tool_rounds"]) + 1):
         forced_final = bool(final_reserve and remaining_seconds() <= final_reserve)
+        if role_config.get('name', role_config.get('_ax_role')) == 'project_operator' \
+                and round_number == role_config.get('max_tool_rounds', RUNTIME['model']['default_max_tool_rounds']):
+            forced_final = True
         try:
             try:
                 result = completion(round_number, forced_final)
@@ -359,6 +364,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                         failed_delegations.pop(delegation_key, None)
                 result_fields = ({"output": output} if name in {"calculate", "utc_time"}
                                  else {"output_chars": len(output)})
+                if role_config.get('_ax_harness2_probe'):
+                    result_fields = {'output': output[:4000], 'output_chars': len(output)}
                 _trace("tool_result", round=round_number, name=name, call_id=call_id,
                        elapsed_seconds=round(time.monotonic() - tool_started_at, 1),
                        **result_fields)

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -13,6 +14,14 @@ from popot_agents.tools import MAX_TOOL_OUTPUT, safe_tool_env
 
 class MCPToolError(RuntimeError):
     """The server returned isError: the model may correct its tool arguments."""
+
+
+def _bearer_token(config):
+    name = config.get('bearer_token_env', '')
+    if name == 'AX_HARNESS2_GITHUB_TOKEN' \
+            and config.get('url') == 'https://api.githubcopilot.com/mcp/x/all/readonly':
+        return os.environ.get(name)
+    return safe_tool_env().get(name)
 
 
 def _parameters(config: dict):
@@ -29,7 +38,7 @@ def _parameters(config: dict):
 async def _streams(config: dict):
     if "url" in config:
         token_name = config["bearer_token_env"]
-        token = safe_tool_env().get(token_name)
+        token = _bearer_token(config)
         if not token:
             raise ValueError(f"required MCP environment variable is missing or not selected: {token_name}")
         import httpx2 as httpx
@@ -55,7 +64,7 @@ def _error_text(config: dict, exc: Exception) -> str:
         return f"{type(error).__name__}: {error}"
 
     text = details(exc)
-    token = safe_tool_env().get(config.get("bearer_token_env", ""))
+    token = _bearer_token(config)
     text = text.replace(token, "[REDACTED]") if token else text
     return text[:MAX_TOOL_OUTPUT]
 

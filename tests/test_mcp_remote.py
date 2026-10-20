@@ -20,6 +20,15 @@ REMOTE = {"url": "https://api.githubcopilot.com/mcp/",
 
 
 class RemoteMCPTests(unittest.TestCase):
+    def test_probe_credentials_are_redacted_without_forwarding_them_to_shell_tools(self):
+        probe = {**REMOTE, 'url': 'https://api.githubcopilot.com/mcp/x/all/readonly',
+                 'bearer_token_env': 'AX_HARNESS2_GITHUB_TOKEN'}
+        with patch.dict(os.environ, {'AX_HARNESS2_GITHUB_TOKEN': 'private-probe-key',
+                                    'HARNESS_TOOL_ENV_NAMES_JSON': '[]'}):
+            self.assertNotIn('AX_HARNESS2_GITHUB_TOKEN', mcp_client.safe_tool_env())
+            self.assertNotIn('private-probe-key',
+                mcp_client._error_text(probe, ValueError('private-probe-key was rejected')))
+
     def setUp(self):
         environment = patch.dict(os.environ, {
             'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]',

@@ -246,16 +246,21 @@ The feature team roles are:
 | `planner` | Discuss requests, draft versioned specs, delegate execution and decide acceptance or rework from specialist evidence | `calculate`, `read_file`, `write_file`; Cognee memory |
 | `tech_lead` | Architecture, contracts, task split and engineering risks | `calculate` |
 | `backend_engineer` | Clone repositories, edit backend code, run commands and inspect Git | `bash`, `read_file`, `write_file`, `git_clone`, `download_file`, `calculate`; Fetch, Git and GitHub MCP |
-| `frontend_engineer` | UI components, state, API integration and accessibility | — |
+| `frontend_engineer` | UI components, state, API integration and accessibility | Workspace, bash/file tools, Fetch/Git and read-only GitHub MCP; Node.js/npm and Python Playwright/Chromium |
 | `code_reviewer` | Independent review of correctness, regressions, security and requirements | GitHub MCP reads and inline PR review comments |
-| `qa_engineer` | Test scenarios, expected results and regression risks | — |
+| `qa_engineer` | Test scenarios, executable checks and regression risks | Workspace, bash/file tools, Fetch/Git and read-only GitHub MCP; Node.js/npm and Python Playwright/Chromium |
+| `project_operator` | Analyze local services, model routing, metrics, memory and pods; prepare and apply reviewed local changes | Real Holmes jobs, project inspection/change tools, PromQL and Cognee memory; no shell or worker admin credentials |
 
 The `chat` and `analyst` roles also remain available. `analyst` uses the
 `omniroute` profile; backend, frontend and code review use `omniroute_code`.
-Other roles use `openrouter`. Change a role's `agent` field to another configured
+Other roles use `omniroute`. Change a role's `agent` field to another configured
 profile if needed, and set that profile's model and credentials in `.env`.
 
 Select `planner` or `qa_engineer` in the MCP request above to use those roles.
+
+Harness² uses isolated AX trial executions for analyst, backend, frontend, QA
+and reviewer roles before the main task. Trials are sequential, bounded and use
+read-only GitHub access. See [configuration and execution evidence](ax_local/README.md#harness2-для-ролей-ax).
 
 The task and chat responses include `sessionId`, `role`, and `agent`; send only
 `sessionId` on later messages. The role and
@@ -499,10 +504,13 @@ scheduled work uses the receiving role's own profile.
 | `openrouter` | OpenRouter chat API | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
 | `omniroute` | Local OmniRoute gateway | `OMNIROUTE_API_KEY`, `OMNIROUTE_MODEL` |
 | `omniroute_code` | OmniRoute combo for code | `OMNIROUTE_API_KEY`, `OMNIROUTE_CODE_MODEL` |
+| `omniroute_ops` | Project operator and service analysis | `OMNIROUTE_API_KEY`, `OMNIROUTE_OPS_MODEL` |
 | `ollama_local` | Local Ollama chat API | `OLLAMA_LOCAL_MODEL` |
 | `ollama_cloud` | Ollama Cloud chat API | `OLLAMA_API_KEY`, `OLLAMA_CLOUD_MODEL` |
 | `nous` | Nous inference chat API | `NOUS_API_KEY`, `NOUS_MODEL` |
 | `nvidia_nim` | NVIDIA NIM chat API | `NVIDIA_API_KEY`, `NVIDIA_MODEL` |
+
+Service settings and reload commands: [config/README.md](config/README.md).
 
 The proxy reaches local Ollama through `host.docker.internal:11434`; change the
 profile's `HARNESS_BASE_URL` if your host uses another endpoint. AX uses the HTTP

@@ -1,5 +1,8 @@
 import unittest
 import subprocess
+import json
+from pathlib import Path
+import tempfile
 from unittest.mock import MagicMock, patch
 
 from ax_local.cluster.resource_monitoring import extend_prometheus_config, local_context, migrate_prometheus_storage
@@ -7,6 +10,40 @@ from ax_local.cluster.resource_dashboard import dashboard
 
 
 class ResourceMonitoringTests(unittest.TestCase):
+    def test_resources_are_loaded_from_service_sections_in_monitoring_config(self):
+        from ax_local.resource_config import load_monitoring
+        resources={'requests':{'cpu':'100m','memory':'128Mi'},'limits':{'cpu':'1','memory':'512Mi'}}
+        prometheus={'requests':{'cpu':'100m','memory':'128Mi'},'limits':{'memory':'512Mi'}}
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'config').mkdir()
+            (root/'config/monitoring.json').write_text(json.dumps({
+                'grafana':{'environment':{'GF_USERS_ALLOW_SIGN_UP':'false'},'resources':resources},
+                'prometheus':{'retention_time':'7d','resources':prometheus},
+                'opentelemetry-collector':{'resources':{}}}))
+            self.assertEqual(load_monitoring(root),{
+                'grafana':{'environment':{'GF_USERS_ALLOW_SIGN_UP':'false'},'resources':resources},
+                'prometheus':{'retention_time':'7d','resources':prometheus},
+                'opentelemetry-collector':{'resources':{}}})
+
+    def test_partial_resource_settings_still_reject_invalid_values(self):
+        from ax_local.resource_config import load_monitoring
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'config').mkdir()
+            for resources in ({'limits':{'memory':'8Gi'}},{'requests':{'cpu':'0m'}},
+                              {'requests':{'cpu':'2'},'limits':{'cpu':'1'}},
+                              {'limits':{'gpu':'1'}}):
+                with self.subTest(resources=resources):
+                    (root/'config/monitoring.json').write_text(json.dumps({'prometheus':{'resources':resources}}))
+                    with self.assertRaises(ValueError):load_monitoring(root)
+
+    def test_custom_scrape_interval_is_applied_without_changing_other_jobs(self):
+        original='scrape_configs:\n  - job_name: existing\n    scrape_interval: 5s\n'
+        updated=extend_prometheus_config(original,scrape_interval='30s')
+        self.assertTrue(updated.startswith(original))
+        self.assertIn('job_name: popot-cadvisor\n    scrape_interval: 30s',updated)
+
     def test_cluster_totals_include_all_namespaces_and_ignore_display_filters(self):
         result = dashboard()
         for title, metric, unit in [('Cluster CPU (cores)', 'container_cpu_usage_seconds_total', 'cores'),

@@ -22,6 +22,7 @@ class OmniRouteTests(unittest.TestCase):
             'AX_LOCAL_SESSION_BACKEND': 'file',
             'OMNIROUTE_MODEL': 'ax-free',
             'OMNIROUTE_CODE_MODEL': 'ax-code-free',
+            'OMNIROUTE_OPS_MODEL': 'ax-ops-free',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
             'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
             'OPENROUTER_MODEL': 'direct-provider-model',

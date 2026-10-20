@@ -27,12 +27,13 @@ class NoRedirect(request.HTTPRedirectHandler):
 
 
 class Api:
-    def __init__(self, url):
+    def __init__(self, url, *, timeout=60):
         parsed = urlsplit(url)
         if parsed.scheme not in ('http', 'https') or not parsed.hostname \
                 or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ProvisionError('OMNIROUTE_URL must be an HTTP(S) URL without credentials')
         self.url = url.rstrip('/')
+        self.timeout = timeout
         self.opener = request.build_opener(
             NoRedirect(), request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
@@ -41,7 +42,7 @@ class Api:
         call = request.Request(self.url + path, data=data, method=method,
                                headers={'Content-Type': 'application/json'})
         try:
-            with self.opener.open(call, timeout=60) as response:
+            with self.opener.open(call, timeout=self.timeout) as response:
                 return json.load(response)
         except error.HTTPError as exc:
             # Management responses can echo submitted credentials. Never log them.

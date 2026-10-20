@@ -90,6 +90,7 @@ services:
       AX_LOCAL_WORKER_IMAGE_FILE: /run/ax-local/worker-image
       POPOT_DB_PASSWORD: ${POPOT_DB_PASSWORD:-}
     volumes:
+      - ../config:/app/config
       - type: bind
         source: ./.local/kubeconfig-container
         target: /run/ax-local/kubeconfig

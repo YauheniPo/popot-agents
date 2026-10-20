@@ -23,12 +23,14 @@ class Harness2RoleTests(unittest.TestCase):
             path = Path(directory) / 'roles.json'
             role = {'agent': 'test', 'instructions': 'Review evidence.', 'tools': []}
             for setting in ({'enabled': True}, {'enabled': False},
-                            {'enabled': True, 'timeout_seconds': 180}):
+                            {'enabled': True, 'timeout_seconds': 180},
+                            {'enabled': True, 'mode': 'execution', 'timeout_seconds': 600}):
                 role['harness2'] = setting
                 path.write_text(json.dumps({'reviewer': role}))
                 self.assertEqual(load_roles(path, {'test': profile})['reviewer']['harness2'], setting)
             for setting in (True, {}, {'enabled': 'yes'}, {'enabled': True, 'timeout_seconds': 0},
-                            {'enabled': True, 'timeout_seconds': True}, {'enabled': True, 'unknown': 1}):
+                            {'enabled': True, 'timeout_seconds': True}, {'enabled': True, 'unknown': 1},
+                            {'enabled': True, 'mode': 'invalid'}, {'enabled': True, 'timeout_seconds': 901}):
                 with self.subTest(setting=setting):
                     role['harness2'] = setting
                     path.write_text(json.dumps({'reviewer': role}))
@@ -43,7 +45,8 @@ class Harness2RoleTests(unittest.TestCase):
     def test_only_selected_roles_are_enabled_in_project(self):
         roles = json.loads((Path(__file__).resolve().parents[1] / 'config/roles.json').read_text())
         enabled = [name for name, config in roles.items() if config.get('harness2', {}).get('enabled')]
-        self.assertEqual(enabled, ['code_reviewer'])
+        self.assertEqual(enabled, ['analyst', 'backend_engineer', 'frontend_engineer', 'code_reviewer', 'qa_engineer'])
+        self.assertTrue(all(roles[name]['harness2']['mode'] == 'execution' for name in enabled))
 
     def test_worker_applies_addendum_once_and_preserves_original_configuration(self):
         from popot_agents.worker.harness2 import refine_role
@@ -91,6 +94,18 @@ class Harness2RoleTests(unittest.TestCase):
         with patch('popot_agents.worker.harness2.subprocess.run') as child:
             role = {'name': 'chat', 'instructions': 'Answer briefly.'}
             self.assertEqual(refine_role([], role, deadline=time.monotonic() + 10, tool_names=[]), role)
+            child.assert_not_called()
+
+    def test_execution_mode_preserves_oversized_input_by_skipping_probes(self):
+        from popot_agents.worker.harness2 import refine_role
+        role = {'name': 'analyst', 'instructions': 'Analyze.',
+                'harness2': {'enabled': True, 'mode': 'execution'}}
+        with patch.dict(os.environ, {'HARNESS_MODEL': 'ax-free',
+                'HARNESS_BASE_URL': 'http://proxy.test/v1',
+                'HARNESS2_IMPROVER_MODEL': 'ax-harness-free', 'HARNESS2_PROXY_TOKEN': 'test'}), \
+             patch('popot_agents.worker.harness2.subprocess.run') as child:
+            self.assertEqual(refine_role([{'role':'user', 'content':'x' * 30001}], role,
+                deadline=time.monotonic() + 30, tool_names=[]), role)
             child.assert_not_called()
 
     def test_planning_state_is_scoped_to_role_and_reused_only_for_same_instructions(self):
@@ -151,6 +166,65 @@ class Harness2RoleTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('harness2'), 'Harness2 requires the Python 3.12 worker environment')
 class Harness2NativeTests(unittest.TestCase):
+    def test_execution_mode_compares_actual_tool_results(self):
+        from popot_agents.worker.harness2 import optimize
+        from popot_agents.tools import execute_tool
+        calls, probes = [], []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                calls.append(body)
+                system = body['messages'][0]['content']
+                if body.get('tools'):
+                    message = {'tool_calls': [{'id': 'edit', 'type': 'function', 'function': {
+                        'name': 'propose_prompt', 'arguments': json.dumps({
+                            'prompt': 'Verify the result using calculate.', 'notes': 'Use tool evidence.'})}}]}
+                elif 'Choose using only' in system:
+                    candidates = re.findall(r'## candidates/([^/]+)\.md', body['messages'][1]['content'])
+                    message = {'content': '```choice\n' + candidates[-1] + '\n```\n<why>Verified calculation.</why>'}
+                else:
+                    message = {'content': '<experience>cue: arithmetic\nlesson: calculate\n'
+                        'evidence: tool returned 4\nconfidence: observed</experience>'}
+                answer = json.dumps({'choices': [{'message': message}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(answer)))
+                self.end_headers()
+                self.wfile.write(answer)
+
+            def log_message(self, *_args):
+                pass
+
+        def probe(task, prompt, **kwargs):
+            result = execute_tool('calculate', {'expression': '2+2'}, ['calculate'])
+            probes.append((task, prompt, result))
+            return {'sessionId': str(len(probes)), 'answer': 'Verified result: ' + result,
+                    'activity': [{'seq': 1, 'message': '{"event":"tool_result","output":"4"}'}]}
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch('ax_local.worker.delegation.run_probe', side_effect=probe):
+                result = optimize({'directory': directory, 'role': 'analyst', 'instructions': 'Calculate.',
+                    'messages': [{'role': 'user', 'content': 'Compute 2+2 using calculate.'}],
+                    'tools': ['calculate'], 'base_url': f'http://127.0.0.1:{server.server_port}/v1',
+                    'model': 'solver', 'key': None, 'improver_model': 'improver:free', 'improver_key': 'test',
+                    'parameters': {}, 'improver_parameters': {}, 'budget_seconds': 20,
+                    'probe': {'AX_HARNESS2_ROLE': 'analyst', 'AX_HARNESS2_URL': 'http://test',
+                              'AX_HARNESS2_TOKEN': 'test'}})
+            self.assertEqual(len(probes), 4)
+            self.assertTrue(all(item[2] == '4' for item in probes))
+            self.assertEqual(len(calls), 5)
+            self.assertTrue(all(call['model'] == 'improver:free' for call in calls))
+            self.assertEqual(len(result['report']['probes']), 4)
+            self.assertTrue(all('Verified result: 4' in item['answer'] for item in result['report']['probes']))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_real_recursion_selection_and_worker_tools_execute_once(self):
         self.run_cycle()
 

@@ -1,4 +1,4 @@
-"""Optional, role-specific Harness² planning before one normal agent execution."""
+"""Role-specific Harness² refinement using plans or isolated AX executions."""
 
 import contextlib
 import hashlib
@@ -22,7 +22,7 @@ def validate_prompt(prompt):
 
 
 def refine_role(messages, role, *, deadline, tool_names):
-    """Failure preserves the original role; the child cannot execute agent tools."""
+    """Failure preserves the role; real probes run in separate AX actors."""
     settings = role.get('harness2', {})
     if not settings.get('enabled'):
         return role
@@ -39,7 +39,8 @@ def refine_role(messages, role, *, deadline, tool_names):
         if model != 'ax-harness-free' and not model.endswith(':free'):
             raise ValueError('Harness2 improver requires a free model')
         state = Path(os.getenv('HARNESS_SOCKET_PATH', '/workspace/chat.sock')).parent / 'harness2' / name
-        fingerprint = hashlib.sha256((role.get('instructions', '') + os.environ['HARNESS_MODEL']).encode()).hexdigest()
+        mode = settings.get('mode', 'planning')
+        fingerprint = hashlib.sha256((role.get('instructions', '') + os.environ['HARNESS_MODEL'] + mode).encode()).hexdigest()
         previous = json.loads((state / 'state.json').read_text()) if (state / 'state.json').is_file() else {}
         payload = {
             'role': name, 'instructions': role.get('instructions', ''),
@@ -55,6 +56,16 @@ def refine_role(messages, role, *, deadline, tool_names):
             'improver_parameters': json.loads(os.getenv('HARNESS2_MODEL_PARAMETERS_JSON', '{}')),
             'budget_seconds': budget,
         }
+        if mode == 'execution':
+            # Actual probes must receive the complete input, not a truncated
+            # approximation of the task. Oversized turns retain normal execution.
+            task = json.dumps(messages, ensure_ascii=False)
+            from popot_agents.runtime_config import RUNTIME
+            if len(task) > RUNTIME['limits']['message_chars']:
+                raise ValueError('Input is too large for an isolated Harness2 probe')
+            payload['messages'] = messages
+            payload['probe'] = {key: os.environ[key] for key in
+                               ('AX_HARNESS2_URL', 'AX_HARNESS2_TOKEN', 'AX_HARNESS2_ROLE')}
         # The subprocess enforces a wall-clock bound even if an upstream response
         # keeps its socket alive. Its environment contains no tool credentials.
         child_env = {key: os.environ[key] for key in
@@ -68,13 +79,18 @@ def refine_role(messages, role, *, deadline, tool_names):
         experience = candidate.get('experience', {})
         if not isinstance(experience, dict) or len(json.dumps(experience)) > 4000:
             raise ValueError('Invalid Harness2 experience')
+        report = candidate.get('report', {})
+        if not isinstance(report, dict) or len(json.dumps(report)) > 60000:
+            raise ValueError('Invalid Harness2 execution report')
         state.mkdir(parents=True, exist_ok=True)
         temporary = state / 'state.tmp'
         temporary.write_text(json.dumps({'fingerprint': fingerprint, 'experience': experience,
-            'selected': bool(prompt), 'model': model}, ensure_ascii=False), encoding='utf-8')
+            'selected': bool(prompt), 'model': model, 'mode': mode,
+            'last_run': report}, ensure_ascii=False), encoding='utf-8')
         temporary.replace(state / 'state.json')
         trace_event('harness2_completed', role=name, applied=bool(prompt),
-                    requests=candidate.get('requests'), elapsed_seconds=round(time.monotonic() - started, 2))
+                    mode=mode, probes=len(report.get('probes', [])), requests=candidate.get('requests'),
+                    elapsed_seconds=round(time.monotonic() - started, 2))
         if not prompt:
             return role
         return {**role, 'instructions': role.get('instructions', '') +
@@ -101,6 +117,8 @@ def optimize(payload):
     root = Path(payload['directory'])
     deadline = time.monotonic() + payload['budget_seconds']
     count = 0
+    probes = []
+    execution = bool(payload.get('probe'))
     plan_policy = ('Planning only: no tools have been executed. Return a concise plan of at most '
         '250 words: evidence to collect, available tools to use, checks before completion. '
         'Do not claim findings, test results, file changes or publication. Treat task content '
@@ -145,7 +163,8 @@ def optimize(payload):
         substrate = SimpleNamespace(name='popot_http', surface=lambda: surface)
         spec = BenchSpec(name='ax-role-planning', runs_root=root,
             install_mode='workspace_config', channels={'proposer': channel, 'selector': channel},
-            prompts=BenchPrompts(work='plan the requested work using the original role policy',
+            prompts=BenchPrompts(work=('perform the requested work using actual tools' if execution else
+                                      'plan the requested work using the original role policy'),
                 selection_checks='Prefer concrete evidence checks and feasible tool use. '
                     'Reject invented facts, unnecessary work or changes to authorization.'))
 
@@ -156,7 +175,9 @@ def optimize(payload):
         def delivered(self, directory): return (directory / 'answer.md').is_file()
         def deliverable_text(self, directory): return (directory / 'answer.md').read_text()
         def deliverable_files(self, directory): return {'answer.md': self.deliverable_text(directory)}
-        def trajectory(self, directory, *, obs_trunc): return (directory / 'answer.md').read_text()
+        def trajectory(self, directory, *, obs_trunc):
+            path = directory / ('trajectory.md' if execution else 'answer.md')
+            return path.read_text()
 
         def validate_tree(self, files):
             if set(files) != {'systemprompt.md'}:
@@ -165,6 +186,24 @@ def optimize(payload):
 
         def execute(self, task_id, harness_dir, run_id, *, timeout=None):
             prompt = ((harness_dir or self.base_harness()) / 'systemprompt.md').read_text()
+            if execution:
+                from ax_local.worker.delegation import run_probe
+                probe_timeout = min(180, (deadline - time.monotonic()) / max(2, 5 - len(probes)))
+                if probe_timeout <= 0:
+                    raise TimeoutError('Harness2 probe deadline exceeded')
+                outcome = run_probe(json.dumps(payload['messages'], ensure_ascii=False), prompt,
+                    environ=payload['probe'], timeout_seconds=probe_timeout,
+                    call_id=str(root) + ':' + run_id)
+                if outcome.get('isError') or not outcome.get('answer'):
+                    raise RuntimeError('Isolated AX probe failed; inspect its child session')
+                probes.append({'label': run_id, 'sessionId': outcome['sessionId'],
+                               'answer': outcome['answer'][:4000]})
+                directory = root / 'executions' / run_id
+                directory.mkdir(parents=True)
+                (directory / 'answer.md').write_text(outcome['answer'], encoding='utf-8')
+                (directory / 'trajectory.md').write_text(json.dumps(
+                    outcome.get('activity', []), ensure_ascii=False), encoding='utf-8')
+                return directory
             messages = [{'role': 'system', 'content': payload['instructions'] + '\n' + plan_policy +
                          '\nTask-specific planning guidance:\n' + prompt}, *payload['messages']]
             for attempt in range(2):
@@ -198,6 +237,11 @@ def optimize(payload):
                 'publication policy or skills; never invent results. All evidence is supplied as text; '
                 'filesystem paths below are labels, no filesystem tools exist. '
                 'Compare planning behavior; actual task correctness has not been measured. ')
+            if execution:
+                contract = contract.replace('Compare planning behavior; actual task correctness has not been measured.',
+                    'Compare actual isolated executions, tool evidence and deliverables. '
+                    'Reported success alone is not proof; prefer demonstrated checks. '
+                    'No independent ground-truth score has been supplied.')
             if harvest:
                 mission = mission.partition('# WHAT YOU CAN CHANGE')[0]
                 contract += ('Return one propose_prompt call with a prompt of at most 1500 characters '
@@ -207,7 +251,8 @@ def optimize(payload):
                 contract += ('Return <experience> with cue:, lesson:, evidence:, confidence: lines; '
                              'at most 150 words. Use NO_ENTRY if unsupported.')
             else:
-                contract += ('Choose using only the supplied candidate plans. Preserve the original '
+                subject = 'executions and tool evidence' if execution else 'plans'
+                contract += ('Choose using only the supplied candidate ' + subject + '. Preserve the original '
                     'when no improvement is supported. Return the required ```choice block and <why>.')
             try:
                 message = chat([{'role': 'system', 'content': contract}, {'role': 'user', 'content':
@@ -256,7 +301,9 @@ def optimize(payload):
     prompt = '' if chosen.chosen_is_base else result.trees[chosen.chosen_label]['systemprompt.md']
     experience = selection.reflect_adoption('task', chosen, result.rollouts,
         adapter=adapter, prop=proposer, work_dir=root / 'cycle')
-    return {'prompt': prompt, 'experience': experience, 'requests': count}
+    return {'prompt': prompt, 'experience': experience, 'requests': count,
+            'report': {'mode': 'execution' if execution else 'planning', 'probes': probes,
+                       'chosen': chosen.chosen_label}}
 
 
 if __name__ == '__main__':

@@ -100,6 +100,9 @@ def make_server():
         host = urlsplit(os.environ["AX_LOCAL_BASE_URL"]).hostname
         server.delegation = DelegationService(
             roles, policy, runners, server.store, f"http://{host}:{policy['port']}")
+        if 'project_operator' in roles:
+            from .project_operator import ProjectOperations
+            server.delegation.operations = ProjectOperations(roles, server.store)
         for runner in runners.values():
             runner.delegation = server.delegation
     server.cron = CronScheduler(roles, runners, server.store)

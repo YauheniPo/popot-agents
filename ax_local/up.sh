@@ -40,5 +40,8 @@ fi
 
 python3 "$ROOT/ax_local/cluster/deployment_cleanup.py"
 python3 "$ROOT/ax_local/cluster/resource_monitoring.py" install
+if python3 -c 'import json,sys; sys.exit(0 if "project_operator" in json.load(open(sys.argv[1])) else 1)' "$ROOT/config/roles.json"; then
+  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 "$ROOT/ax_local/cluster/holmes.py" --prepare
+fi
 
 echo "AX MCP endpoint: http://127.0.0.1:${AX_MCP_PUBLISH_PORT:-8003}/mcp"

@@ -1,12 +1,26 @@
 """Prepare AX's durable workspace for the unprivileged tool user, then serve chat."""
 
+import json
 import os
 import socket
 import stat
 
 from popot_agents.worker.session_worker import SOCKET_PATH, serve
 from .delegation import make_tools
+from .project_tools import make_tools as make_project_tools
 from .process_metrics import ProcessMetrics
+
+
+def load_capabilities() -> None:
+    value = os.environ.pop('AX_CAPABILITIES_JSON', None)
+    if value is None:
+        return
+    capabilities = json.loads(value)
+    if not isinstance(capabilities, dict) or any(
+            not key.startswith(('AX_DELEGATION_', 'AX_HARNESS2_', 'HARNESS2_'))
+            or not isinstance(item, str) for key, item in capabilities.items()):
+        raise ValueError('Invalid AX capability environment')
+    os.environ.update(capabilities)
 
 
 def prepare_socket(path: str) -> None:
@@ -28,6 +42,7 @@ def prepare_socket(path: str) -> None:
 
 
 def main() -> None:
+    load_capabilities()
     os.makedirs("/workspace", exist_ok=True)
     if os.geteuid() == 0:
         # Substrate creates the private overlay root as 0700. UID 10001 needs
@@ -42,6 +57,7 @@ def main() -> None:
         os.chmod("/workspace", 0o1777)
     prepare_socket(SOCKET_PATH)
     tools = make_tools()
+    tools.update(make_project_tools())
     with ProcessMetrics.from_env():
         if tools:
             serve(extra_tools=tools)

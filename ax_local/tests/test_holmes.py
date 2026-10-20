@@ -5,6 +5,8 @@ import subprocess
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
+from pathlib import Path
+import tempfile
 
 from ax_local.cluster.holmes import IMAGE, NAMESPACE, manifests, investigation_job, scope, wait_for_pod, ensure_image, main
 
@@ -14,6 +16,25 @@ TEST_MODEL = 'selected-free-combo'
 
 
 class HolmesTests(unittest.TestCase):
+    def test_job_and_runner_config_follow_service_settings(self):
+        root=Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory)
+            (target/'config').mkdir()
+            (target/'ax_local/holmes').mkdir(parents=True)
+            (target/'ax_local/holmes/runner.py').write_text('runner')
+            settings=json.loads((root/'config/holmes.json').read_text())
+            settings.update(active_deadline_seconds=180,ttl_seconds_after_finished=3600,max_steps=5)
+            settings['resources']['limits']['memory']='1Gi'
+            (target/'config/holmes.json').write_text(json.dumps(settings))
+            with patch('ax_local.cluster.holmes.ROOT',target):
+                job=investigation_job('Check pods',TEST_MODEL)
+                data=next(o for o in manifests(CONFIG) if o['kind']=='ConfigMap')['data']
+        self.assertEqual(job['spec']['activeDeadlineSeconds'],180)
+        self.assertEqual(job['spec']['ttlSecondsAfterFinished'],3600)
+        self.assertEqual(job['spec']['template']['spec']['containers'][0]['resources']['limits']['memory'],'1Gi')
+        self.assertEqual(json.loads(data['settings.json'])['max_steps'],5)
+
     def test_model_is_required_before_any_cluster_or_image_actions(self):
         for value in (None, '', '   '):
             environment = {'OMNIROUTE_API_KEY': 'test-gateway-key'}
@@ -93,7 +114,8 @@ class HolmesTests(unittest.TestCase):
             wait_for_pod(kube, 'failed-job')
 
     def test_scope_rejects_remote_context_and_invalid_namespace(self):
-        self.assertEqual(scope(CONFIG), ('ax-system', 'ate-system', 'ate-demo-counter'))
+        self.assertEqual(scope(CONFIG), ('ax-system', 'ate-system', 'ate-demo-counter',
+                                        'otel-system', 'ax-diagnostics', 'kube-system'))
         for config in ({**CONFIG, 'context': 'production'},
                        {**CONFIG, 'atespace': '../production'}):
             with self.assertRaises(ValueError):

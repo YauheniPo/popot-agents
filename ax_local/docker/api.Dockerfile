@@ -41,6 +41,11 @@ COPY popot_agents/orchestrator /app/popot_agents/orchestrator
 COPY ax_local/__init__.py ax_local/config.py ax_local/config.json /app/ax_local/
 COPY ax_local/api /app/ax_local/api
 COPY ax_local/worker/__init__.py ax_local/worker/remote_client.py /app/ax_local/worker/
+COPY popot_agents/worker/__init__.py popot_agents/worker/cognee_memory.py /app/popot_agents/worker/
+COPY ax_local/omniroute.py ax_local/resource_config.py /app/ax_local/
+COPY ax_local/cluster/holmes.py ax_local/cluster/build_versions.py /app/ax_local/cluster/
+COPY ax_local/holmes /app/ax_local/holmes
+COPY pyproject.toml /app/pyproject.toml
 COPY config /app/config
 ENV PYTHONPATH=/app
 EXPOSE 8002

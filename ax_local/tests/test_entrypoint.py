@@ -1,5 +1,6 @@
 import unittest
 import os
+import json
 import socket
 import tempfile
 from pathlib import Path
@@ -11,6 +12,14 @@ from ax_local.worker import entrypoint
 
 
 class EntrypointTests(unittest.TestCase):
+    def test_capability_bundle_cannot_override_unrelated_environment(self):
+        for value in ('[]', '{"HOME":"/tmp"}', '{"AX_DELEGATION_TOKEN":123}'):
+            with self.subTest(value=value), patch.dict(os.environ,
+                    {'AX_CAPABILITIES_JSON': value, 'HOME': '/workspace'}, clear=True):
+                with self.assertRaises(ValueError):
+                    entrypoint.load_capabilities()
+                self.assertEqual(os.environ['HOME'], '/workspace')
+
     def test_data_restart_removes_only_a_stale_socket(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / 'chat.sock')

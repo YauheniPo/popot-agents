@@ -20,7 +20,7 @@ from popot_agents.runtime_config import RUNTIME
 from popot_agents.progress import forward_progress, is_progress_message
 
 
-def make_tools(environ: dict | None = None) -> dict:
+def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dict:
     environ = os.environ if environ is None else environ
     url, token = environ.get("AX_DELEGATION_URL"), environ.get("AX_DELEGATION_TOKEN")
     allowed = json.loads(environ.get("AX_DELEGATION_ROLES", "[]"))
@@ -95,6 +95,8 @@ def make_tools(environ: dict | None = None) -> dict:
                                           role=types.ROLE_USER,
                                           parts=[types.Part(text=arguments["task"])]),
                     configuration=types.SendMessageConfiguration(return_immediately=True))
+                if probe is not None:
+                    params.message.metadata.update({'harness2': probe})
                 try:
                     try:
                         response = await invoke(lambda ctx: transport.send_message(params, context=ctx))
@@ -119,6 +121,8 @@ def make_tools(environ: dict | None = None) -> dict:
                         forward_task_progress(task)
                     result = {"sessionId": task_id, "role": arguments["role"],
                               "state": types.TaskState.Name(task.status.state)}
+                    if probe is not None:
+                        result['activity'] = MessageToDict(task).get('metadata', {}).get('activity', [])
                     if task.status.state == types.TASK_STATE_COMPLETED:
                         answer = "\n".join(part.text for artifact in task.artifacts
                                            for part in artifact.parts if part.HasField("text"))
@@ -154,6 +158,19 @@ def make_tools(environ: dict | None = None) -> dict:
         return asyncio.run(execute())
 
     return {"delegate_task": {"schema": schema, "call": delegate}}
+
+
+def run_probe(task: str, prompt: str, *, timeout_seconds: float, call_id: str,
+              environ: dict | None = None) -> dict:
+    """Runtime-only call; this capability is never exposed as a model tool."""
+    environ = os.environ if environ is None else environ
+    role = environ['AX_HARNESS2_ROLE']
+    tools = make_tools({'AX_DELEGATION_URL': environ['AX_HARNESS2_URL'],
+        'AX_DELEGATION_TOKEN': environ['AX_HARNESS2_TOKEN'],
+        'AX_DELEGATION_ROLES': json.dumps([role]), 'AX_DELEGATION_POLL_SECONDS': '0.1'},
+        probe={'prompt': prompt, 'timeout_seconds': min(300, timeout_seconds)})
+    return json.loads(tools['delegate_task']['call']({'role': role, 'task': task},
+        timeout_seconds=timeout_seconds, call_id=call_id))
 
 
 class BoundedHTTPTransport(httpx.AsyncHTTPTransport):

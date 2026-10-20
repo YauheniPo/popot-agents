@@ -75,5 +75,39 @@
       "maxSetRetries": 0,
       "compressionMode": "off"
     }
+  },
+  "ax-ops-free": {
+    "name": "ax-ops-free",
+    "description": "Project operator and Holmes: Super VL first, then existing free routes. Thinking disabled by the HTTP profile.",
+    "strategy": "priority",
+    "models": [
+      {
+        "kind": "model",
+        "providerId": "openrouter",
+        "model": "openrouter/nvidia/nemotron-3.5-super-vl:free"
+      },
+      {
+        "kind": "model",
+        "providerId": "openrouter",
+        "model": "openrouter/cohere/north-mini-code:free"
+      },
+      {
+        "kind": "model",
+        "providerId": "nvidia",
+        "model": "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"
+      },
+      {
+        "kind": "model",
+        "providerId": "openrouter",
+        "model": "openrouter/nvidia/nemotron-3.5-lightning:free"
+      }
+    ],
+    "config": {
+      "targetTimeoutMs": 60000,
+      "comboTimeoutMs": 105000,
+      "maxGlobalAttempts": 4,
+      "maxSetRetries": 0,
+      "compressionMode": "off"
+    }
   }
 }

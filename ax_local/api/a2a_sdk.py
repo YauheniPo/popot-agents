@@ -1,6 +1,7 @@
 """Official A2A transport around the existing AX execution and role policy."""
 
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -9,6 +10,7 @@ import uvicorn
 from google.protobuf.json_format import MessageToDict, ParseDict
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from a2a.server.request_handlers.request_handler import RequestHandler, validate_request_params
 from a2a.server.routes.agent_card_routes import create_agent_card_routes
@@ -97,14 +99,18 @@ class DelegationBoundary:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] != "POST":
             return await self.app(scope, receive, send)
+        operator = scope['path'] == '/operations'
         role = scope["path"].removeprefix("/a2a/")
-        if scope["path"] != f"/a2a/{role}" or role not in self.service.roles:
+        if not operator and (scope["path"] != f"/a2a/{role}" or role not in self.service.roles):
             return await JSONResponse({}, status_code=404)(scope, receive, send)
         headers = dict(scope["headers"])
         authorization = headers.get(b"authorization", b"").decode("latin-1")
         token = authorization[7:] if authorization.startswith("Bearer ") else ""
         try:
-            self.service._authorized(token, role)
+            if operator:
+                self.service.authorized_operator(token)
+            else:
+                self.service._authorized(token, role)
         except A2AError:
             return await JSONResponse({}, status_code=403)(scope, receive, send)
 
@@ -141,7 +147,43 @@ class DelegationBoundary:
 
 
 def create_a2a_app(service):
-    routes = []
+    async def operations(call):
+        from .project_operator import safe_result
+        authorization = call.headers.get('authorization', '')
+        token = authorization[7:] if authorization.startswith('Bearer ') else ''
+
+        def execute(body):
+            grant = service.authorized_operator(token)
+            if not isinstance(body, dict) or not isinstance(body.get('params', {}), dict):
+                raise ValueError('operator request must contain an object')
+            params = body.get('params', {})
+            method = body.get('method')
+            if method == 'inspect':
+                return service.operations.inspect(params.get('kind'), params.get('parameters', {}),
+                    actor=grant.session_id, request_id=str(body.get('request_id', ''))[:200])
+            if method == 'propose_change':
+                return service.operations.propose(grant.session_id, params)
+            if method == 'apply_change':
+                return service.operations.apply(grant.session_id, params.get('plan_id'),
+                    approved=grant.approved_change, authorize=lambda: service.authorized_operator(token))
+            raise ValueError('unknown operator method')
+
+        try:
+            result = safe_result(await asyncio.to_thread(execute, await call.json()))
+            encoded = json.dumps(result, ensure_ascii=False)
+            if len(encoded) > RUNTIME['limits']['tool_output_chars']:
+                result = {'truncated':True,'preview':encoded[:RUNTIME['limits']['tool_output_chars']-300],
+                          'message':'Narrow the request or query to inspect the omitted data.'}
+            return JSONResponse(result)
+        except A2AError:
+            return JSONResponse({'isError':True,'error':'operator capability expired'},status_code=403)
+        except ValueError as exc:
+            return JSONResponse({'isError':True,'error':str(exc)[:300]},status_code=400)
+        except Exception as exc:
+            return JSONResponse({'isError':True,'error_type':type(exc).__name__,
+                                 'error':'Project operation failed; inspect service health'},status_code=502)
+
+    routes = [Route('/operations', operations, methods=['POST'])]
     for role in service.roles:
         prefix = f"/a2a/{role}"
         card = ParseDict(service.card(role), types.AgentCard())

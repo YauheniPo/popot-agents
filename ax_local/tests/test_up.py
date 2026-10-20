@@ -152,6 +152,15 @@ class UpScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
 
+    def test_operator_prepares_holmes_without_starting_an_investigation(self):
+        (self.root / 'config/roles.json').write_text(json.dumps({'project_operator':{'agent':'omniroute'}}))
+        (self.ax / 'cluster/holmes.py').write_text(
+            "import os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==['--prepare']\n"
+            "with Path(os.environ['CALLS']).open('a') as f:f.write('holmes-prepare\\n')\n")
+        result=self.run_up()
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines()[-1],'holmes-prepare')
+
     def test_omniroute_roles_select_provisioning_dependency(self):
         result = self.run_up()
         self.assertEqual(result.returncode, 0, result.stderr)
