@@ -79,15 +79,28 @@ class TurnMemoryTests(unittest.TestCase):
 
     def test_scope_tracks_repo_switches_and_followups_but_rejects_ambiguity(self):
         messages = [{'role': 'user', 'content': TASK}]
-        self.assertEqual(project_dataset(messages), 'github-owner-repo')
+        original = project_dataset(messages)
+        self.assertRegex(original, r'^github-owner-repo-[0-9a-f]{16}$')
         messages.append({'role': 'user', 'content': 'Run the checks too'})
-        self.assertEqual(project_dataset(messages), 'github-owner-repo')
+        self.assertEqual(project_dataset(messages), original)
         messages.append({'role': 'user', 'content': 'https://github.com/Else/Other.git'})
-        self.assertEqual(project_dataset(messages), 'github-else-other')
+        self.assertRegex(project_dataset(messages), r'^github-else-other-[0-9a-f]{16}$')
         messages.append({'role': 'user', 'content': TASK + ' https://github.com/Else/Other'})
         self.assertIsNone(project_dataset(messages))
         self.assertIsNone(project_dataset([{'role': 'user', 'content': 'hello'}]))
         self.assertEqual(project_dataset([{'role': 'user', 'content': '[project: popot-agents] fix tests'}]), 'popot-agents')
+
+    def test_repository_scope_is_unique_and_ignores_sentence_punctuation(self):
+        def dataset(url):
+            return project_dataset([{'role': 'user', 'content': f'Review {url}'}])
+
+        dotted = dataset('https://github.com/Owner/foo.bar')
+        hyphenated = dataset('https://github.com/Owner/foo-bar')
+        self.assertNotEqual(dotted, hyphenated)
+        self.assertEqual(dataset('https://github.com/Owner/foo.bar.'), dotted)
+        self.assertEqual(dataset('https://github.com/Owner/foo.bar.git/pull/6'), dotted)
+        self.assertNotEqual(dataset('https://github.com/a-b/c'),
+                            dataset('https://github.com/a/b-c'))
 
     def test_secrets_are_removed_from_queries_and_summaries(self):
         with patch.dict(os.environ, {'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret'}, clear=True):
@@ -107,7 +120,7 @@ class TurnMemoryTests(unittest.TestCase):
         ]}
         self.assertEqual(memory.save(items), 1)
         text, dataset = memory.client.remember.call_args.args
-        self.assertEqual(dataset, 'github-owner-repo')
+        self.assertEqual(dataset, project_dataset([{'role': 'user', 'content': TASK}]))
         self.assertIn('12 tests passed', text)
         self.assertIn('check-1', text)
         self.assertIn('https://github.com/Owner/Repo/pull/68', text)

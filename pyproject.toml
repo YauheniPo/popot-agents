@@ -6,3 +6,27 @@ dependencies = ["psycopg[binary]==3.3.6"]
 
 [project.optional-dependencies]
 ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.42.0"]
+
+[dependency-groups]
+ci = ["pytest==9.1.1", "coverage==7.16.0", "mcp==1.30.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "ax_local/tests"]
+addopts = "--import-mode=importlib"
+junit_family = "xunit2"
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["popot_agents", "ax_local", "memory"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+[tool.coverage.xml]
+output = "reports/coverage.xml"
+
+[tool.coverage.html]
+directory = "reports/coverage-html"
