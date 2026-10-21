@@ -1,10 +1,12 @@
 *
+!pyproject.toml
 !popot_agents/
 !popot_agents/__init__.py
 !popot_agents/tools.py
 !popot_agents/runtime_config.py
 !popot_agents/role_env.py
 !popot_agents/skills.py
+!popot_agents/progress.py
 !skills/
 !skills/**
 !popot_agents/worker/

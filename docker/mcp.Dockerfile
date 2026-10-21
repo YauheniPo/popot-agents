@@ -1,10 +1,12 @@
 FROM python:3.10-slim
 LABEL com.popot.project="popot-agents"
 
-RUN pip install --no-cache-dir mcp==1.30.0
+WORKDIR /app
+COPY pyproject.toml ./
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir --group build --group mcp
 
 RUN useradd --create-home --uid 10001 mcp
-WORKDIR /app
 COPY popot_agents/__init__.py popot_agents/mcp_server.py /app/popot_agents/
 COPY popot_agents/runtime_config.py /app/popot_agents/
 COPY popot_agents/role_env.py /app/popot_agents/

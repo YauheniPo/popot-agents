@@ -26,6 +26,8 @@ compose.yaml      Local deployment
 
 Run local tests with `python -m unittest discover -s tests -p 'test_*.py'`.
 Run the API without Compose with `python -m popot_agents.orchestrator.main`.
+Install test and runtime dependencies with `python -m pip install --group ci`
+(requires pip 25.1 or newer).
 
 ## CI and code quality
 
@@ -249,6 +251,13 @@ Cognee API contract; invalid values are rejected at startup.
 
 ## Connect Claude or Codex through MCP
 
+Python dependency versions are defined only in [pyproject.toml](pyproject.toml).
+The `mcp` group selects the SDK, `worker` adds the compatible Fetch/Git servers,
+`orchestrator` supplies database access, and `ax` supplies A2A/HTTP dependencies.
+Dockerfiles install these groups directly; `ci` includes all runtime groups and
+test tools. The `build` group pins pip after bootstrapping group support in older
+base images. Rebuild the MCP and worker images together after SDK upgrades.
+
 After setting `.env` as described in "Start and try", start the MCP service
 with the rest of the stack:
 
@@ -406,6 +415,8 @@ receives each model response in full, so reasoning events arrive after that
 response, before tool execution or the final answer; this is not token streaming.
 Use an MCP `progressToken` to receive the events during the task. Rebuild the worker image and start a new
 session to see the new trace events.
+Both Docker and AX forward these events before the final answer. HTTP clients
+can request the same stream with `Accept: application/x-ndjson`.
 
 The orchestrator also logs each API request and response as JSON lines with a
 shared `request_id`, client IP and port, `User-Agent`, method, path, status, and

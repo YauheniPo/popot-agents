@@ -25,7 +25,7 @@ class MCPRecoveryTests(unittest.TestCase):
             async def __aexit__(self, *args): pass
             async def initialize(self): pass
             async def call_tool(self, name, arguments):
-                return SimpleNamespace(isError=True, content=[SimpleNamespace(
+                return SimpleNamespace(is_error=True, content=[SimpleNamespace(
                     type='text', text=outer.error_message)])
         return SimpleNamespace(ClientSession=Session)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import signal
 import subprocess
 import sys
@@ -19,7 +20,8 @@ from typing import Callable, Mapping
 from urllib.parse import urlsplit
 
 from popot_agents.tools import TOOL_SCHEMAS
-from popot_agents.progress import is_progress_message, emit_progress, observe_progress, format_progress
+from popot_agents.progress import (is_progress_message, emit_progress, observe_progress,
+                                   format_progress, progress_observer)
 from popot_agents.role_env import selected_role_env, validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
@@ -376,12 +378,16 @@ class DockerChat:
 
     def send(self, message: str) -> dict[str, str]:
         try:
-            completed = subprocess.run(
-                ["docker", "exec", "--interactive", self.container_name,
-                 "python", "-m", CHAT_WORKER_MODULE, "message"],
-                input=json.dumps({"message": message}, ensure_ascii=False),
-                text=True, capture_output=True, timeout=self.timeout_seconds, check=False,
-            )
+            command = ["docker", "exec", "--interactive", self.container_name,
+                       "python", "-m", CHAT_WORKER_MODULE, "message"]
+            callback = progress_observer()
+            if callback is not None:
+                completed = self._stream_message(command, message, callback)
+            else:
+                completed = subprocess.run(
+                    command, input=json.dumps({"message": message}, ensure_ascii=False),
+                    text=True, capture_output=True, timeout=self.timeout_seconds, check=False,
+                )
         finally:
             self._capture_logs()
         if completed.returncode != 0:
@@ -395,6 +401,65 @@ class DockerChat:
         if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
             raise AgentRunError("chat worker returned no answer")
         return {"answer": result["answer"]}
+
+    def _stream_message(self, command, message, callback):
+        data = json.dumps({'message': message, 'progress': True}, ensure_ascii=False).encode()
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + self.timeout_seconds
+        pending, answer, sent = b'', '', 0
+        try:
+            os.set_blocking(process.stdin.fileno(), False)
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdin, selectors.EVENT_WRITE, 'in')
+                selector.register(process.stdout, selectors.EVENT_READ, 'out')
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(['docker', 'exec'], self.timeout_seconds)
+                    for key, _ in selector.select(min(remaining, .2)):
+                        if key.data == 'in':
+                            try:
+                                sent += os.write(key.fileobj.fileno(), data[sent:sent + 65536])
+                            except BrokenPipeError:
+                                # An early worker failure can close stdin before
+                                # the request is sent; still read its response.
+                                sent = len(data)
+                            if sent == len(data):
+                                selector.unregister(key.fileobj)
+                                process.stdin.close()
+                            continue
+                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        pending += chunk
+                        if len(pending) > 8 * 1024 * 1024:
+                            raise AgentRunError('chat worker response is too large')
+                        while b'\n' in pending:
+                            line, pending = pending.split(b'\n', 1)
+                            try:
+                                item = json.loads(line)
+                            except (ValueError, UnicodeDecodeError) as exc:
+                                raise AgentRunError('chat worker returned invalid JSON') from exc
+                            if isinstance(item, dict) and 'progress' in item:
+                                if is_progress_message(item['progress']):
+                                    callback(item['progress'])
+                            else:
+                                answer = line.decode('utf-8')
+                code = process.wait(timeout=max(.001, deadline - time.monotonic()))
+                if pending:
+                    raise AgentRunError('chat worker returned an incomplete response')
+                return subprocess.CompletedProcess(command, code, answer, '')
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=3)
+            process.stdin.close()
+            process.stdout.close()
 
     def close(self) -> None:
         if not self.closed:
