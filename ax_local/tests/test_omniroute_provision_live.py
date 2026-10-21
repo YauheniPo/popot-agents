@@ -86,6 +86,29 @@ class LiveProvisionTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('_AX_OMNIROUTE_INNER') == '1',
                      'executed inside the disposable gateway network namespace')
 class InnerProvisionTests(unittest.TestCase):
+    def test_credential_redaction_preserves_diff_and_tool_calls(self):
+        api = Api('http://127.0.0.1:20128')
+        api.request('POST', '/api/auth/login', {'password': os.environ['OMNIROUTE_INITIAL_PASSWORD']})
+        fake_token = 'ghp_' + 'a' * 36
+        diff = '@@ -1 +1 @@\n-return left - right\n+return left + right\n'
+        arguments = json.dumps({'path': 'review.py', 'line': 2})
+        payload = {'model': 'ax-code-free', 'messages': [
+            {'role': 'user', 'content': 'Review this diff:\n' + diff + '\nFixture token: ' + fake_token},
+            {'role': 'assistant', 'content': None, 'tool_calls': [
+                {'id': 'review-read-1', 'type': 'function', 'function': {
+                    'name': 'read_file', 'arguments': arguments}}]},
+            {'role': 'tool', 'tool_call_id': 'review-read-1', 'content': 'Fixture result token: ' + fake_token},
+        ]}
+        result = api.request('POST', '/api/guardrails/test', {'input': payload})
+        self.assertFalse(result['blocked'])
+        redacted = result['payload']
+        self.assertNotIn(fake_token, json.dumps(redacted))
+        self.assertIn('[REDACTED:', json.dumps(redacted))
+        self.assertEqual(redacted['model'], payload['model'])
+        self.assertIn(diff, redacted['messages'][0]['content'])
+        self.assertEqual(redacted['messages'][1], payload['messages'][1])
+        self.assertEqual(redacted['messages'][2]['tool_call_id'], 'review-read-1')
+
     def test_repeat_policy_and_failure(self):
         env = dict(os.environ)
         api = Api('http://127.0.0.1:20128')
@@ -98,7 +121,7 @@ class InnerProvisionTests(unittest.TestCase):
         for field in ('providerConnections', 'combos', 'apiKeys'):
             self.assertEqual([x['id'] for x in before[field]], [x['id'] for x in after[field]])
         self.assertEqual(len(after['providerConnections']), 2)
-        self.assertEqual(len(after['combos']), 3)
+        self.assertEqual(len(after['combos']), len(combos))
         self.assertEqual(len(after['apiKeys']), 1)
         key = after['apiKeys'][0]
         self.assertEqual(key['modelAccessMode'], 'restricted')
