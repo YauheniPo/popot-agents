@@ -7,13 +7,20 @@
 | --- | --- |
 | [monitoring.json](monitoring.json) | Настройки Grafana/Prometheus и секции `resources` для Grafana, Prometheus, kube-state-metrics и OTEL |
 | [holmes.json](holmes.json) | Бюджет шагов и токенов, параметры LLM, ресурсы Job, deadline, время хранения завершённых Job и адрес шлюза Holmes |
-| [omniroute-combos.json](omniroute-combos.json) | Состав, порядок бесплатных моделей и бюджеты fallback для `ax-free`, `ax-code-free`, `ax-harness-free`, `ax-ops-free` |
-| [omniroute-settings.json](omniroute-settings.json) | Настройки шлюза, провайдеры, cooldown/circuit breaker и разрешения ключа AX |
+| [omniroute/combos.json](omniroute/combos.json) | Состав, порядок бесплатных моделей и бюджеты fallback для `ax-free`, `ax-code-free`, `ax-harness-free`, `ax-ops-free` |
+| [omniroute/settings.json](omniroute/settings.json) | Настройки шлюза, провайдеры, cooldown/circuit breaker и разрешения ключа AX |
 | [agents.json](agents.json) | Профили провайдеров, endpoint, имя переменной модели, параметры запросов |
-| [roles.json](roles.json) | Роли, инструкции, инструменты, память, делегирование, Harness² и бюджеты выполнения |
+| [roles/](roles/) | Роли, инструкции, инструменты, память, делегирование, Harness² и бюджеты выполнения |
 | [runtime.json](runtime.json) | Общие таймауты, ограничения сообщений/инструментов, память и разрешённые имена env |
 | [../ax_local/config.json](../ax_local/config.json) | Контекст kind, namespace/workers, ресурсы AX Task, прокси и backend сессий |
 | [../pyproject.toml](../pyproject.toml) | Версии образов и зависимостей, включая OmniRoute, Cognee, Holmes, Grafana и kube-state-metrics |
+
+Каждая роль хранится в `roles/<название_роли>.json`, например `roles/planner.json`.
+Имя роли берётся из имени файла. В JSON лежат только её настройки (`agent`,
+`instructions`, `tools` и другие поля), без внешнего ключа роли и поля `name`.
+
+[Схема ролей](roles/index.html) показывает обязанности, инструменты, навыки и
+разрешённые связи делегирования. Откройте HTML в браузере и выберите роль.
 
 Модели выбираются в `.env` через `OMNIROUTE_MODEL`, `OMNIROUTE_CODE_MODEL`,
 `OMNIROUTE_OPS_MODEL`, `HARNESS2_IMPROVER_MODEL` и `HOLMES_MODEL`.
@@ -53,7 +60,7 @@ python3 -m ax_local.cluster.holmes --prepare
 в native `OVERRIDE_MAX_OUTPUT_TOKEN`, `llm_args` — аргументы клиента LLM.
 Модель и ключ берутся из `.env`, а не из `holmes.json`.
 
-**OmniRoute** — после правок обоих `omniroute-*.json`:
+**OmniRoute** — после правок `omniroute/settings.json` и `omniroute/combos.json`:
 
 ```bash
 bash ax_local/compose.sh run --rm omniroute-init

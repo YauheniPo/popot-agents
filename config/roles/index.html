@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Роли Popot Agents: задачи, инструменты, навыки и связи делегирования.">
+  <title>Роли Popot Agents</title>
+  <style>
+    :root{color-scheme:light;--bg:#f5f7f9;--paper:#fff;--ink:#182b3c;--muted:#536579;--line:#dce3e9;--green:#16734e;--blue:#265f9e}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+    button,a{touch-action:manipulation}button{font:inherit;cursor:pointer;color:inherit}a{color:var(--blue);text-underline-offset:3px}
+    button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #e0a32d;outline-offset:4px}
+    h1,h2,h3,p{margin:0}h1{font-size:clamp(28px,3vw,40px);letter-spacing:-1.2px;line-height:1.2}h2{font-size:22px;line-height:1.3}h3{font-size:14px}
+    code{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
+    .page{max-width:1480px;margin:auto;padding:36px 28px}.eyebrow{color:var(--green);font-size:12px;font-weight:700;letter-spacing:1.5px;margin-bottom:10px}
+    .intro{color:var(--muted);margin-top:12px;max-width:760px}.flow{display:flex;align-items:center;gap:18px;margin:26px 0;padding:18px 22px;background:var(--paper);border:1px solid var(--line);border-radius:14px}
+    .flow p{flex:1}.flow strong{display:block;font-size:14px}.flow small{display:block;color:var(--muted);font-size:13px}.flow-arrow{color:var(--green);font-size:23px}
+    .workspace{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(320px,1fr);gap:22px;align-items:start}
+    .map,.detail{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:24px;min-width:0}
+    .map-heading{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}.map-heading h2{font-size:18px}
+    .hint,.legend,.source{color:var(--muted);font-size:13px}.legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:16px}.legend span{display:flex;align-items:center;gap:7px}
+    .dot{width:9px;height:9px;border-radius:50%;background:var(--green)}.dot.target{background:var(--blue)}
+    .diagram{position:relative;margin-top:25px}.wires{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;overflow:visible}
+    .wire{fill:none;stroke:var(--blue);stroke-width:1.6;stroke-linejoin:round;opacity:.68}.groups{position:relative;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:26px}
+    .group-label{color:var(--muted);font-size:11px;letter-spacing:.8px;text-transform:uppercase;margin-bottom:14px;min-height:34px}
+    .nodes{display:grid;gap:14px}.role{position:relative;z-index:1;display:block;width:100%;text-align:left;min-height:112px;padding:13px 12px;border:1px solid var(--line);border-radius:11px;background:var(--paper)}
+    .role:hover{border-color:#95a5b4;background:#fafcfd}.role.selected{border:2px solid var(--green);padding:12px 11px;background:#f0f8f3}
+    .role.target{border-color:#83a7d0;background:#f4f8fe}.role strong{display:block;font-size:14px;line-height:1.35}.role code{display:block;color:var(--muted);font-size:11px;margin-top:4px}
+    .role .caption{display:block;color:var(--muted);font-size:12px;margin-top:7px}.role .relation{display:block;font-size:11px;color:var(--green);margin-top:5px;font-weight:600}
+    .role.target .relation{color:var(--blue)}.map-status{border-top:1px solid var(--line);margin-top:20px;padding-top:14px;font-size:13px;color:var(--muted)}
+    .detail{border-top:3px solid var(--green);scroll-margin-top:18px}.detail-id{display:flex;justify-content:space-between;gap:12px;margin:7px 0 14px}.detail-id code{color:var(--muted)}
+    .description{margin-bottom:18px}.facts{display:grid;gap:7px;margin-bottom:20px}.fact{display:flex;justify-content:space-between;gap:12px;font-size:13px}.fact span:first-child{color:var(--muted)}
+    .fact strong{text-align:right;font-weight:500}.section{border-top:1px solid var(--line);padding-top:15px;margin-top:15px}.section h3{margin-bottom:9px}
+    .chips{display:flex;flex-wrap:wrap;gap:7px}.chip{display:inline-block;border:1px solid var(--line);border-radius:7px;padding:4px 8px;font-size:12px;background:#f8fafb}
+    button.chip{color:var(--blue);background:#f4f8fe;min-height:34px}.note{color:var(--muted);font-size:13px;margin-top:8px}.special{font-size:13px;background:#f0f8f3;border-radius:8px;padding:10px 12px;margin-top:12px}
+    details{border-top:1px solid var(--line);padding-top:14px;margin-top:15px}summary{cursor:pointer;font-size:14px;font-weight:600;min-height:30px}
+    details .chips,details .service{margin-top:10px}.service p{color:var(--muted);font-size:12px;margin-top:4px;overflow-wrap:anywhere}
+    .back{display:none;margin-top:16px;font-size:13px}.explain{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px;margin-top:25px}.explain h3{margin-bottom:7px}.explain p{font-size:13px;color:var(--muted)}
+    footer{margin-top:26px;padding-top:18px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+    @media(max-width:1080px){.workspace{grid-template-columns:minmax(0,1fr)}.groups{gap:30px}.role{min-height:100px}.back{display:inline-block}}
+    @media(max-width:560px){.page{padding:24px 16px}.map,.detail{padding:18px}.flow{align-items:flex-start;gap:10px;padding:15px;flex-direction:column}.flow-arrow{display:none}
+      .groups{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.group,.nodes{display:contents}.group-label{display:none}.role{min-height:106px;padding:11px 10px}
+      .role.selected{padding:10px 9px}.role .caption{display:none}.role code{font-size:10px}.explain{grid-template-columns:1fr;gap:17px}.fact{flex-wrap:wrap}.diagram{margin-top:18px}.wires{display:none}}
+    @media(prefers-reduced-motion:no-preference){.role{transition:border-color .15s,background .15s}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div class="eyebrow">POPOT AGENTS / РОЛИ</div>
+      <h1>Кто что делает и к кому обращается</h1>
+      <p class="intro">Любую роль можно вызвать напрямую. Для большой задачи начните с <code>planner</code>:
+        он собирает требования, поручает работу специалистам и оценивает результат.</p>
+    </header>
+    <section class="flow" aria-label="Как выполняется задача">
+      <p><strong>1. Вы ставите задачу</strong><small>Выбираете подходящую роль.</small></p><span class="flow-arrow" aria-hidden="true">→</span>
+      <p><strong>2. Роль выполняет работу</strong><small>Модель, инструменты или вызов специалиста.</small></p><span class="flow-arrow" aria-hidden="true">→</span>
+      <p><strong>3. Возвращает результат</strong><small>Пользователю или вызвавшей её роли.</small></p>
+    </section>
+    <div class="workspace">
+      <section class="map" id="map" aria-labelledby="map-title">
+        <div class="map-heading"><h2 id="map-title">Связи между ролями</h2><span class="source">10 ролей</span></div>
+        <p class="hint">Нажмите на роль, чтобы увидеть её возможности и разрешённые связи.</p>
+        <div class="legend"><span><i class="dot" aria-hidden="true"></i>Выбранная роль</span><span><i class="dot target" aria-hidden="true"></i>Может получить от неё задачу</span></div>
+        <div class="diagram" id="diagram">
+          <svg class="wires" id="wires" aria-hidden="true">
+            <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#265f9e"/></marker></defs>
+            <g id="connections"></g>
+          </svg>
+          <div class="groups" id="groups"></div>
+        </div>
+        <p class="map-status" id="map-status" role="status" aria-live="polite"></p>
+      </section>
+      <section class="detail" id="detail" aria-labelledby="role-title"></section>
+    </div>
+    <section class="explain" aria-label="Что важно знать">
+      <div><h3>Роль = задача + возможности</h3><p>Профиль выбирает модель. Навыки задают метод работы. Инструменты и разрешения определяют, что роль действительно может сделать.</p></div>
+      <div><h3>Делегирование — по необходимости</h3><p>Стрелки — разрешённые вызовы, а не обязательная цепочка. Дочерняя роль возвращает ответ вызвавшей её роли, которая продолжает работу.</p></div>
+      <div><h3>У каждого свой контекст</h3><p>У дочернего агента отдельная история и workspace. Передать задачу — значит передать нужный контекст. Сам вызов не открывает доступ к чужим файлам.</p></div>
+    </section>
+    <footer>Снимок настроек из JSON-файлов в этой папке · <a href="../README.md">Настройки проекта</a> · <a href="../../skills/README.md">Каталог навыков</a>.
+      После изменения настроек ролей схему нужно обновить.</footer>
+    <noscript><p>Для выбора ролей включите JavaScript. Настройки доступны в JSON-файлах рядом с этой страницей.</p></noscript>
+  </main>
+  <script id="role-data" type="application/json">{"roles":{"analyst":{"skills":["productivity/grilling"],"agent":"omniroute","tools":["calculate","utc_time"],"allowed_roles":[],"permissions":{"internet":true},"mcpServers":{"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]}},"harness2":{"enabled":true,"mode":"execution","timeout_seconds":300}},"backend_engineer":{"skills":["engineering/codebase-design","engineering/tdd","engineering/diagnosing-bugs","engineering/code-review","engineering/setup-matt-pocock-skills","productivity/handoff","engineering/pr","productivity/writing-for-agents"],"agent":"omniroute_code","tools":["calculate","bash","read_file","write_file","git_clone","download_file"],"allowed_roles":["qa_engineer","analyst","code_reviewer"],"mcpServers":{"fetch":{"command":["mcp-server-fetch"],"tools":["fetch"]},"git":{"command":["mcp-server-git"],"tools":["git_status","git_diff_unstaged"]},"github":{"url":"https://api.githubcopilot.com/mcp/","bearer_token_env":"GITHUB_PERSONAL_ACCESS_TOKEN","tools":["get_me","get_file_contents","search_repositories","list_branches","create_branch","create_or_update_file","create_pull_request"]},"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]}},"permissions":{"workspace":"persistent","shell":true,"internet":true},"harness2":{"enabled":true,"mode":"execution","timeout_seconds":600}},"chat":{"skills":[],"agent":"omniroute","tools":[],"allowed_roles":["analyst","project_operator"],"permissions":{"internet":true},"mcpServers":{"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]}}},"code_reviewer":{"harness2":{"enabled":true,"mode":"execution","timeout_seconds":600},"skills":["engineering/code-review","engineering/diagnosing-bugs","engineering/codebase-design","engineering/tdd","productivity/handoff"],"agent":"omniroute_code","tools":[],"allowed_roles":[],"mcpServers":{"github":{"url":"https://api.githubcopilot.com/mcp/","bearer_token_env":"GITHUB_PERSONAL_ACCESS_TOKEN","tools":["get_file_contents","get_commit","search_repositories","pull_request_read","pull_request_review_write","add_comment_to_pending_review"]},"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]}},"permissions":{"workspace":"temporary","shell":false,"internet":true}},"cron_demo":{"skills":[],"agent":"omniroute","tools":["utc_time"],"cron":[{"schedule":"0 9 * * *","task":"Use utc_time and report the current UTC date and time."}]},"frontend_engineer":{"skills":["engineering/codebase-design","engineering/prototype","engineering/tdd","engineering/diagnosing-bugs","engineering/code-review","engineering/setup-matt-pocock-skills","productivity/handoff","engineering/pr","productivity/writing-for-agents"],"agent":"omniroute_code","tools":["bash","read_file","write_file","git_clone","download_file"],"allowed_roles":["qa_engineer","code_reviewer"],"permissions":{"workspace":"persistent","shell":true,"internet":true},"mcpServers":{"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]},"github":{"url":"https://api.githubcopilot.com/mcp/x/all/readonly","bearer_token_env":"GITHUB_PERSONAL_ACCESS_TOKEN","tools":["get_file_contents","get_commit","search_repositories","pull_request_read"]},"fetch":{"command":["mcp-server-fetch"],"tools":["fetch"]},"git":{"command":["mcp-server-git"],"tools":["git_status","git_diff_unstaged"]}},"harness2":{"enabled":true,"mode":"execution","timeout_seconds":600}},"planner":{"skills":["productivity/grilling","engineering/grill-with-docs","engineering/domain-modeling","engineering/to-spec","engineering/to-tickets","engineering/code-review","engineering/setup-matt-pocock-skills","productivity/handoff","engineering/retro","productivity/writing-for-agents"],"agent":"omniroute","tools":["calculate","read_file","write_file"],"allowed_roles":["tech_lead","backend_engineer","frontend_engineer","qa_engineer","code_reviewer","analyst","project_operator"],"permissions":{"workspace":"persistent","internet":true},"mcpServers":{"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]}}},"project_operator":{"skills":["engineering/diagnosing-bugs","engineering/codebase-design","productivity/handoff"],"agent":"omniroute_ops","tools":["calculate","utc_time"],"allowed_roles":[],"memory_project":"popot-agents","permissions":{"internet":true},"mcpServers":{"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]}}},"qa_engineer":{"skills":["engineering/codebase-design","engineering/tdd","engineering/diagnosing-bugs","engineering/code-review","engineering/setup-matt-pocock-skills"],"agent":"omniroute","tools":["bash","read_file","write_file","git_clone","download_file"],"allowed_roles":[],"permissions":{"workspace":"persistent","shell":true,"internet":true},"mcpServers":{"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]},"github":{"url":"https://api.githubcopilot.com/mcp/x/all/readonly","bearer_token_env":"GITHUB_PERSONAL_ACCESS_TOKEN","tools":["get_file_contents","get_commit","search_repositories","pull_request_read"]},"fetch":{"command":["mcp-server-fetch"],"tools":["fetch"]},"git":{"command":["mcp-server-git"],"tools":["git_status","git_diff_unstaged"]}},"harness2":{"enabled":true,"mode":"execution","timeout_seconds":600}},"tech_lead":{"skills":["engineering/codebase-design","engineering/domain-modeling","engineering/to-spec","engineering/to-tickets","engineering/code-review","engineering/setup-matt-pocock-skills","productivity/handoff"],"agent":"omniroute","tools":["calculate"],"allowed_roles":["backend_engineer","frontend_engineer","qa_engineer","code_reviewer","project_operator"],"permissions":{"internet":true},"mcpServers":{"cognee":{"command":["python","/app/popot_agents/worker/cognee_memory.py"],"tools":["remember","recall","memory_status"]}}}}}</script>
+  <script>
+    const data = JSON.parse(document.getElementById('role-data').textContent);
+    const roles = data.roles;
+    const labels = {
+      planner: ['Планировщик', 'План, спецификация, координация', 'Уточняет требования, пишет спецификацию и задачи, собирает результаты специалистов. Решает, что принято, что требует доработки и где есть блокер.'],
+      tech_lead: ['Технический лидер', 'Архитектура и контракты', 'Определяет архитектуру, контракты и технические риски. Может поручать реализацию инженерам, проверку — QA и ревьюеру, диагностику — оператору.'],
+      chat: ['Собеседник', 'Обсуждение и простые вопросы', 'Отвечает на вопросы и помогает с обсуждением. Может обратиться к аналитику или оператору проекта.'],
+      backend_engineer: ['Backend-инженер', 'Серверный код и API', 'Клонирует репозитории, редактирует серверный код, работает с API и данными, запускает проверки. Может создавать ветки, менять файлы и открывать PR в GitHub при разрешённой публикации.'],
+      frontend_engineer: ['Frontend-инженер', 'Интерфейсы и браузерные проверки', 'Реализует интерфейсы, состояние, доступность и интеграцию с API. Запускает проверки, в том числе через Playwright. Возвращает локальный diff; GitHub доступен для чтения.'],
+      project_operator: ['Оператор проекта', 'Сервисы, модели и диагностика', 'Проверяет локальные сервисы, Kubernetes, метрики, маршруты моделей и память. Использует Holmes для расследований. Готовит планы изменения комбо, ресурсов или перезапуска сервисов.'],
+      code_reviewer: ['Ревьюер кода', 'Независимая проверка изменений', 'Проверяет код на ошибки, риски, соответствие требованиям и стандартам. Читает GitHub и публикует комментарии к PR. У него нет shell и инструментов изменения файлов.'],
+      qa_engineer: ['QA-инженер', 'Сценарии, тесты и регрессии', 'Выводит проверки из требований, подбирает данные и ожидаемые результаты. Может запускать команды и браузерные проверки. GitHub доступен для чтения.'],
+      analyst: ['Аналитик', 'Рассуждения и расчёты', 'Анализирует переданные данные, делает расчёты и явно называет допущения. Не клонирует репозитории и не редактирует код.'],
+      cron_demo: ['Задача по расписанию', 'Демонстрация ежедневного запуска', 'Ежедневно в 09:00 UTC читает текущее время и сообщает его. Эту роль также можно вызвать вручную.']
+    };
+    const groups = [
+      ['Общение и планирование', ['planner', 'tech_lead', 'chat']],
+      ['Выполнение работы', ['backend_engineer', 'frontend_engineer', 'project_operator']],
+      ['Проверка и поддержка', ['code_reviewer', 'qa_engineer', 'analyst', 'cron_demo']]
+    ];
+    const toolLabels = {calculate: 'Расчёты', utc_time: 'Текущее время', bash: 'Команды shell', read_file: 'Чтение файлов', write_file: 'Запись файлов', git_clone: 'Клонирование Git', download_file: 'Загрузка файлов'};
+    const serviceLabels = {cognee: 'Память Cognee', github: 'GitHub', fetch: 'Сайты и документация', git: 'Git: состояние и diff'};
+    let selected = 'planner';
+    function element(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    }
+    function roleLink(name) {
+      const button = element('button', labels[name][0], 'chip');
+      button.type = 'button'; button.title = name;
+      button.addEventListener('click', () => select(name, true)); return button;
+    }
+    for (const [title, names] of groups) {
+      const group = element('div', undefined, 'group');
+      group.append(element('h3', title, 'group-label'));
+      const nodes = element('div', undefined, 'nodes');
+      for (const name of names) {
+        const button = element('button', undefined, 'role');
+        button.type = 'button'; button.id = 'node-' + name;
+        button.setAttribute('aria-controls', 'detail');
+        button.append(element('strong', labels[name][0]), element('code', name), element('span', labels[name][1], 'caption'), element('span', '', 'relation'));
+        button.addEventListener('click', () => select(name, true)); nodes.append(button);
+      }
+      group.append(nodes); document.getElementById('groups').append(group);
+    }
+    function section(title, items, clickable) {
+      const block = element('div', undefined, 'section'); block.append(element('h3', title));
+      if (items.length) {
+        const chips = element('div', undefined, 'chips');
+        items.forEach(item => chips.append(clickable ? roleLink(item) : element('span', item, 'chip'))); block.append(chips);
+      } else block.append(element('p', 'Других ролей не вызывает.', 'note'));
+      return block;
+    }
+    function fact(title, value) {
+      const row = element('div', undefined, 'fact'); row.append(element('span', title), element('strong', value)); return row;
+    }
+    function select(name, scroll) {
+      selected = name;
+      const role = roles[name], targets = role.allowed_roles || [];
+      for (const id of Object.keys(roles)) {
+        const button = document.getElementById('node-' + id);
+        button.classList.toggle('selected', id === name); button.classList.toggle('target', targets.includes(id));
+        button.setAttribute('aria-pressed', String(id === name));
+        button.querySelector('.relation').textContent = id === name ? 'Выбрана' : targets.includes(id) ? 'Можно поручить задачу' : '';
+      }
+      document.getElementById('map-status').textContent = name + ' → ' + (targets.length ? 'может обращаться к ' + targets.length + ' другим ролям. Ответы возвращаются обратно.' : 'выполняет задачу без делегирования.');
+      const detail = document.getElementById('detail'); detail.replaceChildren();
+      const title = element('h2', labels[name][0]); title.id = 'role-title'; detail.append(title);
+      const identity = element('div', undefined, 'detail-id'), file = element('a', 'Открыть JSON');
+      file.href = name + '.json'; identity.append(element('code', name), file); detail.append(identity, element('p', labels[name][2], 'description'));
+      const facts = element('div', undefined, 'facts'), harness = role.harness2;
+      facts.append(fact('Профиль модели', role.agent), fact('Пробные запуски Harness²', harness && harness.enabled ? 'Включены · до ' + harness.timeout_seconds + ' с' : 'Выключены'));
+      if (role.cron) facts.append(fact('Расписание (UTC)', role.cron.map(item => item.schedule).join('; ')));
+      detail.append(facts);
+      const servers = role.mcpServers || {}, aliases = Object.keys(servers);
+      const tools = role.tools.map(tool => toolLabels[tool] || tool).concat(aliases.map(alias => serviceLabels[alias] || alias));
+      if (targets.length) tools.push('Делегирование задач');
+      if (name === 'project_operator') tools.push('Диагностика проекта', 'Планы изменений', 'Применение подтверждённого плана');
+      const capabilities = section('Инструменты и возможности', tools, false);
+      if (!tools.length) capabilities.querySelector('.note').textContent = 'Локальных инструментов нет. Доступные сервисы перечислены ниже.';
+      if (harness && harness.enabled) capabilities.append(element('p', 'Harness² выполняет пробные запуски перед основной задачей.', 'note'));
+      if (name === 'project_operator') capabilities.append(element('p', 'Изменения применяются только после команды пользователя /apply <plan_id>. Shell и ключи управления сервисами в worker не передаются.', 'special'));
+      detail.append(capabilities, section('Кому может поручить задачу', targets, true));
+      const incoming = Object.keys(roles).filter(id => (roles[id].allowed_roles || []).includes(name));
+      const callers = section('Кто может вызвать эту роль', incoming, true);
+      if (!incoming.length) callers.querySelector('.note').textContent = role.cron ? 'Пользователь или планировщик расписаний.' : 'Пользователь напрямую.';
+      else callers.append(element('p', 'Также доступен прямой вызов пользователем.', 'note'));
+      detail.append(callers);
+      if (aliases.length) {
+        const external = element('details'); external.append(element('summary', 'Точные инструменты подключений · ' + aliases.length));
+        for (const alias of aliases) {
+          const service = element('div', undefined, 'service');
+          service.append(element('strong', serviceLabels[alias] || alias), element('p', servers[alias].tools.join(' · '))); external.append(service);
+        }
+        detail.append(external);
+      }
+      const skills = element('details'); skills.append(element('summary', 'Навыки · ' + role.skills.length));
+      if (role.skills.length) {
+        const chips = element('div', undefined, 'chips');
+        for (const skill of role.skills) {
+          const link = element('a', skill.split('/').pop(), 'chip');
+          link.href = '../../skills/' + skill + '/SKILL.md'; chips.append(link);
+        }
+        skills.append(chips);
+        if (role.skills.includes('engineering/retro')) skills.append(element('p', 'retro используется по явному запросу пользователя.', 'note'));
+      } else skills.append(element('p', 'Дополнительные навыки не подключены.', 'note'));
+      detail.append(skills);
+      const back = element('a', '↑ К схеме ролей', 'back'); back.href = '#map'; detail.append(back);
+      requestAnimationFrame(draw);
+      if (scroll && matchMedia('(max-width:1080px)').matches) detail.scrollIntoView({block: 'start'});
+    }
+    function draw() {
+      const svg = document.getElementById('wires'), paths = document.getElementById('connections');
+      paths.replaceChildren();
+      if (matchMedia('(max-width:560px)').matches) return;
+      const canvas = document.getElementById('diagram').getBoundingClientRect();
+      svg.setAttribute('viewBox', '0 0 ' + canvas.width + ' ' + canvas.height);
+      const source = document.getElementById('node-' + selected).getBoundingClientRect();
+      for (const name of roles[selected].allowed_roles || []) {
+        const target = document.getElementById('node-' + name).getBoundingClientRect();
+        const sameColumn = Math.abs(source.x - target.x) < 10, right = target.x >= source.x;
+        const x1 = (sameColumn || right ? source.right : source.left) - canvas.left;
+        const x2 = (sameColumn || !right ? target.right : target.left) - canvas.left;
+        const y1 = source.y + source.height / 2 - canvas.top, y2 = target.y + target.height / 2 - canvas.top;
+        const lane1 = x1 + (sameColumn || right ? 13 : -13), lane2 = x2 + (sameColumn || !right ? 13 : -13);
+        const rail = document.querySelector('.role').getBoundingClientRect().top - canvas.top - 9;
+        let route = 'M ' + x1 + ' ' + y1 + ' H ' + lane1;
+        if (!sameColumn && Math.abs(x2 - x1) > source.width) route += ' V ' + rail + ' H ' + lane2;
+        route += ' V ' + y2 + ' H ' + x2;
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', route);
+        path.setAttribute('class', 'wire'); path.setAttribute('marker-end', 'url(#arrow)'); paths.append(path);
+      }
+    }
+    new ResizeObserver(draw).observe(document.getElementById('diagram'));
+    select('planner', false);
+  </script>
+</body>
+</html>

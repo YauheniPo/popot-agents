@@ -35,17 +35,20 @@ class SkillImportTests(unittest.TestCase):
         self.assertEqual(skill_directories, set(manifest['skills']))
 
     def test_planner_discussion_loads_domain_and_tracker_references_within_budget(self):
-        roles = json.loads((ROOT / 'config/roles.json').read_text())
-        planner = roles['planner']
+        planner = json.loads((ROOT / 'config/roles/planner.json').read_text())
         self.assertTrue({'engineering/grill-with-docs', 'productivity/grilling',
                          'engineering/domain-modeling', 'engineering/setup-matt-pocock-skills',
                          'engineering/to-spec', 'engineering/to-tickets',
-                         'engineering/code-review', 'productivity/handoff'} <= set(planner['skills']))
+                         'engineering/code-review', 'productivity/handoff',
+                         'engineering/retro', 'productivity/writing-for-agents'} <= set(planner['skills']))
         with redirect_stderr(io.StringIO()):
             prepared = prepare_role_config(planner)
         content = prepared['instructions']
-        for document in ('GLOSSARY-FORMAT.md', 'ADR-FORMAT.md', 'issue-tracker-local.md'):
+        for document in ('GLOSSARY-FORMAT.md', 'ADR-FORMAT.md', 'issue-tracker-local.md',
+                         'engineering/retro/SKILL.md', 'SKILL-MECHANICS.md'):
             self.assertIn(document, content)
+        self.assertIn('disable-model-invocation: true',
+                      (ROOT / 'skills/engineering/retro/SKILL.md').read_text())
         self.assertLessEqual(len(planner['instructions']), 4000)
         loaded = content[len(planner['instructions']):]
         self.assertLessEqual(len(loaded.encode('utf-8')), RUNTIME['limits']['skill_prompt_bytes'])
@@ -53,6 +56,22 @@ class SkillImportTests(unittest.TestCase):
         self.assertIn('setup references', planner['instructions'])
         self.assertIn('delegate_task', planner['instructions'])
         self.assertNotIn('engineering/implement-spec', planner['skills'])
+
+    def test_engineers_load_pr_and_agent_writing_references_without_changing_role_settings(self):
+        for name in ('backend_engineer', 'frontend_engineer'):
+            with self.subTest(role=name):
+                role = json.loads((ROOT / 'config/roles' / f'{name}.json').read_text())
+                self.assertTrue({'engineering/pr', 'productivity/writing-for-agents'} <= set(role['skills']))
+                with redirect_stderr(io.StringIO()):
+                    prepared = prepare_role_config(role)
+                for document in ('engineering/pr/SKILL.md', 'engineering/pr/CREDITS.md',
+                                 'productivity/writing-for-agents/SKILL-MECHANICS.md'):
+                    self.assertIn(document, prepared['instructions'])
+                self.assertEqual({key: value for key, value in prepared.items() if key != 'instructions'},
+                                 {key: value for key, value in role.items() if key not in {'instructions', 'skills'}})
+                loaded = prepared['instructions'][len(role['instructions']):]
+                self.assertLessEqual(len(loaded.encode('utf-8')), RUNTIME['limits']['skill_prompt_bytes'])
+                self.assertIn('skills', role)
 
 
 if __name__ == '__main__':

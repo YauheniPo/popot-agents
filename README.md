@@ -125,9 +125,9 @@ its indexed graph. Memory persists independently of AX Tasks. See
 | --- | --- |
 | [config/runtime.json](config/runtime.json) | Harness, session, model/tool/MCP budgets, message limits, logging and memory |
 | [config/agents.json](config/agents.json) | HTTP provider endpoints, model variable names and model parameters |
-| [config/roles.json](config/roles.json) | Role instructions, tools, permissions, skills, delegation and schedules |
-| [config/omniroute-settings.json](config/omniroute-settings.json) | OmniRoute settings, resilience, provider secret references and AX key policy |
-| [config/omniroute-combos.json](config/omniroute-combos.json) | Model order, fallback chains and their timeouts |
+| [config/roles/](config/roles/) | Role instructions, tools, permissions, skills, delegation and schedules |
+| [config/omniroute/settings.json](config/omniroute/settings.json) | OmniRoute settings, resilience, provider secret references and AX key policy |
+| [config/omniroute/combos.json](config/omniroute/combos.json) | Model order, fallback chains and their timeouts |
 | [ax_local/config.json](ax_local/config.json) | kind context, WorkerPool, Task resources, queue, snapshots, AX timeouts, delegation and proxy |
 | [pyproject.toml](pyproject.toml) | Python dependencies and pinned service, runtime and build versions |
 | [compose.sh](compose.sh) | Docker Compose with versions loaded from pyproject.toml |
@@ -191,7 +191,7 @@ so it was removed from active routes. These are availability/compatibility
 checks, not a quality benchmark. Enable thinking only after checking output
 budgets and multi-turn behavior for that exact model.
 Changing `NVIDIA_MODEL` configures the `nvidia_nim` profile. To use it in AX,
-set the relevant role's `agent` to `nvidia_nim` in `config/roles.json` and rebuild.
+set the relevant role's `agent` to `nvidia_nim` in `config/roles/` and rebuild.
 
 AX uses the role's profile from `config/agents.json`: its
 `model_env` names the model variable in `.env`, and `model_parameters` reaches
@@ -232,7 +232,7 @@ New worker starts wait in FIFO order for up to 3600 seconds; continuation of an
 existing worker does not acquire another slot. The shared MCP upstream budget
 is 7200 seconds to cover queueing, startup and the model turn. See
 [AX worker queue](ax_local/README.md#лимит-worker-и-очередь-запуска).
-Role-specific timeouts are overrides in `config/roles.json`, not shared defaults.
+Role-specific timeouts are overrides in `config/roles/`, not shared defaults.
 With the current settings, every bundled role gets 900 seconds, the harness gets 885,
 and it reserves up to 120 seconds for its final answer. Changing the shared
 maximum also changes role validation and the AX delegation timeout cap.
@@ -264,10 +264,12 @@ client authentication.
 
 ## Roles and tools
 
-Roles live in the separate [config/roles.json](config/roles.json) file. Each role selects an
+Roles live in [config/roles/](config/roles/), one `<role>.json` file per role.
+The filename supplies the role name; the JSON contains only its settings,
+without an outer role key or a `name` field. Each role selects an
 `agent` profile from `config/agents.json` and defines instructions, built-in `tools`,
 `permissions`, and optional `mcpServers`, `allowed_roles`, `description`, and `skills`.
-Rebuild the AX API after editing it. Invalid agents or tool names fail at
+Rebuild the AX API after editing role files. Invalid agents or tool names fail at
 startup. Requests can select a configured role by name; they cannot define
 instructions or tools themselves.
 
@@ -324,7 +326,7 @@ read-only GitHub access. See [configuration and execution evidence](ax_local/REA
 
 The task and chat responses include `sessionId`, `role`, and `agent`; send only
 `sessionId` on later messages. The role and
-its instructions/tools are saved with the chat and restored even if `config/roles.json`
+its instructions/tools are saved with the chat and restored even if `config/roles/`
 has changed. To switch roles, start a new chat. A mismatched `agent` or `role`
 on a request returns HTTP 409.
 
@@ -346,13 +348,13 @@ No company data source is mounted.
 To forward an operator-provided credential to one role, first allow its **name**
 in `config/runtime.json`, currently
 `"role_env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]`.
-Then select it in that role's `config/roles.json` entry with
+Then select it in that role's `config/roles/<role>.json` file with
 `"env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]`, and set
 `GITHUB_PERSONAL_ACCESS_TOKEN` in the AX API environment. Other roles do not receive it. Existing runtime variables
 remain available as before; shell and MCP tools receive their existing small
 baseline plus only names selected by the role and allowed by runtime config.
 Missing or empty selected values fail that role's startup. Keep values out of
-`roles.json`; role session records store names, not credential values. Reserved
+role files; role session records store names, not credential values. Reserved
 runtime variable names such as `HARNESS_*` and `AX_*` cannot be selected. Removing
 a name from the runtime allowlist also blocks it in previously saved sessions.
 AX v0.3.1 passes the selected values as literal Task environment values, so
@@ -388,7 +390,7 @@ through stdio. Only the listed server tools are exposed to the model: `fetch`,
 `git_status`, and `git_diff_unstaged`. In the model they are named
 `mcp__fetch__fetch`, `mcp__git__git_status`, and
 `mcp__git__git_diff_unstaged`. To change MCP connections for a role, edit its
-`mcpServers` commands and tool allowlists in `config/roles.json`, then rebuild the
+`mcpServers` commands and tool allowlists in `config/roles/`, then rebuild the
 worker image if the new server package is not installed. MCP commands are
 operator configuration; API requests cannot supply them.
 
@@ -555,7 +557,7 @@ is exposed. See [session lifecycle](ax_local/README.md#suspend-и-продолж
 ## Select a model and provider
 
 Set model names and credentials in `.env`, then assign the profile to a role's
-`agent` field in `config/roles.json`. AX creates provider routes for profiles used
+`agent` field in `config/roles/`. AX creates provider routes for profiles used
 by roles. Missing settings for a selected provider fail API startup. Delegated and
 scheduled work uses the receiving role's own profile.
 
@@ -579,7 +581,7 @@ Docker profiles `ollama_claude` and `ollama_claude_local` have been removed.
 
 For routing across free provider models, follow the optional
 [OmniRoute setup for AX](ax_local/README.md#omniroute-для-ax). It uses named
-combos of explicitly selected models, recorded in `config/omniroute-combos.json`.
+combos of explicitly selected models, recorded in `config/omniroute/combos.json`.
 Engineers and the reviewer use `ax-code-free`; other configured roles use
 `ax-free`. The launcher provisions the gateway from the repository configuration
 and `.env` secrets before starting AX. Assign those roles to another configured

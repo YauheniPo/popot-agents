@@ -44,7 +44,7 @@ class RemoteMCPTests(unittest.TestCase):
             self.addCleanup(blocked.assert_not_called)
 
     def test_remote_config_requires_https_and_role_selected_token(self):
-        roles = json.loads((ROOT / 'config/roles.json').read_text())
+        roles = load_roles(ROOT / 'config/roles', load_agents(ROOT / 'config/agents.json'))
         role = roles['backend_engineer']
         role['mcpServers']['github'] = dict(REMOTE)
         with tempfile.TemporaryDirectory() as directory:

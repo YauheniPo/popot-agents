@@ -45,7 +45,7 @@ class ProjectOperations:
         self.namespaces = scope(AX_CONFIG)
 
     def _combos(self):
-        return json.loads((self.root / 'config/omniroute-combos.json').read_text())
+        return json.loads((self.root / 'config/omniroute/combos.json').read_text())
 
     def _save(self, name, value):
         path = self.root / 'config' / name
@@ -337,7 +337,7 @@ class ProjectOperations:
                     config[name] = copy.deepcopy(plan['after'])
                     for target in config[name]['models']:
                         target.pop('connectionId',None)
-                    self._save('omniroute-combos.json',config)
+                    self._save('omniroute/combos.json',config)
                 else:
                     path = '/spec/template/spec/containers/0/resources'
                     value = plan['after']

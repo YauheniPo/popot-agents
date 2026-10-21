@@ -124,7 +124,7 @@ class ProjectLayoutTests(unittest.TestCase):
 
         config = Path(__file__).resolve().parents[1] / "config"
         agents = load_agents(config / "agents.json")
-        roles = load_roles(config / "roles.json", agents)
+        roles = load_roles(config / "roles", agents)
         self.assertIn("nous", agents)
         self.assertIn("backend_engineer", roles)
 

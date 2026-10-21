@@ -64,8 +64,8 @@ class LiveProvisionTests(unittest.TestCase):
         command += ['-v', str(ROOT / 'ax_local/omniroute.py') + ':/bootstrap/omniroute.py:ro',
                     '-v', str(ROOT / 'config') + ':/config:ro',
                     self.versions['PYTHON_IMAGE'], 'python', '/bootstrap/omniroute.py',
-                    '--config', '/config/omniroute-settings.json',
-                    '--combos', '/config/omniroute-combos.json']
+                    '--config', '/config/omniroute/settings.json',
+                    '--combos', '/config/omniroute/combos.json']
         output = self.docker(*command, env={**os.environ, **self.env})
         self.assertIn('configuration verified', output)
         for secret in self.env.values():
@@ -89,8 +89,8 @@ class InnerProvisionTests(unittest.TestCase):
     def test_repeat_policy_and_failure(self):
         env = dict(os.environ)
         api = Api('http://127.0.0.1:20128')
-        config = json.loads((ROOT / 'config/omniroute-settings.json').read_text())
-        combos = json.loads((ROOT / 'config/omniroute-combos.json').read_text())
+        config = json.loads((ROOT / 'config/omniroute/settings.json').read_text())
+        combos = json.loads((ROOT / 'config/omniroute/combos.json').read_text())
         provision(api, config, combos, env)
         before = api.request('GET', '/api/settings/export-json')
         provision(api, config, combos, env)

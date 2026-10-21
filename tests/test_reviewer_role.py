@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ReviewerRoleTests(unittest.TestCase):
     def test_reviewer_can_read_and_comment_but_cannot_edit_or_merge(self):
-        roles = load_roles(ROOT / 'config/roles.json', load_agents(ROOT / 'config/agents.json'))
+        roles = load_roles(ROOT / 'config/roles', load_agents(ROOT / 'config/agents.json'))
         reviewer = roles['code_reviewer']
         self.assertIn('engineering/code-review', reviewer['skills'])
         self.assertIn('engineering/diagnosing-bugs', reviewer['skills'])

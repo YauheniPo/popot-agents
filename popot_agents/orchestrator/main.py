@@ -106,8 +106,13 @@ def load_agents(path: str) -> dict[str, AgentProfile]:
 
 
 def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str, dict]:
-    with open(path, encoding="utf-8") as file:
-        roles = json.load(file)
+    path = Path(path)
+    if path.is_dir():
+        roles = {file.stem: json.loads(file.read_text(encoding="utf-8"))
+                 for file in sorted(path.glob("*.json"))}
+    else:
+        with path.open(encoding="utf-8") as file:
+            roles = json.load(file)
     if not isinstance(roles, dict):
         raise ValueError("roles file must be a JSON object")
     for name, config in roles.items():
@@ -245,7 +250,7 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
                     isinstance(tool, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tool)
                     for tool in offered) or len(offered) != len(set(offered)):
                 raise ValueError(f"role {name} has invalid MCP tools")
-    # Role identity belongs to the block key; attach it only to runtime metadata.
+    # Role identity comes from the filename (or legacy block key), not settings.
     return {name: {**config, "name": name} for name, config in roles.items()}
 
 

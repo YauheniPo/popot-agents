@@ -31,7 +31,7 @@ def kind_control_plane_host(context: str) -> str:
 def make_server():
     image = os.environ["AX_LOCAL_WORKER_IMAGE"]
     profiles = json.loads((ROOT / "config" / "agents.json").read_text(encoding="utf-8"))
-    roles = load_roles(ROOT / "config" / "roles.json",
+    roles = load_roles(ROOT / "config" / "roles",
                        {name: AgentProfile(**profile) for name, profile in profiles.items()})
     if not roles:
         raise ValueError("AX requires at least one configured role")

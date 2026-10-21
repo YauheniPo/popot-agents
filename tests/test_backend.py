@@ -100,7 +100,7 @@ class BackendRoleTests(unittest.TestCase):
 
     def test_backend_role_has_explicit_permissions_and_mcp_tools(self):
         root = Path(__file__).resolve().parents[1] / "config"
-        roles = load_roles(root / "roles.json", load_agents(root / "agents.json"))
+        roles = load_roles(root / "roles", load_agents(root / "agents.json"))
         backend = roles["backend_engineer"]
         self.assertTrue(set(BACKEND_TOOLS).issubset(backend["tools"]))
         self.assertEqual(backend["permissions"], {
@@ -162,7 +162,7 @@ class BackendRoleTests(unittest.TestCase):
 
     def test_shell_and_mcp_require_internet_permission(self):
         root = Path(__file__).resolve().parents[1] / "config"
-        roles = load_roles(root / "roles.json", load_agents(root / "agents.json"))
+        roles = load_roles(root / "roles", load_agents(root / "agents.json"))
         roles["backend_engineer"]["permissions"]["internet"] = False
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "roles.json"

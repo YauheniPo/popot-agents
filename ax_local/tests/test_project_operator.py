@@ -72,10 +72,10 @@ class OperatorChangeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        (self.root / 'config').mkdir()
-        source = Path(__file__).resolve().parents[2] / 'config/omniroute-combos.json'
+        (self.root / 'config/omniroute').mkdir(parents=True)
+        source = Path(__file__).resolve().parents[2] / 'config/omniroute/combos.json'
         self.combos = json.loads(source.read_text())
-        (self.root / 'config/omniroute-combos.json').write_text(json.dumps(self.combos))
+        (self.root / 'config/omniroute/combos.json').write_text(json.dumps(self.combos))
         self.monitoring={'grafana':{'environment':{'GF_USERS_ALLOW_SIGN_UP':'false'}},
                          'prometheus':{'retention_time':'7d'}}
         (self.root / 'config/monitoring.json').write_text(json.dumps(self.monitoring))
@@ -102,7 +102,7 @@ class OperatorChangeTests(unittest.TestCase):
             self.ops.apply('actor', plan['plan_id'], approved=plan['plan_id'])
             self.ops.apply('actor', plan['plan_id'], approved=plan['plan_id'])
             write.assert_called_once()
-        saved = json.loads((self.root / 'config/omniroute-combos.json').read_text())
+        saved = json.loads((self.root / 'config/omniroute/combos.json').read_text())
         self.assertEqual(saved['ax-free']['models'], desired['models'])
 
     def test_paid_or_unknown_models_and_stale_plans_are_rejected(self):
@@ -268,9 +268,9 @@ class OperatorChangeTests(unittest.TestCase):
 class OperatorRoleTests(unittest.TestCase):
     def test_operator_uses_dedicated_strong_free_route_without_changing_other_roles(self):
         root=Path(__file__).resolve().parents[2]
-        roles=json.loads((root/'config/roles.json').read_text())
+        roles={path.stem:json.loads(path.read_text()) for path in (root/'config/roles').glob('*.json')}
         agents=json.loads((root/'config/agents.json').read_text())
-        combos=json.loads((root/'config/omniroute-combos.json').read_text())
+        combos=json.loads((root/'config/omniroute/combos.json').read_text())
         self.assertEqual(roles['project_operator']['agent'],'omniroute_ops')
         self.assertEqual(agents['omniroute_ops']['model_env'],'OMNIROUTE_OPS_MODEL')
         self.assertEqual(combos['ax-ops-free']['models'][0]['model'],
