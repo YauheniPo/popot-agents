@@ -18,6 +18,25 @@ def tool_call(identifier, name, arguments):
 
 
 class HttpRecoveryLoopTests(unittest.TestCase):
+    def test_reviewer_returns_partial_status_on_its_last_round_without_more_tools(self):
+        requests = []
+        def respond(call, **kwargs):
+            body = json.loads(call.data)
+            requests.append(body)
+            message = ({'content': 'Review remains pending; nothing was published.'}
+                       if body.get('tool_choice') == 'none' else
+                       {'tool_calls': [tool_call('calc', 'calculate', {'expression': '1+1'})]})
+            return io.BytesIO(json.dumps({'choices': [{'message': message}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('Review PR', {'_ax_role': 'code_reviewer', 'tools': ['calculate'], 'max_tool_rounds': 2})
+        self.assertIn('Частичный результат', answer)
+        self.assertIn('Review remains pending', answer)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[-1]['tool_choice'], 'none')
+        self.assertNotIn('tools', requests[-1])
+
     def test_operator_reserves_its_last_round_for_an_explicit_no_tools_answer(self):
         requests=[]
         def respond(call,**kwargs):

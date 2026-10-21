@@ -160,6 +160,17 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                  if mcp_servers else {})
     # Writes use the curated runtime capture, not arbitrary model-selected text.
     mcp_tools.pop('mcp__cognee__remember', None)
+    reviewer = role_config.get('name', role_config.get('_ax_role')) == 'code_reviewer'
+    if reviewer and 'mcp__github__pull_request_review_write' in mcp_tools:
+        function = mcp_tools['mcp__github__pull_request_review_write']['schema']['function']
+        function['description'] = (
+            'Create a pending PR review with method=create and no event. '
+            'Add inline comments using the separate add_comment_to_pending_review tool. '
+            'Submit your pending review with method=submit_pending and event=COMMENT. '
+            'Do not modify a pending review from another run; report the conflict.')
+        parameters = function['parameters']
+        parameters['properties']['method']['enum'] = ['create', 'submit_pending']
+        parameters['properties']['event']['enum'] = ['COMMENT']
     schemas = [TOOL_SCHEMAS[name] for name in allowed]
     schemas.extend(item["schema"] for item in mcp_tools.values())
     turn_id = uuid.uuid4().hex
@@ -194,7 +205,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if not key:
             raise ValueError(f"required environment variable is missing: {key_env}")
         headers["Authorization"] = f"Bearer {key}"
-    if role_config.get('name') == 'code_reviewer':
+    if reviewer:
         messages.append({'role': 'system', 'content':
             'After submitting a review, verify publication once and return the result. '
             'If a reviews/comments response is truncated, paginate or narrow the request; '
@@ -241,7 +252,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     for round_number in range(1, role_config.get("max_tool_rounds",
                                              RUNTIME["model"]["default_max_tool_rounds"]) + 1):
         forced_final = bool(final_reserve and remaining_seconds() <= final_reserve)
-        if role_config.get('name', role_config.get('_ax_role')) == 'project_operator' \
+        if role_config.get('name', role_config.get('_ax_role')) in {'project_operator', 'code_reviewer'} \
                 and round_number == role_config.get('max_tool_rounds', RUNTIME['model']['default_max_tool_rounds']):
             forced_final = True
         try:
@@ -320,6 +331,17 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             call_id=turn_id + ":" + tool_call["id"])
                     elif name in mcp_tools:
                         selected = mcp_tools[name]
+                        if reviewer and selected['server'] == 'github' \
+                                and selected['native_name'] == 'pull_request_review_write':
+                            method = arguments.get('method')
+                            if method not in ('create', 'submit_pending') \
+                                    or (method == 'create' and 'event' in arguments) \
+                                    or (method == 'submit_pending' and arguments.get('event') != 'COMMENT'):
+                                raise ToolInputError(
+                                    'code_reviewer permits pull_request_review_write only with method=create '
+                                    'without event, or method=submit_pending and event=COMMENT. '
+                                    'Use the separate add_comment_to_pending_review tool for inline comments. '
+                                    'Do not delete or recreate a pending review after an error; report its status.')
                         if selected['server'] == 'cognee':
                             if not memory.enabled:
                                 raise ToolInputError('Memory needs one repository URL or [project: slug].')

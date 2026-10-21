@@ -257,6 +257,8 @@ A nonempty `progressToken` enables MCP progress notifications carrying harness
 and delegated-agent events. An empty or omitted token disables those notifications;
 SSE keepalive `ping` comments may still appear. The final result includes the
 answer, `sessionId` and activity. Continue with `send_message` and that `sessionId`.
+Upstream HTTP failures return `isError=true` with the HTTP status and redacted
+diagnostic message, including child session IDs when supplied by the API.
 
 Requests can select a role, but cannot override its command, credentials or
 permissions. Keep this local endpoint restricted to trusted callers; it has no
@@ -526,12 +528,17 @@ instruction, not a server-enforced review gate.
 
 When given a PR, the reviewer checks its diff and existing comments, creates a
 pending review pinned to the head SHA, adds findings at the relevant file/line,
-and submits with `event=COMMENT`. It verifies publication and returns links.
+and submits with `method=submit_pending` and `event=COMMENT`. Inline findings use
+the separate `add_comment_to_pending_review` tool. The runtime restricts the
+review-write tool to pending creation and comment submission; deletion, thread
+resolution and approval are rejected before contacting GitHub. It verifies
+publication and returns links.
 Without a PR it returns findings to the author. A changed head SHA or an existing
 pending review belonging to another run stops publication and is reported.
 The token needs **Pull requests: write** in addition to code read access.
 GitHub attributes comments to the account owning the token. Review submission is
-model-directed; approvals, merges and source edits are forbidden by its instructions.
+model-directed; merges and source edits remain outside its available tools.
+The last tool round is reserved for a partial status answer when the work is incomplete.
 
 After these changes run `bash ax_local/up.sh` and start a new session
 (`"sessionId": ""`) to load the new tools and instructions.

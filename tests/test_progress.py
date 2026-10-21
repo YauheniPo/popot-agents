@@ -136,6 +136,8 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
         class Chat:
             container_name = 'worker-test'
             def send(self, message):
+                if message == 'fail':
+                    raise AgentRunError('review failed sessionId=0123456789abcdef test-error-secret')
                 forward_progress(format_progress('assistant_message', agent_role='code_reviewer', content='Проверяю PR'))
                 forward_progress(format_progress('assistant_reasoning', agent_role='code_reviewer',
                                                  reasoning='Provider reasoning fixture.'))
@@ -158,6 +160,7 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
             with open(os.path.join(directory, 'mcp.log'), 'wb') as log:
                 process = subprocess.Popen([sys.executable, '-u', '-m', 'popot_agents.mcp_server'],
                     env={**os.environ, 'MCP_HOST':'127.0.0.1','MCP_PORT':str(port),
+                         'MCP_TEST_API_KEY': 'test-error-secret',
                          'MCP_ORCHESTRATOR_URL':f'http://127.0.0.1:{server.server_port}'},
                     stdout=subprocess.DEVNULL, stderr=log)
                 try:
@@ -235,6 +238,26 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                                         data = replies[0].get('structuredContent') or json.loads(
                                             next(item['text'] for item in replies[0]['content'] if item['type'] == 'text'))
                                         self.assertEqual(data['answer'], 'done')
+                        for tool_name, argument in [('run_task', 'task'), ('send_message', 'message')]:
+                            for version in ('2025-11-25', '2026-07-28'):
+                                params = {'name': tool_name, 'arguments': {'agent': 'test', argument: 'fail'}}
+                                if version == '2026-07-28':
+                                    params['_meta'] = {'io.modelcontextprotocol/protocolVersion': version,
+                                                      'io.modelcontextprotocol/clientCapabilities': {}}
+                                response = await http.post(url, headers={
+                                    'Accept': 'application/json, text/event-stream',
+                                    'MCP-Protocol-Version': version,
+                                    'Mcp-Method': 'tools/call', 'Mcp-Name': tool_name,
+                                }, json={'jsonrpc': '2.0', 'id': 100, 'method': 'tools/call', 'params': params})
+                                self.assertEqual(response.status_code, 200, response.text)
+                                events = ([response.json()] if response.headers['content-type'].startswith('application/json')
+                                          else [json.loads(line[6:]) for line in response.text.splitlines()
+                                                if line.startswith('data: ')])
+                                result = next(event['result'] for event in events if event.get('id') == 100)
+                                self.assertTrue(result['isError'])
+                                text = '\n'.join(item['text'] for item in result['content'] if item['type'] == 'text')
+                                self.assertIn('HTTP 502: review failed sessionId=0123456789abcdef', text)
+                                self.assertNotIn('test-error-secret', text)
                 finally:
                     finish.set()
                     process.terminate()
