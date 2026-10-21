@@ -12,6 +12,13 @@ PR = 'https://github.com/example/project/pull/70'
 
 
 class DelegationRoutingTests(unittest.TestCase):
+    def test_harness2_runs_before_model_selected_delegation(self):
+        role = {**self.role, 'harness2': {'enabled': True, 'mode': 'execution'}}
+        with patch('popot_agents.worker.harness2.refine_role', return_value=role) as refine:
+            self.run_task('Review PR ' + PR, role=role, specialist='code_reviewer')
+        refine.assert_called_once()
+        self.delegate.assert_called_once()
+
     def setUp(self):
         self.delegate = Mock(return_value=json.dumps({
             'sessionId': '0123456789abcdef', 'role': 'code_reviewer',
@@ -25,36 +32,60 @@ class DelegationRoutingTests(unittest.TestCase):
         self.role = {'name': 'backend_engineer', 'tools': ['bash'],
                      'allowed_roles': ['qa_engineer', 'code_reviewer']}
 
-    def run_task(self, task, role=None, extra_tools=None):
+    def run_task(self, task, role=None, extra_tools=None, specialist=None):
+        self.requests = []
+        replies = []
+        if specialist:
+            replies.append({'tool_calls': [{'id': 'delegate', 'type': 'function', 'function': {
+                'name': 'delegate_task', 'arguments': json.dumps({'role': specialist, 'task': 'Check the task'})}}]})
+        replies.append({'content': 'Suggested comments'})
+        def reply(call, **_kwargs):
+            self.requests.append(json.loads(call.data))
+            return io.BytesIO(json.dumps({'choices': [{'message': {'role': 'assistant', **replies.pop(0)}}]}).encode())
         with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1',
                                      'HARNESS_MODEL': 'fake'}, clear=True), \
-             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=lambda *_a, **_k:
-                   io.BytesIO(b'{"choices":[{"message":{"content":"Suggested comments"}}]}')) as model, \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply) as model, \
              patch('popot_agents.worker.http_harness.execute_tool') as local, \
              redirect_stderr(io.StringIO()):
             answer = run_http(task, role or self.role,
                               extra_tools=self.tools if extra_tools is None else extra_tools)
         return answer, model, local
 
-    def test_pr_review_runs_reviewer_without_parent_model_or_local_tools(self):
-        answer, model, local = self.run_task('проверь этот PR и сделай code review ' + PR)
+    def test_pr_review_uses_model_selected_reviewer_and_preserves_user_request(self):
+        answer, model, local = self.run_task('проверь этот PR и сделай code review ' + PR,
+                                           specialist='code_reviewer')
         self.delegate.assert_called_once()
         handoff = self.delegate.call_args.args[0]
         self.assertEqual(handoff['role'], 'code_reviewer')
         self.assertIn(PR, handoff['task'])
         self.assertIn('проверь этот PR', handoff['task'])
-        self.assertIn('Verified current head', answer)
-        self.assertIn('0123456789abcdef', answer)
-        model.assert_not_called()
+        self.assertEqual(answer, 'Suggested comments')
+        self.assertEqual(model.call_count, 2)
+        child = json.loads(self.requests[-1]['messages'][-1]['content'])
+        self.assertIn('Verified current head', child['answer'])
+        self.assertEqual(child['sessionId'], '0123456789abcdef')
         local.assert_not_called()
 
     def test_readonly_review_constraints_do_not_turn_review_into_implementation(self):
-        self.run_task('Review this PR, do not change or edit code: ' + PR)
+        self.run_task('Review this PR, do not change or edit code: ' + PR, specialist='code_reviewer')
         self.delegate.assert_called_once()
 
     def test_explicit_no_delegation_is_honored(self):
         self.run_task('Не используй delegate_task. Сделай code review ' + PR)
         self.delegate.assert_not_called()
+
+    def test_user_language_does_not_trigger_delegation_before_the_model(self):
+        for task in ('Review this PR ' + PR,
+                     'Проверь этот PR ' + PR,
+                     'Revisa los cambios de esta solicitud: ' + PR,
+                     'この変更を確認してください: ' + PR,
+                     'راجع التغييرات في هذا الطلب: ' + PR):
+            with self.subTest(task=task):
+                self.delegate.reset_mock()
+                _answer, model, _local = self.run_task(task)
+                model.assert_called_once()
+                self.delegate.assert_not_called()
+                self.assertIn({'role': 'user', 'content': task}, self.requests[0]['messages'])
 
     def test_comment_followup_carries_pr_and_explicit_user_constraints(self):
         history = [
@@ -62,7 +93,7 @@ class DelegationRoutingTests(unittest.TestCase):
             {'role': 'assistant', 'content': 'Old unverified findings.'},
             {'role': 'user', 'content': 'оставь комментарии в PR'},
         ]
-        self.run_task(history)
+        self.run_task(history, specialist='code_reviewer')
         self.delegate.assert_called_once()
         task = self.delegate.call_args.args[0]['task']
         self.assertIn(PR, task)
@@ -79,12 +110,16 @@ class DelegationRoutingTests(unittest.TestCase):
                           'state': 'TASK_STATE_COMPLETED', 'answer': 'text', 'truncated': False}
                 self.delegate.return_value = json.dumps({**result, **changes})
                 with self.assertRaisesRegex(RuntimeError, 'delegat'):
-                    self.run_task('Review this PR ' + PR)
+                    self.run_task('Review this PR ' + PR, specialist='code_reviewer')
 
-    def test_missing_reviewer_capability_cannot_fall_back_to_local_review(self):
-        with self.assertRaisesRegex(RuntimeError, 'code_reviewer.*unavailable'):
-            self.run_task('Review this PR ' + PR, extra_tools={})
+    def test_missing_delegation_tool_cannot_be_executed(self):
+        _answer, _model, local = self.run_task('Review this PR ' + PR,
+                                             extra_tools={}, specialist='code_reviewer')
         self.delegate.assert_not_called()
+        local.assert_not_called()
+        rejection = json.loads(self.requests[-1]['messages'][-1]['content'])
+        self.assertTrue(rejection['isError'])
+        self.assertIn('not allowed', rejection['error'])
 
     def test_implementation_request_does_not_get_sent_to_reviewer(self):
         def reply(call, **_kwargs):
@@ -140,10 +175,10 @@ class DelegationRoutingTests(unittest.TestCase):
         self.delegate.return_value = json.dumps({
             'sessionId': '0123456789abcdef', 'role': 'qa_engineer',
             'state': 'TASK_STATE_COMPLETED', 'answer': 'Checks completed', 'truncated': False})
-        answer, model, _local = self.run_task('Передай роли qa_engineer проверку тестов.')
+        answer, model, _local = self.run_task('Передай роли qa_engineer проверку тестов.', specialist='qa_engineer')
         self.assertEqual(self.delegate.call_args.args[0]['role'], 'qa_engineer')
-        self.assertIn('Checks completed', answer)
-        model.assert_not_called()
+        self.assertEqual(answer, 'Suggested comments')
+        self.assertEqual(model.call_count, 2)
 
     def test_checking_tests_or_explaining_comments_is_not_a_pr_review_action(self):
         for request in ('проверь тесты', 'How do I post comments in this PR?',
@@ -244,7 +279,7 @@ class DelegationRoutingTests(unittest.TestCase):
 
     def test_forced_partial_answer_preserves_failed_subtask_and_rejects_success_claim(self):
         answer = self._delegation_sequence(['Check API', 'Check UI'], [False, True], forced_final=True)
-        self.assertIn('Частичный результат', answer)
+        self.assertIn('Partial result', answer)
         self.assertIn('qa_engineer', answer)
         self.assertIn('1111111111111111', answer)
         self.assertNotIn('All requested checks succeeded', answer)
@@ -253,10 +288,11 @@ class DelegationRoutingTests(unittest.TestCase):
         from popot_agents.runtime_config import RUNTIME
         history = [{'role': 'user', 'content': 'Review ' + PR + '\n' +
                     'x' * RUNTIME['limits']['message_chars']}]
-        from popot_agents.tools import ToolInputError
-        with self.assertRaisesRegex(ToolInputError, 'context exceeds'):
-            self.run_task(history)
+        with self.assertRaisesRegex(RuntimeError, 'delegation to code_reviewer'):
+            self.run_task(history, specialist='code_reviewer')
         self.delegate.assert_not_called()
+        rejection = json.loads(self.requests[-1]['messages'][-1]['content'])
+        self.assertIn('context exceeds', rejection['error'])
 
 
 if __name__ == '__main__':

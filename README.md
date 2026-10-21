@@ -533,12 +533,32 @@ the separate `add_comment_to_pending_review` tool. The runtime restricts the
 review-write tool to pending creation and comment submission; deletion, thread
 resolution and approval are rejected before contacting GitHub. It verifies
 publication and returns links.
+The runtime permits comments and submission only after a successful `create`
+for the same owner/repository/PR in the current call. Failed creation grants no
+access to an existing pending review. Creation requires the reviewed `commitID`;
+inline comments require a positive diff `line` and explicit `side`. A review
+cannot be recreated after creation or submission in that call.
+GitHub's "User can only have one pending review per pull request" conflict blocks
+further review writes, including remaining writes in the same batch, and removes
+publication tools from subsequent model requests. Read tools remain available
+to finish the analysis and return verified findings with the publication blocker.
+If the model attempts a blocked write again, the next request requires a final
+answer without tools. A final timeout or tool request still returns the blocker
+without another publication attempt. Incomplete runs do not capture durable memory.
 Without a PR it returns findings to the author. A changed head SHA or an existing
 pending review belonging to another run stops publication and is reported.
 The token needs **Pull requests: write** in addition to code read access.
 GitHub attributes comments to the account owning the token. Review submission is
 model-directed; merges and source edits remain outside its available tools.
 The last tool round is reserved for a partial status answer when the work is incomplete.
+Unknown or disallowed tool names return a recoverable error listing the available
+tools. They are never executed; other results in the same batch are preserved.
+Recoverable tool-error progress events include the redacted diagnostic message.
+The parent model chooses specialists from the delegation tool's role descriptions
+using the task and conversation context. There is no keyword or language-based
+routing before the model request. Explicit no-delegation and analysis-only
+requests are part of its instructions and the original context passed to children;
+role allowlists and child-result validation remain enforced by the runtime.
 
 After these changes run `bash ax_local/up.sh` and start a new session
 (`"sessionId": ""`) to load the new tools and instructions.

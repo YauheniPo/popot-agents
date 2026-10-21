@@ -549,7 +549,7 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(result["answer"], "child result: actual HTTP")
         self.assertEqual(result["state"], "TASK_STATE_COMPLETED")
 
-    def test_harness_routes_pr_comment_followup_through_actual_a2a(self):
+    def test_model_selected_pr_comment_followup_uses_actual_a2a(self):
         import os
         from ax_local.worker.delegation import make_tools
         from popot_agents.worker.http_harness import run_http
@@ -568,13 +568,20 @@ class DelegationTests(unittest.TestCase):
         history = [{'role': 'user', 'content': 'Review ' + pr + '; do not merge.'},
                    {'role': 'assistant', 'content': 'Old unverified findings.'},
                    {'role': 'user', 'content': 'оставь комментарии в PR'}]
+        requests = []
+        replies = [{'role': 'assistant', 'tool_calls': [{'id': 'review', 'type': 'function', 'function': {
+            'name': 'delegate_task', 'arguments': json.dumps({'role': 'code_reviewer', 'task': 'Check the PR'})}}]},
+                   {'role': 'assistant', 'content': 'Review child completed.'}]
+        def respond(call, **kwargs):
+            requests.append(json.loads(call.data))
+            return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
         with self.service.turn(parent, 5), \
              patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1',
                                      'HARNESS_MODEL': 'fake'}, clear=True), \
-             patch('popot_agents.worker.http_harness.request.urlopen') as parent_model, \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond) as parent_model, \
              redirect_stderr(io.StringIO()):
             answer = run_http(history, self.roles['backend_engineer'], extra_tools=tools)
-        parent_model.assert_not_called()
+        self.assertEqual(parent_model.call_count, 2)
         self.assertEqual(len(self.runner.chats), 1)
         child = self.runner.chats[0]
         self.assertTrue(child.closed)
@@ -583,7 +590,8 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(saved['roleConfig']['_ax_delegation']['parent_session_id'], parent)
         self.assertIn(pr, saved['messages'][0]['content'])
         self.assertIn('do not merge', saved['messages'][0]['content'])
-        self.assertIn(child.session_id, answer)
+        self.assertEqual(json.loads(requests[-1]['messages'][-1]['content'])['sessionId'], child.session_id)
+        self.assertEqual(answer, 'Review child completed.')
 
     def test_worker_retries_lost_submission_response_without_duplicate_actor(self):
         import json

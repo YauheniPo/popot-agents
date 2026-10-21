@@ -14,7 +14,7 @@ from popot_agents.skills import prepare_role_config
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool
 from . import mcp_client
 from .delegation_policy import (available_roles, completed_answer, delegation_instructions,
-                                handoff_task, required_specialist)
+                                handoff_task)
 from .turn_memory import TurnMemory, parse_summary
 
 
@@ -136,23 +136,6 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     messages = [{"role": "user", "content": task}] if isinstance(task, str) else list(task)
     user_context = list(messages)
     extra_tools = extra_tools or {}
-    specialist = required_specialist(user_context, role_config)
-    if specialist:
-        if specialist not in available_roles(extra_tools):
-            raise RuntimeError(f'delegation to {specialist} is unavailable for this session')
-        call_id = uuid.uuid4().hex + ':required-delegation'
-        arguments = {'role': specialist, 'task': handoff_task(
-            user_context[-1]['content'], user_context, role_config)}
-        _trace('delegation_routed', role=specialist)
-        _trace('tool_call', round=0, name='delegate_task', call_id=call_id,
-               arguments={'role': specialist})
-        output = extra_tools['delegate_task']['call'](
-            arguments, timeout_seconds=remaining_seconds(), call_id=call_id)
-        _trace('tool_result', round=0, name='delegate_task', call_id=call_id,
-               output_chars=len(output))
-        memory.observe(call_id, 'delegate_task', arguments, output)
-        remaining_seconds()
-        return completed_answer(output, specialist)
     instructions = role_config.get("instructions", "")
     allowed = role_config.get("tools", [])
     mcp_servers = role_config.get("mcpServers", {})
@@ -175,6 +158,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     schemas.extend(item["schema"] for item in mcp_tools.values())
     turn_id = uuid.uuid4().hex
     failed_delegations = {}
+    reviews = {}  # Only a successful create in this call grants pending-review ownership.
+    review_conflict = None
+    publication_retry = False
+    review_write_tools = {name for name, tool in mcp_tools.items() if reviewer
+                          and tool['server'] == 'github' and tool['native_name'] in
+                          ('pull_request_review_write', 'add_comment_to_pending_review')}
     schemas.extend(item["schema"] for item in extra_tools.values())
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
@@ -224,16 +213,22 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     def partial_answer(answer=''):
         memory.run_complete = False
         if failed_delegations:
-            answer = 'Незавершённые подзадачи:\n' + '\n'.join(failed_delegations.values())
-        return ('Частичный результат: лимит работы исчерпан. '
-                'Полнота проверки не подтверждена. Выполненные внешние действия '
-                'могли сохраниться; перед повтором проверьте их результаты.'
-                + ('\n\n' + answer.strip() if answer else ''))
+            answer = 'Incomplete subtasks:\n' + '\n'.join(failed_delegations.values())
+        status = ('Partial result: publication is blocked by an existing pending review: '
+                  + review_conflict + '. This run did not modify or submit that draft.'
+                  if review_conflict else
+                  'Partial result: work budget exhausted. '
+                  'Task completeness is unverified. External actions may have persisted; '
+                  'inspect their results before retrying.')
+        return status + ('\n\n' + answer.strip() if answer else '')
 
     def completion(round_number, final):
         if final:
             messages.append({'role': 'system', 'content':
-                'The work budget is exhausted. Return a concise partial result now. '
+                (f'Publication is blocked by an existing pending review for {review_conflict}. '
+                 'Do not retry creation, modify, delete or submit that draft. '
+                 if review_conflict else 'The work budget is exhausted. ')
+                + 'Return a concise partial result now. '
                 'Do not call tools or repeat verification. State what current tool evidence '
                 'confirms, which actions already happened, and what remains unverified. '
                 'Do not claim the entire task completed. Use the user language.'})
@@ -251,7 +246,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
     for round_number in range(1, role_config.get("max_tool_rounds",
                                              RUNTIME["model"]["default_max_tool_rounds"]) + 1):
-        forced_final = bool(final_reserve and remaining_seconds() <= final_reserve)
+        forced_final = bool(review_conflict and (publication_retry or not schemas)
+                            or final_reserve and remaining_seconds() <= final_reserve)
         if role_config.get('name', role_config.get('_ax_role')) in {'project_operator', 'code_reviewer'} \
                 and round_number == role_config.get('max_tool_rounds', RUNTIME['model']['default_max_tool_rounds']):
             forced_final = True
@@ -290,9 +286,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             if isinstance(content, str) and content.strip():
                 _trace("assistant_message", round=round_number, content=content)
             messages.append(message)
+            publication_already_blocked = bool(review_conflict)
             for tool_call in calls:
                 remaining_seconds()
                 name = None
+                arguments = {}
                 delegation_key = None
                 tool_started_at = time.monotonic()
                 try:
@@ -301,8 +299,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     call_id = tool_call["id"]
                     if not isinstance(name, str) or not isinstance(call_id, str) or not call_id:
                         raise ValueError("tool name and call ID must be nonempty strings")
+                    if review_conflict and name in review_write_tools:
+                        publication_retry = publication_retry or publication_already_blocked
+                        raise ToolInputError('Review write not executed: an existing pending review blocks publication.')
                     if name not in extra_tools and name not in mcp_tools and name not in allowed:
-                        raise ValueError(f"tool is not allowed: {name}")
+                        names = sorted((set(extra_tools) | set(mcp_tools) | set(allowed))
+                                       - (review_write_tools if review_conflict else set()))
+                        raise ToolInputError(f"tool is not allowed: {name}. Available tools: {', '.join(names)}")
                     try:
                         arguments = json.loads(function["arguments"])
                     except (json.JSONDecodeError, TypeError) as exc:
@@ -331,6 +334,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             call_id=turn_id + ":" + tool_call["id"])
                     elif name in mcp_tools:
                         selected = mcp_tools[name]
+                        review_action, review_target = None, None
                         if reviewer and selected['server'] == 'github' \
                                 and selected['native_name'] == 'pull_request_review_write':
                             method = arguments.get('method')
@@ -342,6 +346,31 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                     'without event, or method=submit_pending and event=COMMENT. '
                                     'Use the separate add_comment_to_pending_review tool for inline comments. '
                                     'Do not delete or recreate a pending review after an error; report its status.')
+                            review_action = method
+                        if reviewer and selected['server'] == 'github' \
+                                and selected['native_name'] == 'add_comment_to_pending_review':
+                            review_action = 'comment'
+                        if review_action is not None:
+                            owner, repo, number = (arguments.get(key) for key in ('owner', 'repo', 'pullNumber'))
+                            if not isinstance(owner, str) or not owner.strip() \
+                                    or not isinstance(repo, str) or not repo.strip() \
+                                    or type(number) is not int or number <= 0:
+                                raise ToolInputError('Review operations require owner, repo and a positive pullNumber.')
+                            review_target = (owner.lower(), repo.lower(), number)
+                            if review_action == 'create':
+                                if review_target in reviews:
+                                    raise ToolInputError('A review was already created in this call. Do not recreate it; '
+                                                         'finish the pending review or report its submitted status.')
+                                if not isinstance(arguments.get('commitID'), str) or not arguments['commitID'].strip():
+                                    raise ToolInputError('Create the pending review with commitID set to the reviewed head SHA.')
+                            elif reviews.get(review_target) != 'pending':
+                                raise ToolInputError('Only a pending review successfully created in this call can be '
+                                                     'modified or submitted. Report an existing pending review as a conflict.')
+                            if review_action == 'comment' and (arguments.get('subjectType') != 'LINE'
+                                    or type(arguments.get('line')) is not int or arguments['line'] <= 0
+                                    or arguments.get('side') not in ('LEFT', 'RIGHT')):
+                                raise ToolInputError('Inline findings require subjectType=LINE, a positive diff line '
+                                                     'and side=LEFT or RIGHT. Verify the position against the actual diff.')
                         if selected['server'] == 'cognee':
                             if not memory.enabled:
                                 raise ToolInputError('Memory needs one repository URL or [project: slug].')
@@ -352,7 +381,16 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             output = mcp_client.call_tool(
                                 mcp_servers[selected["server"]], selected["native_name"], arguments,
                                 timeout_seconds=work_seconds())
-                        except RuntimeError:
+                            if review_action in ('create', 'submit_pending'):
+                                reviews[review_target] = 'pending' if review_action == 'create' else 'submitted'
+                        except RuntimeError as exc:
+                            if review_action == 'create' and isinstance(exc, mcp_client.MCPToolError) \
+                                    and 'user can only have one pending review per pull request' in str(exc).lower():
+                                review_conflict = f'https://github.com/{owner}/{repo}/pull/{number}'
+                                schemas[:] = [schema for schema in schemas
+                                              if schema['function']['name'] not in review_write_tools]
+                                _trace('review_blocked', reason='existing_pending_review',
+                                       pull_request_url=review_conflict)
                             if selected['server'] != 'cognee':
                                 raise
                             raise mcp_client.MCPToolError(
@@ -362,12 +400,19 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                               timeout_seconds=work_seconds())
                 except (ToolInputError, ToolExecutionError, mcp_client.MCPToolError) as exc:
                     _trace("tool_error", round=round_number, name=name, call_id=call_id,
-                           error_type=type(exc).__name__, recoverable=True)
+                           error_type=type(exc).__name__, error=str(exc),
+                           recoverable=not (review_conflict and name in review_write_tools))
                     output = json.dumps({
                         "isError": True, "error": str(exc),
-                        "next_step": "Correct the arguments or choose another permitted step. "
+                        "next_step": ('Do not retry or modify the existing pending review. '
+                                      + ('Return the partial result and report the publication conflict.'
+                                         if publication_retry else
+                                         'Continue reviewing with read-only tools and return verified findings, '
+                                         'clearly stating that publication is blocked.')
+                                      if review_conflict else
+                                      "Correct the arguments or choose another permitted step. "
                                      "Inspect any partial effects before repeating a write. "
-                                     "Do not claim success without verification.",
+                                     "Do not claim success without verification."),
                     }, ensure_ascii=False)
                 except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
                     _trace("tool_error", round=round_number, name=name,
@@ -405,8 +450,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             raise RuntimeError('; '.join(failed_delegations.values()))
         _trace("assistant_answer", round=round_number, content=answer.strip())
         remaining_seconds()
-        if forced_final:
-            _trace('turn_partial', reason='work_budget_exhausted', round=round_number)
+        if forced_final or review_conflict:
+            _trace('turn_partial', reason='existing_pending_review' if review_conflict else 'work_budget_exhausted',
+                   round=round_number)
             return partial_answer(answer)
         if memory.enabled:
             try:
