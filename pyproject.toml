@@ -5,10 +5,11 @@ requires-python = ">=3.10"
 dependencies = ["psycopg[binary]==3.3.6"]
 
 [project.optional-dependencies]
-ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.42.0"]
+ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.54.0"]
 
 [dependency-groups]
 mcp = ["mcp==2.3.0"]
+ci = ["pytest==9.1.1", "coverage==7.16.2", {include-group = "mcp"}]
 browser = ["playwright==1.64.0"]
 harness2 = [
     "harness2 @ git+https://github.com/google-research/harness2@1cfe254e8d25b15f37048c3730134686abe60335",
@@ -38,3 +39,24 @@ NGINX_VERSION = "1.28-alpine"
 PYTHON_IMAGE = "python:3.12-slim"
 GO_IMAGE = "golang:1.27.1-bookworm"
 NODE_IMAGE = "node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "ax_local/tests"]
+addopts = "--import-mode=importlib"
+junit_family = "xunit2"
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["popot_agents", "ax_local", "memory"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+[tool.coverage.xml]
+output = "reports/coverage.xml"
+
+[tool.coverage.html]
+directory = "reports/coverage-html"

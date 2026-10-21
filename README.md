@@ -51,6 +51,66 @@ tests/            API, harness, MCP, roles, sessions and configuration tests
 `popot_agents` remains the Python package used by AX. It no longer launches
 worker containers through Docker or provides a separate API entrypoint.
 
+## CI and code quality
+
+[GitHub Actions CI](.github/workflows/ci.yml) runs on branch pushes, pull requests,
+and manual dispatch. It runs the Python and AX suites on Python 3.12, including
+session-store integration tests against an isolated PostgreSQL 17 service, plus
+the graph UI tests on Node.js 24. Dependencies and coverage settings live in
+[pyproject.toml](pyproject.toml).
+
+The **Test results** job uses [dorny/test-reporter](https://github.com/dorny/test-reporter)
+to show passed, failed and skipped tests in GitHub Checks and the Actions Summary.
+The **Python, AX and graph tests** job adds a coverage table to its Summary.
+Download the `test-results` artifact for JUnit XML, Python coverage XML, graph LCOV and
+`coverage-html/index.html` with per-file line and branch coverage. Reports are
+retained for 14 days and are produced even when tests fail.
+
+Tests do not receive provider or GitHub PAT secrets. Live AX/ATE and Cognee tests
+remain opt-in and are skipped in this pipeline. Fork and Dependabot runs still
+produce report artifacts and a coverage summary; the job that publishes Checks
+is skipped because their GitHub tokens are read-only.
+
+[SonarQube Cloud](https://sonarcloud.io/dashboard?id=YauheniPo_popot-agents) uses
+organization `yauhenipo` and project `YauheniPo_popot-agents`, configured in
+[sonar-project.properties](sonar-project.properties). The repository Actions
+secret `SONAR_TOKEN` authenticates the scan; `.env` is never uploaded or loaded
+by CI. The scan runs after successful tests on `main` and on same-repository PRs
+targeting `main`, excluding Dependabot. This supports the Cloud Free plan; other
+branch pushes run tests only. The scanner imports Python and graph coverage and waits for
+the server's Quality Gate; a failed gate fails the job.
+
+The SonarCloud project must use CI-based analysis (disable Automatic Analysis if
+enabled), with `main` analyzed before its first PR analysis. Link the project to
+the GitHub repository in SonarCloud for PR decoration. To enforce checks before
+merging, add **Python, AX and graph tests** and **SonarQube Cloud Quality Gate**
+to the repository's branch rules; this workflow does not change branch protection.
+
+## Security checks
+
+[Security](.github/workflows/security.yml) runs alongside CI:
+
+- **CodeQL** analyzes Python, JavaScript/TypeScript and GitHub Actions workflows
+  with the `security-extended` query suite on pushes, pull requests, manual runs
+  and weekly on Monday at 06:23 UTC. Findings appear under
+  [Security → Code scanning](https://github.com/YauheniPo/popot-agents/security/code-scanning).
+  Go snippets and fixtures are not included in this analysis.
+- **GitGuardian secret scan** scans pushed commits and same-repository pull
+  requests using the Actions secret `GITGUARDIAN_API_KEY`. A detected secret fails
+  the job; its SARIF report is uploaded to Code scanning even when the scan fails.
+  Fork and Dependabot pull requests are skipped because the API key is unavailable.
+  Secret values stay redacted; `.env` is not loaded by the workflow.
+- [Dependabot](.github/dependabot.yml) checks Python dependencies in
+  `pyproject.toml` and pinned GitHub Actions weekly and opens update pull requests.
+  Dependabot alerts and security updates must also be enabled in repository
+  settings; their status is independent of this file.
+
+GitHub secret scanning and push protection run through repository settings.
+They are separate from GitGuardian and help detect or block supported credentials.
+CodeQL and SARIF uploads use the job-scoped `GITHUB_TOKEN`; no personal GitHub
+PAT is required in Actions secrets. Keep CodeQL default setup disabled when using
+this versioned workflow. SonarCloud continues to report its own Quality Gate.
+
 ## Project memory and graph UI
 
 `bash ax_local/up.sh` also starts Cognee. Open **http://localhost:3001** and sign
