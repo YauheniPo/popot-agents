@@ -1,6 +1,7 @@
 """OpenAI-compatible chat harness with a bounded local tool loop."""
 
 import json
+import math
 import os
 import sys
 import time
@@ -48,6 +49,12 @@ class _FinalAnswerRequired(RuntimeError):
     pass
 
 
+class _ModelRequestError(RuntimeError):
+    def __init__(self, message, *, retryable):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 def _model_request(call, *, round_number, messages, schemas, remaining_seconds, final=False):
     """Retry only completion generation; tools run after a complete response."""
     attempts = 1 if final else 1 + RUNTIME["model"]["request_retries"]
@@ -85,29 +92,38 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
         if retryable and not final:
             remaining_seconds()  # Preserve the reserved final-answer budget, even on the last attempt.
         if not retryable or attempt == attempts:
-            raise RuntimeError(failure) from None
+            raise _ModelRequestError(failure, retryable=retryable) from None
         remaining = remaining_seconds()
         _trace("model_retry", round=round_number, next_attempt=attempt + 1,
                reason=failure, remaining_seconds=round(remaining, 3))
 
 
 def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
-             *, extra_tools: dict | None = None) -> str:
+             *, extra_tools: dict | None = None, timeout_seconds: float | None = None,
+             state: dict | None = None) -> str:
+    turn_timeout = float(os.getenv('HARNESS_TURN_TIMEOUT_SECONDS',
+                                  str(RUNTIME['timeouts']['turn_seconds'])))
+    if not math.isfinite(turn_timeout) or turn_timeout <= 0:
+        raise ValueError('HARNESS_TURN_TIMEOUT_SECONDS must be positive and finite')
+    if timeout_seconds is not None:
+        if type(timeout_seconds) not in {int, float} or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError('timeout_seconds must be positive and finite')
+        turn_timeout = min(turn_timeout, timeout_seconds)
     messages = [{'role': 'user', 'content': task}] if isinstance(task, str) else list(task)
     role_config = prepare_role_config(role_config)
     deadline = None
-    if role_config.get('harness2', {}).get('enabled'):
-        deadline = time.monotonic() + float(os.getenv('HARNESS_TURN_TIMEOUT_SECONDS',
-                                                     str(RUNTIME['timeouts']['turn_seconds'])))
+    if timeout_seconds is not None or role_config.get('harness2', {}).get('enabled'):
+        deadline = time.monotonic() + turn_timeout
     memory = TurnMemory(role_config, messages)
     memory.start_session()
     success = False
     try:
-        if role_config.get('harness2', {}).get('enabled'):
+        if role_config.get('harness2', {}).get('enabled') and not (state and state.get('messages')):
             from .harness2 import refine_role
             role_config = refine_role(messages, role_config, deadline=deadline,
                                       tool_names=list(extra_tools or {}))
-        answer = _run_http(task, role_config, extra_tools=extra_tools, memory=memory, deadline=deadline)
+        answer = _run_http(task, role_config, extra_tools=extra_tools, memory=memory,
+                           deadline=deadline, turn_timeout=turn_timeout, state=state)
         success = memory.run_complete
         return answer
     finally:
@@ -115,13 +131,15 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
 
 def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
-             *, extra_tools: dict | None = None, memory=None, deadline=None) -> str:
+             *, extra_tools: dict | None = None, memory=None, deadline=None, turn_timeout=None,
+             state: dict | None = None) -> str:
     base_url = os.environ.get("HARNESS_BASE_URL", "").rstrip("/")
     model = os.environ.get("HARNESS_MODEL", "")
     if not base_url.startswith(("http://", "https://")) or not model:
         raise ValueError("HARNESS_BASE_URL and HARNESS_MODEL are required")
-    turn_timeout = float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS",
-                                   str(RUNTIME["timeouts"]["turn_seconds"])))
+    if turn_timeout is None:
+        turn_timeout = float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS",
+                                       str(RUNTIME["timeouts"]["turn_seconds"])))
     if turn_timeout <= 0:
         raise ValueError("HARNESS_TURN_TIMEOUT_SECONDS must be positive")
     if deadline is None:
@@ -135,6 +153,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
     messages = [{"role": "user", "content": task}] if isinstance(task, str) else list(task)
     user_context = list(messages)
+    resuming = bool(state and state.get('messages') and
+                    state.get('outcome', {}).get('status') in {'partial', 'blocked', 'failed'})
+    if resuming:
+        messages = [*state['messages'], messages[-1]]
     extra_tools = extra_tools or {}
     instructions = role_config.get("instructions", "")
     allowed = role_config.get("tools", [])
@@ -150,24 +172,39 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             'Create a pending PR review with method=create and no event. '
             'Add inline comments using the separate add_comment_to_pending_review tool. '
             'Submit your pending review with method=submit_pending and event=COMMENT. '
-            'Do not modify a pending review from another run; report the conflict.')
+            'Only this sandbox\'s runtime-owned checkpoint may authorize an existing draft. '
+            'Do not modify another session\'s pending review; report the conflict.')
         parameters = function['parameters']
         parameters['properties']['method']['enum'] = ['create', 'submit_pending']
         parameters['properties']['event']['enum'] = ['COMMENT']
     schemas = [TOOL_SCHEMAS[name] for name in allowed]
     schemas.extend(item["schema"] for item in mcp_tools.values())
     turn_id = uuid.uuid4().hex
-    failed_delegations = {}
-    reviews = {}  # Only a successful create in this call grants pending-review ownership.
-    review_conflict = None
+    failed_delegations = {tuple(key): value for key, value in state.get('failed_delegations', [])} if resuming else {}
+    # Ownership belongs to this sandbox's checkpoint, never to a recalled draft.
+    reviews = {tuple(key): value for key, value in state.get('reviews', [])} if resuming else {}
+    review_conflict = state.get('review_conflict') if resuming else None
     publication_retry = False
     review_write_tools = {name for name, tool in mcp_tools.items() if reviewer
                           and tool['server'] == 'github' and tool['native_name'] in
                           ('pull_request_review_write', 'add_comment_to_pending_review')}
     schemas.extend(item["schema"] for item in extra_tools.values())
-    if instructions:
+    if review_conflict:
+        schemas[:] = [schema for schema in schemas if schema['function']['name'] not in review_write_tools]
+    if instructions and not resuming:
         messages.insert(0, {"role": "system", "content": instructions})
     delegation_prompt = delegation_instructions(role_config, extra_tools)
+    result_contract = (
+        'When returning a final answer without tool calls, output one JSON object: '
+        '{"status":"completed","answer":"user-facing answer",'
+        '"evidence":["verified results and URLs"],"remaining_work":["unfinished requirements"],'
+        '"errors":["unresolved errors"]}. Use completed only when every requested requirement '
+        'is verified; remaining_work and errors must then be empty. Other allowed statuses are '
+        'partial, blocked and failed. Use blocked when a missing '
+        'precondition requires intervention. Values may use the user language; keys and status '
+        'are the protocol. Tool call responses are unchanged.')
+    if state is not None:
+        messages.append({'role': 'system', 'content': result_contract})
     if delegation_prompt:
         messages.append({'role': 'system', 'content': delegation_prompt})
     if 'cognee' in mcp_servers:
@@ -196,13 +233,22 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         headers["Authorization"] = f"Bearer {key}"
     if reviewer:
         messages.append({'role': 'system', 'content':
+            'Copy owner/repo from the PR URL and verified metadata for the requested operation. '
+            'Read changed source with get_file_contents and sha set to head.sha, a commit SHA. '
+            'For fork source reads use head.repo.full_name; review operations target the PR repository. '
+            'The sha returned for a file identifies a blob, not a commit or tree. Never use that '
+            'blob SHA as the revision for get_file_contents or get_commit. After an invalid revision '
+            'error, recover the commit SHA from PR metadata before trying more file paths. '
+            'For directory listings request only name, path and type fields; paginate get_files '
+            'rather than repeatedly reading a truncated full diff. '
             'After submitting a review, verify publication once and return the result. '
-            'If a reviews/comments response is truncated, paginate or narrow the request; '
+            'If any tool response is truncated, paginate or narrow the request; '
             'do not repeat an identical read hoping to receive different data. '
             'Never repeat publication to compensate for a missing final answer.'})
     final_reserve = min(RUNTIME["model"]["final_answer_reserve_seconds"],
                         turn_timeout / RUNTIME["model"]["final_answer_reserve_divisor"]) if schemas else 0
     forced_final = False
+    model_failure = None
 
     def work_seconds():
         budget = remaining_seconds() - final_reserve
@@ -210,29 +256,70 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             raise _FinalAnswerRequired()
         return budget
 
-    def partial_answer(answer=''):
+    def save_result(answer, status, reason, report=None):
+        if state is not None:
+            checkpoint = {'messages': [*messages, {'role': 'assistant', 'content': answer}],
+                          'reviews': [[list(key), value] for key, value in reviews.items()],
+                          'review_conflict': review_conflict,
+                          'failed_delegations': [[list(key), value] for key, value in failed_delegations.items()],
+                          'outcome': {'status': status, 'reason': reason,
+                              **({key: report[key] for key in ('evidence', 'remaining_work', 'errors')}
+                                 if report else {'evidence': [], 'remaining_work': ['Task completeness is unverified'],
+                                                 'errors': [value['error'] for value in failed_delegations.values()]
+                                                     + ([model_failure] if model_failure else [])})}}
+            if status == 'completed':
+                checkpoint['messages'] = []
+                checkpoint['reviews'] = []
+            if len(json.dumps(checkpoint, ensure_ascii=False).encode()) > RUNTIME['limits']['history_bytes']:
+                raise RuntimeError('Harness checkpoint exceeds the history limit; sandbox must not restart with empty context')
+            state.clear()
+            state.update(checkpoint)
+        return answer
+
+    def partial_answer(answer='', report=None):
         memory.run_complete = False
+        blocked_child = any(value.get('status') == 'blocked' for value in failed_delegations.values())
         if failed_delegations:
-            answer = 'Incomplete subtasks:\n' + '\n'.join(failed_delegations.values())
+            answer = 'Incomplete subtasks:\n' + '\n'.join(
+                value['error'] + ('\nPrevious child answer:\n' + value['answer'] if value.get('answer') else '')
+                for value in failed_delegations.values())
+            report = {'evidence': [], 'remaining_work': [],
+                      'errors': [value['error'] for value in failed_delegations.values()]}
+            for value in failed_delegations.values():
+                for key in ('evidence', 'remaining_work', 'errors'):
+                    items = value.get('outcome', {}).get(key, [])
+                    if isinstance(items, list):
+                        report[key].extend(item for item in items if isinstance(item, str) and item not in report[key])
+            if not report['remaining_work']:
+                report['remaining_work'] = ['Task completeness is unverified']
         status = ('Partial result: publication is blocked by an existing pending review: '
                   + review_conflict + '. This run did not modify or submit that draft.'
                   if review_conflict else
+                  'Partial result: a delegated task is blocked; resolve its reported precondition.'
+                  if blocked_child else
+                  'Partial result: the model request failed; task completeness is unverified.'
+                  if model_failure else
                   'Partial result: work budget exhausted. '
                   'Task completeness is unverified. External actions may have persisted; '
                   'inspect their results before retrying.')
-        return status + ('\n\n' + answer.strip() if answer else '')
+        return save_result(status + ('\n\n' + answer.strip() if answer else ''),
+                           'blocked' if review_conflict or blocked_child else 'partial',
+                           'existing_pending_review' if review_conflict else
+                           'delegated_task_blocked' if blocked_child else
+                           'model_request_failed' if model_failure else 'work_budget_exhausted', report)
 
     def completion(round_number, final):
+        request_messages = messages
         if final:
-            messages.append({'role': 'system', 'content':
+            request_messages = [*messages, {'role': 'system', 'content':
                 (f'Publication is blocked by an existing pending review for {review_conflict}. '
                  'Do not retry creation, modify, delete or submit that draft. '
                  if review_conflict else 'The work budget is exhausted. ')
                 + 'Return a concise partial result now. '
                 'Do not call tools or repeat verification. State what current tool evidence '
                 'confirms, which actions already happened, and what remains unverified. '
-                'Do not claim the entire task completed. Use the user language.'})
-        body = {"model": model, "messages": messages, **model_parameters}
+                'Do not claim the entire task completed. Use the user language.'}]
+        body = {"model": model, "messages": request_messages, **model_parameters}
         selected_schemas = [] if final else schemas
         if selected_schemas:
             body['tools'] = selected_schemas
@@ -240,25 +327,29 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             body['tool_choice'] = 'none'
         call = request.Request(f"{base_url}/chat/completions",
             data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
-        return _model_request(call, round_number=round_number, messages=messages,
+        return _model_request(call, round_number=round_number, messages=request_messages,
             schemas=selected_schemas, remaining_seconds=remaining_seconds if final else work_seconds,
             final=final)
 
-    for round_number in range(1, role_config.get("max_tool_rounds",
-                                             RUNTIME["model"]["default_max_tool_rounds"]) + 1):
-        forced_final = bool(review_conflict and (publication_retry or not schemas)
+    max_tool_rounds = role_config.get('max_tool_rounds', RUNTIME['model']['default_max_tool_rounds'])
+    for round_number in range(1, max_tool_rounds + 2):
+        forced_final = bool(round_number > max_tool_rounds
+                            or review_conflict and (publication_retry or not schemas)
                             or final_reserve and remaining_seconds() <= final_reserve)
-        if role_config.get('name', role_config.get('_ax_role')) in {'project_operator', 'code_reviewer'} \
-                and round_number == role_config.get('max_tool_rounds', RUNTIME['model']['default_max_tool_rounds']):
-            forced_final = True
         try:
             try:
                 result = completion(round_number, forced_final)
-            except _FinalAnswerRequired:
+            except (_FinalAnswerRequired, _ModelRequestError) as exc:
+                if isinstance(exc, _ModelRequestError):
+                    if forced_final or not schemas or not exc.retryable:
+                        raise
+                    model_failure = str(exc)
+                    _trace('model_final_fallback', round=round_number, reason=model_failure)
                 forced_final = True
                 result = completion(round_number, True)
         except RuntimeError as exc:
-            if forced_final and ('timed out' in str(exc) or 'deadline exceeded' in str(exc)):
+            if forced_final and (isinstance(exc, _ModelRequestError) and exc.retryable
+                                 or 'timed out' in str(exc) or 'deadline exceeded' in str(exc)):
                 _trace('turn_partial', reason='final_model_timeout', round=round_number)
                 return partial_answer()
             raise
@@ -285,7 +376,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             content = message.get("content")
             if isinstance(content, str) and content.strip():
                 _trace("assistant_message", round=round_number, content=content)
-            messages.append(message)
+            messages.append({'role': 'assistant', **message})
             publication_already_blocked = bool(review_conflict)
             for tool_call in calls:
                 remaining_seconds()
@@ -327,6 +418,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             # can resolve its failure. Another job for that role
                             # (even with a reused model call ID) proves nothing.
                             delegation_key = (arguments['role'], arguments['task'].strip())
+                            previous = next((value for key, value in failed_delegations.items()
+                                if key[0] == arguments['role'] and value.get('resumable')), {})
+                            if previous.get('resumable') and not arguments.get('session_id'):
+                                delegation_key = None
+                                raise ToolInputError('Continue the unfinished child using role and session_id=' +
+                                                     previous['session_id'] + '; do not create a replacement sandbox')
                             arguments = {**arguments, 'task': handoff_task(
                                 arguments['task'], user_context, role_config)}
                         output = extra_tools[name]["call"](
@@ -424,11 +521,37 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     raise
                 if delegation_key is not None:
                     try:
-                        completed_answer(output, delegation_key[0])
+                        completed_answer(output, delegation_key[0], session_id=arguments.get('session_id'))
                     except RuntimeError as exc:
-                        failed_delegations[delegation_key] = str(exc)
+                        try:
+                            child = json.loads(output)
+                        except (TypeError, ValueError):
+                            child = {}
+                        child_session = arguments.get('session_id') or (
+                            child.get('sessionId') if isinstance(child, dict) else None)
+                        previous = {}
+                        if arguments.get('session_id'):
+                            for key, value in list(failed_delegations.items()):
+                                if key[0] == delegation_key[0] and value.get('session_id') == child_session:
+                                    previous = failed_delegations.pop(key)
+                        failure = {**previous, 'error': str(exc),
+                            'role': delegation_key[0],
+                            'session_id': child_session,
+                            'status': child.get('outcome', {}).get('status') if isinstance(child, dict)
+                                and isinstance(child.get('outcome'), dict) else None,
+                            'resumable': isinstance(child, dict) and child.get('resumable') is True}
+                        if isinstance(child, dict) and child.get('role') == delegation_key[0] \
+                                and child.get('sessionId') == child_session and isinstance(child.get('answer'), str) \
+                                and child['answer'].strip():
+                            failure['answer'] = child['answer']
+                            failure['outcome'] = child['outcome'] if isinstance(child.get('outcome'), dict) else {}
+                        failed_delegations[delegation_key] = failure
                     else:
                         failed_delegations.pop(delegation_key, None)
+                        session_id = arguments.get('session_id')
+                        if session_id:
+                            failed_delegations = {key: value for key, value in failed_delegations.items()
+                                if not (key[0] == delegation_key[0] and value.get('session_id') == session_id)}
                 result_fields = ({"output": output} if name in {"calculate", "utc_time"}
                                  else {"output_chars": len(output)})
                 if role_config.get('_ax_harness2_probe'):
@@ -444,16 +567,50 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             return partial_answer()
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError("model endpoint returned an empty answer")
+        report = None
+        if state is not None:
+            try:
+                report = json.loads(answer)
+                if (not isinstance(report, dict) or report.get('status') not in
+                        {'completed', 'partial', 'blocked', 'failed'} or
+                        not isinstance(report.get('answer'), str) or not report['answer'].strip() or
+                        any(not isinstance(report.get(key), list) or
+                            any(not isinstance(item, str) for item in report[key])
+                            for key in ('evidence', 'remaining_work', 'errors'))):
+                    raise ValueError('invalid task result')
+                if report['status'] == 'completed' and (report['remaining_work'] or report['errors']):
+                    report['status'] = 'partial'
+                answer = report['answer']
+            except (ValueError, TypeError):
+                if forced_final:
+                    return partial_answer()
+                messages.append({'role': 'system', 'content': 'Invalid final result. ' + result_contract})
+                continue
+        if report and report['status'] in {'blocked', 'failed'}:
+            memory.run_complete = False
+            return save_result(answer, report['status'], 'agent_reported', report)
         if failed_delegations:
             if forced_final:
                 return partial_answer()
-            raise RuntimeError('; '.join(failed_delegations.values()))
+            if not any(value.get('resumable') for value in failed_delegations.values()):
+                raise RuntimeError('; '.join(value['error'] for value in failed_delegations.values()))
+            messages.append({'role': 'system', 'content':
+                'The proposed answer is incomplete. Evaluate the child evidence and errors below. '
+                'If the child is resumable, call delegate_task with the same role and session_id '
+                'and concrete corrective instructions. Preserve its sandbox and verify uncertain '
+                'external effects before retrying writes. A blocked result needs a changed '
+                'precondition; do not blindly retry it. Do not claim completion.\n' +
+                json.dumps(list(failed_delegations.values()), ensure_ascii=False)})
+            continue
         _trace("assistant_answer", round=round_number, content=answer.strip())
         remaining_seconds()
         if forced_final or review_conflict:
             _trace('turn_partial', reason='existing_pending_review' if review_conflict else 'work_budget_exhausted',
                    round=round_number)
-            return partial_answer(answer)
+            return partial_answer(answer, report)
+        if report and report['status'] == 'partial':
+            memory.run_complete = False
+            return save_result(answer, 'partial', 'agent_reported', report)
         if memory.enabled:
             try:
                 summary_messages = memory.summary_messages(answer.strip())
@@ -487,8 +644,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 memory.save(summary)
             except Exception as exc:
                 _trace('memory_capture_failed', dataset=memory.dataset, error_type=type(exc).__name__)
-        return answer.strip()
-    raise RuntimeError("model exceeded the tool-call limit")
+        return save_result(answer.strip(), 'completed', 'answer_returned', report)
+    return partial_answer()
 
 
 def main() -> None:

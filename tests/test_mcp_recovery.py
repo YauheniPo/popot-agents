@@ -81,6 +81,9 @@ class MCPRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 1)
 
     def test_rejected_tools_still_consume_round_budget(self):
-        with self.assertRaisesRegex(RuntimeError, 'tool-call limit'):
-            self.run_turn([mcp_client.MCPToolError('missing ref')], rounds=1)
-        self.assertEqual(len(self.requests), 1)
+        answer, call = self.run_turn([mcp_client.MCPToolError('missing ref')], rounds=1)
+        self.assertIn('Partial result', answer)
+        call.assert_called_once()
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(self.requests[-1]['tool_choice'], 'none')
+        self.assertNotIn('tools', self.requests[-1])

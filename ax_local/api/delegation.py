@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import secrets
 import subprocess
@@ -144,6 +145,7 @@ class Job:
     lock: object = field(default_factory=threading.RLock)
     activity: deque = field(default_factory=lambda: deque(maxlen=64))
     activity_seq: int = 0
+    messages: list = field(default_factory=list)
 
 
 class DelegationService:
@@ -155,11 +157,21 @@ class DelegationService:
         self.grants: dict[str, Grant] = {}
         self.tokens: dict[str, Grant] = {}
         self.jobs: dict[str, Job] = {}
+        self.retained: dict[str, tuple[object, float]] = {}
         self.closed = False
 
     def is_active(self, session_id: str) -> bool:
         with self.lock:
-            return session_id in self.jobs
+            return session_id in self.jobs or session_id in self.retained
+
+    def maintenance(self) -> None:
+        with self.lock:
+            expired = [session_id for session_id, (chat, touched) in self.retained.items()
+                       if time.monotonic() - touched >= getattr(chat, 'idle_timeout_seconds',
+                                                               RUNTIME['sessions']['default_idle_seconds'])]
+            chats = [self.retained.pop(session_id)[0] for session_id in expired]
+        for chat in chats:
+            chat.close()
 
     def recover_interrupted(self) -> None:
         """An API restart cannot resume a model's pending tool call safely."""
@@ -374,8 +386,12 @@ class DelegationService:
         message_id = message.get("messageId")
         if not isinstance(message_id, str) or not 1 <= len(message_id) <= 100:
             raise A2AError("messageId must be a nonempty string up to 100 characters")
-        if "taskId" in message or message.get("contextId", grant.root_id) != grant.root_id:
-            raise A2AError("only new tasks in the caller's context are supported")
+        session_id = message.get('taskId')
+        if session_id is not None and (not isinstance(session_id, str) or
+                not re.fullmatch(r'[0-9a-f]{16}', session_id)):
+            raise A2AError('invalid continuation session ID')
+        if message.get("contextId", grant.root_id) != grant.root_id:
+            raise A2AError("task must belong to the caller's context")
         parts = message.get("parts")
         if not isinstance(parts, list) or not parts or any(
                 not isinstance(part, dict) or set(part) != {"text"}
@@ -390,10 +406,16 @@ class DelegationService:
         metadata = message.get('metadata', {})
         if not isinstance(metadata, dict):
             raise A2AError('message metadata must be an object')
+        call_timeout = metadata.get('timeout_seconds')
+        if 'timeout_seconds' in metadata and (type(call_timeout) not in {int, float}
+                or not math.isfinite(call_timeout) or call_timeout <= 0):
+            raise A2AError('timeout_seconds must be positive and finite')
         probe = metadata.get('harness2')
         # Only the dedicated probe capability can enter this path; a normal
         # delegation request cannot opt into a more privileged same-role actor.
         is_probe = secrets.compare_digest(token, grant.probe_token)
+        if is_probe and session_id:
+            raise A2AError('Harness2 probes cannot continue delegated sessions')
         if is_probe:
             if not isinstance(probe, dict) or set(probe) != {'prompt', 'timeout_seconds'} \
                     or not isinstance(probe.get('prompt'), str) or len(probe['prompt']) > 1500 \
@@ -402,16 +424,17 @@ class DelegationService:
                 raise A2AError('invalid Harness2 probe')
         elif probe is not None:
             raise A2AError('probe must target the same role')
-        fingerprint = hashlib.sha256((role + '\n' + task +
+        fingerprint = hashlib.sha256((role + '\n' + (session_id or '') + '\n' + task +
             (json.dumps(probe, sort_keys=True) if is_probe else '')).encode()).hexdigest()
         with self.lock:
             self._authorized(token, role)
             # Persisted message IDs survive API restarts; never repeat actor side effects.
             for saved in self.store.list_chats():
                 meta = (saved.get("roleConfig") or {}).get("_ax_delegation", {})
-                if meta.get("parent_session_id") == grant.session_id \
-                        and meta.get("message_id") == message_id:
-                    if meta.get("fingerprint") != fingerprint:
+                previous = meta.get('attempts', {}).get(message_id)
+                if meta.get("parent_session_id") == grant.session_id and (
+                        previous or meta.get("message_id") == message_id):
+                    if (previous or meta.get("fingerprint")) != fingerprint:
                         raise A2AError("messageId was already used with different input")
                     return self._task(saved)
             self._authorized(token, role)
@@ -433,22 +456,48 @@ class DelegationService:
                     raise A2AError('No spare worker capacity for a Harness2 probe')
             if not is_probe and grant.run.calls >= self.policy["max_calls_per_turn"]:
                 raise A2AError("delegation call limit reached")
-            session_id = uuid.uuid4().hex[:16]
-            config = {**self.roles[role], "_ax_delegation": {
-                "parent_session_id": grant.session_id, "root_session_id": grant.root_id,
-                "lineage": [*grant.lineage, role], "message_id": message_id,
-                "fingerprint": fingerprint, "input": task, "state": "TASK_STATE_SUBMITTED"}}
+            previous_messages, chat = [], None
+            if session_id:
+                saved = self.store.get(session_id)
+                meta = (saved.get('roleConfig') or {}).get('_ax_delegation', {}) if saved else {}
+                if not saved or saved['role'] != role or meta.get('parent_session_id') != grant.session_id \
+                        or meta.get('root_session_id') != grant.root_id:
+                    raise A2AError('continuation task not found', -32001)
+                if session_id in self.jobs:
+                    raise A2AError('continuation task is already active')
+                if meta.get('outcome', {}).get('status') not in {'partial', 'blocked', 'failed'}:
+                    raise A2AError('only unfinished checkpointed tasks can continue')
+                retained = self.retained.get(session_id)
+                if not retained or retained[0].closed:
+                    raise A2AError('continuation sandbox is unavailable; refusing to create an empty replacement')
+                config = json.loads(json.dumps(saved['roleConfig']))
+                previous_messages, chat = saved['messages'], retained[0]
+                config['_ax_delegation'].update(message_id=message_id, fingerprint=fingerprint, input=task)
+            else:
+                session_id = uuid.uuid4().hex[:16]
+                config = {**self.roles[role], "_ax_delegation": {
+                    "parent_session_id": grant.session_id, "root_session_id": grant.root_id,
+                    "lineage": [*grant.lineage, role], "message_id": message_id,
+                    "fingerprint": fingerprint, "input": task, "state": "TASK_STATE_SUBMITTED"}}
+            config['_ax_delegation'].setdefault('attempts', {})[message_id] = fingerprint
+            config['_ax_delegation'].pop('outcome', None)
+            config['_ax_delegation']['resumable'] = False
             deadline = grant.deadline
+            if call_timeout is not None:
+                deadline = min(deadline, time.monotonic() + call_timeout)
             if is_probe:
                 parent = {**grant.config, '_ax_delegation': config['_ax_delegation']}
                 parent['tools'] = [name for name in parent.get('tools', [])
                                    if name in self.roles[role].get('tools', [])]
                 config = self._probe_config(parent, probe, self.roles[role])
                 deadline = min(deadline, time.monotonic() + probe['timeout_seconds'])
-            job = Job(session_id, config, task, grant.run, deadline)
+            job = Job(session_id, config, task, grant.run, deadline, chat=chat, messages=previous_messages)
             try:
                 self._save(job, "TASK_STATE_SUBMITTED")
                 self.jobs[session_id] = job
+                if chat:
+                    self.retained.pop(session_id)
+                    self.grants[session_id].run = grant.run
                 if is_probe:
                     grant.probes += 1
                 else:
@@ -504,10 +553,10 @@ class DelegationService:
                     meta[key] = value
                 else:
                     meta.pop(key, None)
-            messages = []
+            messages = list(job.messages)
             if answer is not None:
-                messages = [{"role": "user", "content": job.task},
-                            {"role": "assistant", "content": answer}]
+                messages += [{"role": "user", "content": job.task},
+                             {"role": "assistant", "content": answer}]
             self.store.save(job.session_id, job.config["agent"], messages,
                             job.config["_ax_role"], job.config)
             print(json.dumps({"event": "ax_delegation", "session_id": job.session_id,
@@ -542,11 +591,17 @@ class DelegationService:
             self._remaining(job)
             self._save(job, "TASK_STATE_WORKING")
             runner = self.runners[job.config['agent']]
-            job.chat = runner.start_chat(job.session_id, job.config,
-                                         deadline=job.deadline, cancel_event=job.canceled)
+            if job.chat is None:
+                job.chat = runner.start_chat(job.session_id, job.config,
+                                             deadline=job.deadline, cancel_event=job.canceled)
             stage = "worker_message"
             emit_progress('turn_started')
-            answer = job.chat.send(job.task, timeout_seconds=self._remaining(job))["answer"]
+            result = job.chat.send(job.task, timeout_seconds=self._remaining(job))
+            answer = result['answer']
+            outcome = result.get('outcome', {'status': 'completed', 'reason': 'answer_returned'})
+            if not isinstance(outcome, dict) or outcome.get('status') not in {'completed', 'partial', 'blocked', 'failed'}:
+                raise AgentRunError('worker returned an invalid task outcome')
+            job.config['_ax_delegation']['outcome'] = outcome
             self._remaining(job)
             state = "TASK_STATE_COMPLETED"
         except TimeoutError:
@@ -555,15 +610,33 @@ class DelegationService:
             issue, failure = _worker_failure(exc, stage)
         finally:
             try:
+                resumable = (not self.closed and state == 'TASK_STATE_COMPLETED' and
+                    not job.config.get('_ax_harness2_probe') and
+                    job.config['_ax_delegation'].get('outcome', {}).get('status') in {'partial', 'blocked', 'failed'}
+                    and not job.canceled.is_set() and not job.run.canceled.is_set())
                 if job.chat:
-                    job.chat.close()
+                    if resumable:
+                        job.chat.after_turn()
+                    else:
+                        job.chat.close()
                 if job.canceled.is_set() or job.run.canceled.is_set():
                     state, answer, issue = "TASK_STATE_CANCELED", None, "delegation canceled"
+                    resumable = False
+                    if job.chat:
+                        job.chat.close()
                 emit_progress('completed' if state == 'TASK_STATE_COMPLETED' else 'failed')
-                self._save(job, state, answer if state == "TASK_STATE_COMPLETED" else None,
-                           issue, failure)
+                job.config['_ax_delegation']['resumable'] = resumable
+                if state != 'TASK_STATE_COMPLETED':
+                    job.config['_ax_delegation']['outcome'] = {'status': 'failed', 'reason': issue}
+                with self.lock:
+                    if resumable:
+                        self.retained[job.session_id] = (job.chat, time.monotonic())
+                    else:
+                        self.revoke(job.session_id)
+                    self.jobs.pop(job.session_id, None)
+                    self._save(job, state, answer if state == "TASK_STATE_COMPLETED" else None,
+                               issue, failure)
             finally:
-                self.revoke(job.session_id)
                 with self.lock:
                     self.jobs.pop(job.session_id, None)
 
@@ -573,9 +646,13 @@ class DelegationService:
                 "status": {"state": meta["state"], "timestamp": saved["updatedAt"]},
                 "metadata": {"sessionId": saved["sessionId"], "role": saved["role"],
                              "parentSessionId": meta["parent_session_id"]}}
+        if meta.get('outcome'):
+            task['metadata']['outcome'] = meta['outcome']
         activity = meta.get('activity', [])
         with self.lock:
             job = self.jobs.get(saved['sessionId'])
+            retained = self.retained.get(saved['sessionId'])
+            task['metadata']['resumable'] = bool(meta.get('resumable') and retained and not retained[0].closed)
         if job:
             with job.lock:
                 activity = list(job.activity)
@@ -601,6 +678,10 @@ class DelegationService:
         with self.lock:
             self.closed = True
             jobs = list(self.jobs.values())
+            retained = list(self.retained.values())
+            self.retained.clear()
+        for chat, _ in retained:
+            chat.close()
         for job in jobs:
             self._cancel_run(job.run)
         for job in jobs:

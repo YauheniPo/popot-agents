@@ -16,6 +16,18 @@ END = '\n\t// Deregister after teardown succeeds'
 
 
 class SubstrateCleanupTests(unittest.TestCase):
+    def test_runsc_patch_checks_actor_scoped_container_ids_after_failed_operations(self):
+        source = ('package main\nimport (\n\t"slices"\n)\n' + '\n'.join(
+            'return fmt.Errorf("while running `runsc ' + operation + '`: %w", err)'
+            for operation in ('state', 'delete')))
+        patched = substrate_cleanup.patch_runsc(source)
+        self.assertEqual(patched.count('popotIgnoreRemovedContainer(containerName,'), 2)
+        self.assertIn('"list", "-quiet"', patched)
+        self.assertIn('ateompath.RunSCStateDir(r.actorUID)', patched)
+        self.assertEqual(substrate_cleanup.patch_runsc(patched), patched)
+        with self.assertRaises(ValueError):
+            substrate_cleanup.patch_runsc('unknown upstream source')
+
     def test_retry_guard_wraps_only_termination_rpc(self):
         source = 'before\n' + CALL + '\n\t}); err != nil {\n\t\treturn nil, err\n\t}\n' + END + '\nafter\n'
         patched = patch_terminate(source)
@@ -101,7 +113,8 @@ class SubstrateCleanupTests(unittest.TestCase):
                 shutil.copyfile(substrate_cleanup.__file__, script)
                 shutil.copytree(Path(substrate_cleanup.__file__).with_name('cleanup_go'),
                                 script.with_name('cleanup_go'))
-                (root / 'ax_local/config.json').write_text(json.dumps({'context': 'kind-test'}))
+                (root / 'ax_local/config.json').write_text(json.dumps({
+                    'context': 'kind-test', 'atespace': 'ate-demo', 'worker_pool_name': 'popot-workers'}))
                 local = root / 'ax_local/.local'
                 (local / 'bin').mkdir(parents=True)
                 (local / 'bin/ko').touch()
@@ -109,8 +122,17 @@ class SubstrateCleanupTests(unittest.TestCase):
                 source = local / 'src/substrate/cmd/atelet/main.go'
                 source.parent.mkdir(parents=True)
                 source.write_text(CALL + '\n\t}); err != nil {\n\t\treturn nil, err\n\t}\n' + END)
+                runsc = local / 'src/substrate/cmd/ateom-gvisor/runsc.go'
+                runsc.parent.mkdir(parents=True)
+                runsc.write_text('package main\nimport (\n\t"slices"\n)\n' + '\n'.join(
+                    'return fmt.Errorf("while running `runsc ' + op + '`: %w", err)'
+                    for op in ('state', 'delete')))
+                shutil.copytree(Path(substrate_cleanup.__file__).with_name('gvisor_cleanup_go'),
+                                script.with_name('gvisor_cleanup_go'))
                 calls = []
                 live = self.fixture()
+                pool = {'metadata': {'name': 'popot-workers', 'resourceVersion': '7'},
+                        'spec': {'sandboxClass': 'gvisor', 'workerImage': 'upstream-image'}}
 
                 def run(command, **kwargs):
                     calls.append(command)
@@ -120,21 +142,27 @@ class SubstrateCleanupTests(unittest.TestCase):
                         output = substrate_cleanup.PIN
                     elif 'daemonsets' in command:
                         output = json.dumps({'items': [live]})
+                    elif 'workerpool' in command and 'get' in command:
+                        output = json.dumps(pool)
                     elif command[0] == 'go':
                         output = 'arm64' if 'env' in command else ''
                     elif command[0].endswith('/ko'):
                         if fail_build:
                             raise subprocess.CalledProcessError(1, command)
-                        output = 'localhost:5001/atelet@sha256:' + 'a' * 64
+                        output = ('localhost:5001/ateom@sha256:' + 'b' * 64 if './cmd/ateom-gvisor' in command
+                                  else 'localhost:5001/atelet@sha256:' + 'a' * 64)
                     elif 'get' in command:
                         fresh = copy.deepcopy(live)
                         fresh['metadata']['resourceVersion'] = '43'
                         output = json.dumps(fresh)
                     elif 'patch' in command:
                         changes = json.loads(command[-1])
-                        container = live['spec']['template']['spec']['containers'][1]
-                        container['image'] = changes[1]['value']
-                        container['securityContext'] = changes[2]['value']
+                        if 'workerpool' in command:
+                            pool['spec']['workerImage'] = changes[1]['value']
+                        else:
+                            container = live['spec']['template']['spec']['containers'][1]
+                            container['image'] = changes[1]['value']
+                            container['securityContext'] = changes[2]['value']
                         output = ''
                     else:
                         output = ''
@@ -153,8 +181,10 @@ class SubstrateCleanupTests(unittest.TestCase):
                     self.assertEqual(writes, [])
                     self.assertFalse(any('rollout' in c for c in calls))
                 else:
-                    self.assertEqual(len(writes), 1)
+                    self.assertEqual(len(writes), 2)
                     self.assertEqual(json.loads(writes[0][-1])[0]['value'], '43')
+                    self.assertEqual(json.loads(writes[1][-1])[0]['value'], '7')
+                    self.assertEqual(json.loads(writes[1][-1])[1]['path'], '/spec/workerImage')
                     self.assertIn('rollout', calls[-1])
                 self.assertFalse(any('delete' in c for c in calls))
                 if not fail_build:

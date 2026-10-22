@@ -33,6 +33,12 @@ def delegation_instructions(role_config: dict, extra_tools: dict) -> str:
         'Child workspaces are separate; a parent-local path is not readable by a child. '
         'Treat a child error, empty answer or truncated result as incomplete. '
         'TASK_STATE_COMPLETED confirms an answer returned, not that an external action succeeded. '
+        'Inspect outcome.status, the answer, errors and evidence. For partial resumable work, '
+        'continue with delegate_task(role=<same role>, session_id=<returned sessionId>, '
+        'task=<remaining work and corrective instructions>). This restores the existing sandbox '
+        'and tool history. Never start a replacement for an unfinished child. '
+        'Do not retry blocked work without resolving its precondition. Each continuation consumes '
+        'the shared delegation budget and remaining parent deadline. '
         'Report published actions only with the child\'s verified result and URLs; '
         'do not invent findings or repeat a publication when its outcome is uncertain. '
         'The user\'s scope and prohibitions take precedence over specialist defaults. '
@@ -76,7 +82,7 @@ def handoff_task(task: str, messages: list[dict], role_config: dict) -> str:
     return content
 
 
-def completed_answer(output: str, role: str) -> str:
+def completed_answer(output: str, role: str, *, session_id: str | None = None) -> str:
     try:
         result = json.loads(output)
     except (TypeError, ValueError):
@@ -86,9 +92,16 @@ def completed_answer(output: str, role: str) -> str:
     session = result.get('sessionId')
     suffix = f' (sessionId={session})' if isinstance(session, str) and re.fullmatch(r'[0-9a-f]{16}', session) else ''
     answer = result.get('answer')
+    outcome = result.get('outcome')
     if (result.get('isError') or result.get('error') or result.get('state') != 'TASK_STATE_COMPLETED'
+            or (session_id is not None and session != session_id)
+            or (outcome is not None and (not isinstance(outcome, dict) or outcome.get('status') != 'completed'
+                                        or outcome.get('errors') or outcome.get('remaining_work')))
             or result.get('role') != role or result.get('truncated')
             or not isinstance(answer, str) or not answer.strip() or not suffix):
+        diagnostic = '; '.join(scrub(result[key])[:500] for key in ('state', 'error')
+                               if isinstance(result.get(key), str) and result[key])
         raise RuntimeError(f'delegation to {role} did not return a complete successful answer{suffix}; '
-                           'inspect the child result before retrying external actions')
+                           + (diagnostic + '; ' if diagnostic else '')
+                           + 'inspect the child result before retrying external actions')
     return f'{role} · sessionId: {session}\n\n{answer.strip()}'

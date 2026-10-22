@@ -52,6 +52,65 @@ class ReviewerRoleTests(unittest.TestCase):
 
 
 class ReviewerRuntimeTests(unittest.TestCase):
+    def test_continuation_keeps_publication_block_even_if_model_retries_create(self):
+        target = {'owner': 'owner', 'repo': 'repo', 'pullNumber': 80}
+        create = self.call('pull_request_review_write', {**target, 'method': 'create', 'commitID': 'a' * 40})
+        report = {'content': json.dumps({'status': 'blocked', 'answer': 'Existing draft blocks publication.',
+            'evidence': [], 'remaining_work': ['resolve existing draft'], 'errors': ['pending review']})}
+        replies = iter([{'tool_calls': [create]}, report, {'tool_calls': [create]}, report])
+        bodies, state = [], {}
+        def respond(call, **kwargs):
+            bodies.append(json.loads(call.data))
+            return io.BytesIO(json.dumps({'choices': [{'message': next(replies)}]}).encode())
+        discovered = {'mcp__github__pull_request_review_write': {
+            'server': 'github', 'native_name': 'pull_request_review_write',
+            'schema': {'type': 'function', 'function': {'name': 'mcp__github__pull_request_review_write',
+                'parameters': {'type': 'object', 'properties': {'method': {}, 'event': {}}}}}}}
+        role = {'_ax_role': 'code_reviewer', 'tools': [], 'max_tool_rounds': 1,
+                'mcpServers': {'github': {}}}
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value=discovered), \
+             patch('popot_agents.worker.http_harness.mcp_client.call_tool',
+                   side_effect=MCPToolError('User can only have one pending review per pull request')) as remote, \
+             redirect_stderr(io.StringIO()):
+            run_http('Review', role, state=state)
+            restored = json.loads(json.dumps(state))
+            answer = run_http('Continue the unfinished task', role, state=restored)
+        remote.assert_called_once()
+        self.assertEqual(restored['outcome']['status'], 'blocked')
+        self.assertIn('https://github.com/owner/repo/pull/80', answer)
+        self.assertEqual(bodies[2]['tool_choice'], 'none')
+        self.assertNotIn('tools', bodies[2])
+
+    def test_checkpoint_continues_owned_draft_without_creating_or_publishing_twice(self):
+        target = {'owner': 'owner', 'repo': 'repo', 'pullNumber': 80}
+        create = self.call('pull_request_review_write', {**target, 'method': 'create', 'commitID': 'a' * 40})
+        submit = self.call('pull_request_review_write', {**target, 'method': 'submit_pending', 'event': 'COMMENT'})
+        def report(status):
+            return {'content': json.dumps({'status': status, 'answer': 'Verified review state',
+                'evidence': ['current tool response'], 'remaining_work': [] if status == 'completed' else ['submit'],
+                'errors': []})}
+        replies = iter([{'tool_calls': [create]}, report('partial'), {'tool_calls': [submit]}, report('completed')])
+        def respond(*args, **kwargs):
+            return io.BytesIO(json.dumps({'choices': [{'message': next(replies)}]}).encode())
+        discovered = {'mcp__github__pull_request_review_write': {
+            'server': 'github', 'native_name': 'pull_request_review_write',
+            'schema': {'type': 'function', 'function': {'name': 'mcp__github__pull_request_review_write',
+                'parameters': {'type': 'object', 'properties': {'method': {}, 'event': {}}}}}}}
+        state = {}
+        role = {'_ax_role': 'code_reviewer', 'tools': [], 'mcpServers': {'github': {}}}
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value=discovered), \
+             patch('popot_agents.worker.http_harness.mcp_client.call_tool', return_value='{"id": 123}') as remote, \
+             redirect_stderr(io.StringIO()):
+            run_http('Review', {**role, 'max_tool_rounds': 1}, state=state)
+            self.assertEqual(state['reviews'], [[['owner', 'repo', 80], 'pending']])
+            run_http('Continue and verify publication', role, state=state)
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual([call.args[2]['method'] for call in remote.call_args_list], ['create', 'submit_pending'])
+
     def run_review(self, calls, *, remote_effect=None, separate_rounds=False, partial=False,
                    final_message=None, final_error=None, read_tools=False):
         requests = []

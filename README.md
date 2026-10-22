@@ -516,6 +516,14 @@ Limits use existing settings: role `max_tool_rounds` (otherwise
 `timeout_seconds` (otherwise the shared turn timeout). Recovery consumes the same budget as ordinary steps; each new
 turn starts a fresh budget. These limits bound attempts, not guarantee completion.
 
+After the configured number of tool rounds, every HTTP role gets one final
+model request with no tool schemas and `tool_choice=none`, within the remaining
+turn deadline. This request summarizes the available evidence as a partial
+result; it cannot execute more tools, repeat writes or mark project-memory
+capture successful. Reaching the round limit no longer discards completed
+work through a tool-call-limit error. The time reserve may trigger this final
+request earlier.
+
 `code_reviewer` has code-review, diagnosing-bugs, codebase-design, TDD and handoff
 skills, with GitHub tools for reading files, commits and PRs and publishing inline
 review comments. The reviewer has no file-edit or merge tools. In AX, engineers

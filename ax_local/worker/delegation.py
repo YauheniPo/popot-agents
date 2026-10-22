@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 from urllib.parse import urlsplit
 
@@ -35,7 +36,9 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
         raise ValueError("invalid AX delegation endpoint")
     schema = {"type": "function", "function": {
         "name": "delegate_task",
-        "description": "Start a separate AX agent with an allowed role and wait for its result. "
+        "description": "Start an AX agent or continue its unfinished task with the same role and session_id. "
+                       "Continuation restores that session's sandbox and tool context. Inspect outcome and evidence. "
+                       "Give corrective instructions for remaining work; do not repeat uncertain external actions. "
                        "Give it the task and all required context explicitly. Its workspace and "
                        "conversation are separate. Select by the role descriptions below. "
                        "For code review, send requirements, the diff and relevant source, test "
@@ -43,12 +46,17 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
                        "Use its result in your final answer. Available specialists:\n" + catalog,
         "parameters": {"type": "object", "properties": {
             "role": {"type": "string", "enum": allowed},
-            "task": {"type": "string", "description": "Task with requirements and relevant input data"}},
+            "task": {"type": "string", "description": "Task or corrective instructions with requirements and relevant input data"},
+            "session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
+                           "description": "Existing unfinished child sessionId; omit only for a new task"}},
             "required": ["role", "task"], "additionalProperties": False}}}
     poll_interval = float(environ.get("AX_DELEGATION_POLL_SECONDS", "0.5"))
 
     def delegate(arguments, *, timeout_seconds: float, call_id: str) -> str:
-        if not isinstance(arguments, dict) or set(arguments) != {"role", "task"} \
+        if not isinstance(arguments, dict) or not {'role', 'task'} <= set(arguments) \
+                or set(arguments) - {'role', 'task', 'session_id'} \
+                or ('session_id' in arguments and (probe is not None or not isinstance(arguments['session_id'], str)
+                    or not re.fullmatch(r'[0-9a-f]{16}', arguments['session_id']))) \
                 or arguments["role"] not in allowed or not isinstance(arguments["task"], str) \
                 or not arguments["task"].strip() \
                 or len(arguments["task"]) > RUNTIME["limits"]["message_chars"]:
@@ -97,15 +105,22 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
                     configuration=types.SendMessageConfiguration(return_immediately=True))
                 if probe is not None:
                     params.message.metadata.update({'harness2': probe})
+                if arguments.get('session_id'):
+                    params.message.task_id = arguments['session_id']
+
+                async def send(context):
+                    params.message.metadata.update({'timeout_seconds': deadline - time.monotonic()})
+                    return await transport.send_message(params, context=context)
+
                 try:
                     try:
-                        response = await invoke(lambda ctx: transport.send_message(params, context=ctx))
+                        response = await invoke(send)
                     except (A2AClientError, asyncio.TimeoutError) as exc:
                         # Only retry transport failures; the message ID deduplicates side effects.
                         if not isinstance(exc, asyncio.TimeoutError) and not isinstance(
                                 exc.__cause__, httpx.RequestError):
                             raise
-                        response = await invoke(lambda ctx: transport.send_message(params, context=ctx))
+                        response = await invoke(send)
                     if not response.HasField("task"):
                         raise ValueError("delegation did not return a task")
                     task = response.task
@@ -121,6 +136,11 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
                         forward_task_progress(task)
                     result = {"sessionId": task_id, "role": arguments["role"],
                               "state": types.TaskState.Name(task.status.state)}
+                    metadata = MessageToDict(task).get('metadata', {})
+                    outcome = metadata.get('outcome')
+                    result['outcome'] = outcome if isinstance(outcome, dict) else {
+                        'status': 'failed', 'reason': 'missing_or_invalid_outcome'}
+                    result['resumable'] = metadata.get('resumable') is True
                     if probe is not None:
                         result['activity'] = MessageToDict(task).get('metadata', {}).get('activity', [])
                     if task.status.state == types.TASK_STATE_COMPLETED:
@@ -128,6 +148,9 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
                                            for part in artifact.parts if part.HasField("text"))
                         limit = RUNTIME["limits"]["tool_output_chars"]
                         result.update(answer=answer[:limit], truncated=len(answer) > limit)
+                        if result['outcome'].get('status') != 'completed':
+                            result.update(isError=True, error='delegated task is incomplete; inspect outcome and '
+                                          'continue with the same role and session_id when resumable')
                         if not answer.strip() or result['truncated']:
                             result.update(isError=True, error='delegated answer is empty or truncated; '
                                           'inspect the child session before repeating external actions')
@@ -152,7 +175,7 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
                     issue = (str(exc)[:300] if type(exc) is ValueError or
                              isinstance(exc, SDKError) and not isinstance(exc, A2AClientError)
                              else "delegation failed or exceeded the turn deadline")
-                    return json.dumps({"sessionId": task_id, "role": arguments["role"],
+                    return json.dumps({"sessionId": task_id or arguments.get('session_id'), "role": arguments["role"],
                                        "isError": True, "error": issue})
 
         return asyncio.run(execute())

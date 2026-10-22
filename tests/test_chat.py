@@ -549,6 +549,27 @@ class ChatApiTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    @patch('popot_agents.worker.session_worker.socketserver.UnixStreamServer')
+    @patch('popot_agents.worker.session_worker.run_http', return_value='partial')
+    def test_session_server_forwards_per_message_budget_without_affecting_next_turn(self, run_http, server_class):
+        from popot_agents.worker.session_worker import serve
+
+        with patch.dict('os.environ', {'HARNESS_SESSION_MODE': 'http', 'HARNESS_ROLE_JSON': '{}'}), \
+                redirect_stderr(io.StringIO()):
+            serve()
+            handler_class = server_class.call_args.args[1]
+            for timeout in (17.5, None):
+                payload = {'action': 'message', 'message': 'review'}
+                if timeout is not None:
+                    payload['timeout_seconds'] = timeout
+                handler = handler_class.__new__(handler_class)
+                handler.rfile = io.BytesIO((json.dumps(payload) + '\n').encode())
+                handler.wfile = io.BytesIO()
+                handler.handle()
+                self.assertEqual(json.loads(handler.wfile.getvalue()), {'answer': 'partial'})
+        self.assertEqual(run_http.call_args_list[0].kwargs.get('timeout_seconds'), 17.5)
+        self.assertIsNone(run_http.call_args_list[1].kwargs.get('timeout_seconds'))
+
     @patch("popot_agents.worker.session_worker.socketserver.UnixStreamServer")
     @patch("popot_agents.worker.session_worker.run_http", return_value="done")
     def test_session_server_emits_turn_events_to_container_stderr(self, run_http, server_class):

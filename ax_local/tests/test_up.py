@@ -235,7 +235,7 @@ class UpScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text().splitlines()
         self.assertIn("worker-health", calls)
-        self.assertIn("up --build --force-recreate -d --wait --wait-timeout 300 mcp-server", calls[-3])
+        self.assertIn("up --build --force-recreate -d --wait --wait-timeout 300 api mcp-server", calls[-3])
         self.assertIn('compose.omniroute.yaml --profile omniroute', calls[-3])
         self.assertEqual(calls[-2:], ['deployment-cleanup', 'resource-monitoring'])
         self.calls.write_text("")

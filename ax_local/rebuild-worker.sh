@@ -32,5 +32,5 @@ if [[ ! "$IMAGE_DIGEST" =~ ^localhost:5001/popot-agent-ax@sha256:[0-9a-f]{64}$ ]
 fi
 printf '%s\n' "$IMAGE_DIGEST" > "$IMAGE_FILE"
 
-bash "$ROOT/ax_local/compose.sh" up --build --force-recreate -d --wait --wait-timeout 300 mcp-server
+bash "$ROOT/ax_local/compose.sh" up --build --force-recreate -d --wait --wait-timeout 300 api mcp-server
 echo "AX worker and local API/MCP rebuilt"

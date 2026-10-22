@@ -12,6 +12,98 @@ PR = 'https://github.com/example/project/pull/70'
 
 
 class DelegationRoutingTests(unittest.TestCase):
+    def test_final_fallback_keeps_child_blocker_and_evidence_after_failed_continuation(self):
+        session = '0123456789abcdef'
+        for resume_fails in (False, True):
+            with self.subTest(resume_fails=resume_fails):
+                blocked = {'sessionId': session, 'role': 'code_reviewer', 'state': 'TASK_STATE_COMPLETED',
+                    'answer': 'Publication blocked by an existing pending review: ' + PR,
+                    'resumable': True, 'isError': True, 'error': 'delegated task is incomplete',
+                    'outcome': {'status': 'blocked', 'reason': 'existing_pending_review',
+                        'evidence': ['Verified head at ' + PR], 'remaining_work': ['resolve existing draft'],
+                        'errors': ['pending review']}}
+                results = [json.dumps(blocked)]
+                def call(identifier, args):
+                    return {'tool_calls': [{'id': identifier, 'function': {
+                        'name': 'delegate_task', 'arguments': json.dumps(args)}}]}
+                replies = [call('start', {'role': 'code_reviewer', 'task': 'Review'})]
+                if resume_fails:
+                    results.append(json.dumps({'sessionId': session, 'role': 'code_reviewer',
+                        'state': 'TASK_STATE_FAILED', 'isError': True, 'resumable': False,
+                        'answer': '', 'error': 'worker request timed out', 'outcome': {'status': 'failed'}}))
+                    replies.append(call('resume', {'role': 'code_reviewer', 'session_id': session,
+                                                   'task': 'Finish verification'}))
+                # Some providers ignore tool_choice=none. No final tool may run.
+                replies.append(call('forbidden-final', {'role': 'code_reviewer', 'task': 'Start over'}))
+                self.delegate.side_effect = results
+                state, bodies = {}, []
+                def respond(request, **kwargs):
+                    bodies.append(json.loads(request.data))
+                    return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
+                with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+                     redirect_stderr(io.StringIO()):
+                    answer = run_http('Review ' + PR, {**self.role, 'max_tool_rounds': len(results)},
+                                      extra_tools=self.tools, state=state)
+                self.assertIn('Publication blocked by an existing pending review', answer)
+                self.assertIn(PR, answer)
+                self.assertIn('Verified head at ' + PR, state['outcome']['evidence'])
+                self.assertIn('resolve existing draft', state['outcome']['remaining_work'])
+                self.assertEqual(len(state['failed_delegations']), 1)
+                self.assertEqual(state['outcome']['status'], 'partial' if resume_fails else 'blocked')
+                self.assertEqual(bodies[-1]['tool_choice'], 'none')
+
+    def test_wrong_session_or_unresolved_work_cannot_satisfy_continuation(self):
+        from popot_agents.worker.delegation_policy import completed_answer
+        result = {'sessionId': '0123456789abcdef', 'role': 'code_reviewer',
+                  'state': 'TASK_STATE_COMPLETED', 'answer': 'Verified',
+                  'outcome': {'status': 'completed', 'errors': [], 'remaining_work': []}}
+        with self.assertRaises(RuntimeError):
+            completed_answer(json.dumps(result), 'code_reviewer', session_id='1111111111111111')
+        result['outcome']['errors'] = ['Unresolved write failure']
+        with self.assertRaises(RuntimeError):
+            completed_answer(json.dumps(result), 'code_reviewer', session_id=result['sessionId'])
+
+    def test_parent_rejects_premature_answer_and_continues_partial_child_by_session(self):
+        session = '0123456789abcdef'
+        self.delegate.side_effect = [json.dumps({
+            'sessionId': session, 'role': 'code_reviewer', 'state': 'TASK_STATE_COMPLETED',
+            'answer': 'Read the diff; tests remain', 'resumable': True,
+            'outcome': {'status': 'partial', 'reason': 'work_budget_exhausted'}}),
+            json.dumps({'sessionId': session, 'role': 'code_reviewer', 'state': 'TASK_STATE_COMPLETED',
+                        'answer': 'Tests verified; review complete', 'outcome': {'status': 'completed'}})]
+        def call(identifier, args):
+            return {'tool_calls': [{'id': identifier, 'type': 'function', 'function': {
+                'name': 'delegate_task', 'arguments': json.dumps(args)}}]}
+        replies = [call('start', {'role': 'code_reviewer', 'task': 'Review'}),
+                   {'content': json.dumps({'status': 'completed', 'answer': 'Everything succeeded',
+                                           'evidence': [], 'remaining_work': [], 'errors': []})},
+                   call('wrong-restart', {'role': 'code_reviewer', 'task': 'Run remaining checks'}),
+                   call('resume', {'role': 'code_reviewer', 'session_id': session,
+                                   'task': 'Run the remaining checks against the existing diff'}),
+                   {'content': json.dumps({'status': 'completed', 'answer': 'Tests and review verified',
+                                           'evidence': ['Child verified tests and review'],
+                                           'remaining_work': [], 'errors': []})}]
+        requests, state = [], {}
+        def reply(request, **kwargs):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply), \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('Review this PR; do not publish ' + PR, self.role,
+                              extra_tools=self.tools, state=state)
+        self.assertEqual(answer, 'Tests and review verified')
+        self.assertEqual(self.delegate.call_count, 2)
+        resumed = self.delegate.call_args.args[0]
+        self.assertEqual(resumed['role'], 'code_reviewer')
+        self.assertEqual(resumed['session_id'], session)
+        self.assertIn('do not publish', resumed['task'])
+        self.assertIn('proposed answer is incomplete', requests[2]['messages'][-1]['content'])
+        self.assertIn('session_id=', requests[3]['messages'][-1]['content'])
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual(state['failed_delegations'], [])
+
     def test_harness2_runs_before_model_selected_delegation(self):
         role = {**self.role, 'harness2': {'enabled': True, 'mode': 'execution'}}
         with patch('popot_agents.worker.harness2.refine_role', return_value=role) as refine:
@@ -209,6 +301,19 @@ class DelegationRoutingTests(unittest.TestCase):
              redirect_stderr(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
                 run_http('Проверь тесты.', self.role, extra_tools=self.tools)
+
+    def test_failed_delegation_preserves_redacted_child_diagnostic(self):
+        from popot_agents.worker.delegation_policy import completed_answer
+
+        output = json.dumps({'role': 'code_reviewer', 'sessionId': '0123456789abcdef',
+                             'isError': True, 'state': 'TASK_STATE_CANCELED',
+                             'error': 'delegation deadline exceeded with fixture-private-token'})
+        with patch.dict(os.environ, {'TEST_TOKEN': 'fixture-private-token'}):
+            with self.assertRaises(RuntimeError) as caught:
+                completed_answer(output, 'code_reviewer')
+        self.assertIn('TASK_STATE_CANCELED', str(caught.exception))
+        self.assertIn('delegation deadline exceeded', str(caught.exception))
+        self.assertNotIn('fixture-private-token', str(caught.exception))
 
     def test_success_of_another_subtask_cannot_clear_failure_for_the_same_role(self):
         replies = [
