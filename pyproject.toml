@@ -3,7 +3,7 @@ name = "popot-agents"
 version = "0.1.0"
 requires-python = ">=3.10"
 [dependency-groups]
-build = ["pip==25.3"]
+build = ["pip==26.2"]
 mcp = ["mcp==2.3.0"]
 worker = [
     {include-group = "mcp"},
