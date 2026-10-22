@@ -8,6 +8,8 @@
     "model_request_seconds": 120,
     "mcp_discovery_seconds": 60,
     "mcp_tool_seconds": 120,
+    "mcp_http_seconds": 30,
+    "mcp_sse_read_seconds": 300,
     "mcp_upstream_seconds": 7200,
     "tool_command_seconds": 180,
     "git_clone_seconds": 180,
@@ -28,6 +30,10 @@
     "max_turn_seconds": 1800,
     "min_turn_seconds": 0.1,
     "turn_response_margin_seconds": 15
+  },
+  "mcp": {
+    "discovery_attempts": 3,
+    "discovery_backoff_seconds": 1
   },
   "limits": {
     "request_bytes": 262144,

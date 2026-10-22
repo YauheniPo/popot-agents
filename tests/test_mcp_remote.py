@@ -69,6 +69,7 @@ class RemoteMCPTests(unittest.TestCase):
         async def http_client(**kwargs):
             self.assertEqual(kwargs['headers'], {'Authorization': 'Bearer test-secret'})
             self.assertFalse(kwargs['follow_redirects'])
+            self.assertEqual(kwargs['timeout'], (11.5, 45.25))
             events.append('http-open')
             yield 'http'
             events.append('http-close')
@@ -96,11 +97,15 @@ class RemoteMCPTests(unittest.TestCase):
                     SimpleNamespace(type='text', text='Downloaded file SHA: abc'),
                     SimpleNamespace(type='resource', resource=SimpleNamespace(
                         uri='repo://owner/repo/README.md', text='# README contents'))], is_error=False)
-        modules = {'httpx2': SimpleNamespace(AsyncClient=http_client),
+        modules = {'httpx2': SimpleNamespace(AsyncClient=http_client,
+                                           Timeout=lambda value, *, read: (value, read),
+                                           NetworkError=ConnectionError, TimeoutException=TimeoutError,
+                                           RemoteProtocolError=ConnectionError),
                    'mcp': SimpleNamespace(Client=Session),
                    'mcp.client': SimpleNamespace(),
                    'mcp.client.streamable_http': SimpleNamespace(streamable_http_client=transport)}
-        with patch.dict(sys.modules, modules):
+        with patch.dict(sys.modules, modules), patch.dict(mcp_client.RUNTIME['timeouts'], {
+                'mcp_http_seconds': 11.5, 'mcp_sse_read_seconds': 45.25}):
             discovered = mcp_client.discover_tools({'github': REMOTE})
             self.assertEqual(set(discovered), {'mcp__github__get_file_contents'})
             output = mcp_client.call_tool(REMOTE, 'get_file_contents', {'repo': 'example'})
@@ -162,6 +167,15 @@ class RemoteMCPTests(unittest.TestCase):
                 self.assertIn('[REDACTED]', str(raised.exception))
                 self.assertNotIn('test-secret', str(raised.exception))
                 self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_missing_transport_dependency_preserves_original_discovery_error(self):
+        async def fail(*args):
+            raise ValueError('required MCP environment variable is missing')
+
+        with patch.dict(sys.modules, {'httpx2': None}), \
+                patch.object(mcp_client, '_discover_one', side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError, 'required MCP environment variable is missing'):
+                mcp_client.discover_tools({'github': REMOTE})
 
     def test_remote_call_honors_remaining_deadline(self):
         closed = []

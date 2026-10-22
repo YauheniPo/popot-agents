@@ -50,7 +50,10 @@ async def _streams(config: dict):
         from mcp.client.streamable_http import streamable_http_client
 
         async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"},
-                                     follow_redirects=False) as client:
+                                     follow_redirects=False,
+                                     # Outer discovery/tool deadlines still apply.
+                                     timeout=httpx.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
+                                         read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client:
             async with streamable_http_client(config["url"], http_client=client) as (read, write):
                 yield read, write
     else:
@@ -109,6 +112,40 @@ async def _discover_one(alias: str, config: dict) -> dict:
     return result
 
 
+def _retryable_discovery_error(exc: Exception) -> bool:
+    try:
+        import httpx2 as httpx
+    except ImportError:
+        return False  # Preserve the original configuration/dependency failure.
+
+    children = getattr(exc, 'exceptions', ())
+    if children:
+        return all(_retryable_discovery_error(child) for child in children)
+    return isinstance(exc, (httpx.NetworkError, httpx.TimeoutException,
+                            httpx.RemoteProtocolError))
+
+
+async def _discover_with_retry(alias: str, config: dict) -> dict:
+    policy = RUNTIME['mcp']
+    for attempt in range(1, policy['discovery_attempts'] + 1):
+        trace_event('mcp_discovery_started', server=alias, attempt=attempt)
+        try:
+            result = await _discover_one(alias, config)
+        except Exception as exc:
+            if 'url' not in config or attempt == policy['discovery_attempts'] or not _retryable_discovery_error(exc):
+                raise
+            delay = policy['discovery_backoff_seconds'] * attempt
+            trace_event('mcp_discovery_retry', server=alias, attempt=attempt,
+                        delay_seconds=delay, error=_error_text(config, exc))
+            # Only handshake/list_tools are replayed. Sleep and connection
+            # cleanup share the caller's existing discovery deadline.
+            await asyncio.sleep(delay)
+        else:
+            trace_event('mcp_discovery_completed', server=alias, attempt=attempt,
+                        tool_count=len(result))
+            return result
+
+
 def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> dict:
     discovered = {}
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
@@ -121,10 +158,12 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> di
                     raise TimeoutError
                 timeout = min(timeout, remaining)
             discovered.update(asyncio.run(asyncio.wait_for(
-                _discover_one(alias, config), timeout)))
+                _discover_with_retry(alias, config), timeout)))
         except (TimeoutError, asyncio.TimeoutError) as exc:
+            trace_event('mcp_discovery_failed', server=alias, reason='deadline_exceeded')
             raise RuntimeError(f"MCP server {alias} timed out during discovery") from exc
         except Exception as exc:
+            trace_event('mcp_discovery_failed', server=alias, error=_error_text(config, exc))
             raise RuntimeError(f"MCP server {alias} failed during discovery: {_error_text(config, exc)}") from None
     return discovered
 

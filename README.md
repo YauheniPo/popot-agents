@@ -416,6 +416,26 @@ through stdio. Only the listed server tools are exposed to the model: `fetch`,
 worker image if the new server package is not installed. MCP commands are
 operator configuration; API requests cannot supply them.
 
+Remote MCP connection settings live in `config/runtime.json`:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `timeouts.mcp_http_seconds` | 30 | Connect/write/connection-pool timeout |
+| `timeouts.mcp_sse_read_seconds` | 300 | Stream-read idle timeout |
+| `timeouts.mcp_discovery_seconds` | 60 | Whole discovery budget per server, including retries |
+| `mcp.discovery_attempts` | 3 | Total discovery attempts; 1 disables retries |
+| `mcp.discovery_backoff_seconds` | 1 | Base delay multiplied by the failed attempt number (1s, then 2s by default) |
+
+Durations must be positive finite numbers; attempts must be a positive integer.
+Rebuild with `bash ax_local/rebuild-worker.sh` to apply changes to new AX workers.
+Discovery is also bounded by the remaining turn budget. Progress includes
+`mcp_discovery_started`, `mcp_discovery_retry`,
+`mcp_discovery_completed`, and `mcp_discovery_failed`, identifying the server.
+HTTP defaults match the SDK; the outer discovery/tool deadlines still limit the
+whole operation, regardless of the configured HTTP idle timeouts.
+Authentication/configuration errors and tool calls are not automatically
+replayed. After an uncertain write, inspect the external result before retrying.
+
 MCP package versions are defined once in the root `pyproject.toml`:
 the `mcp` dependency group supplies the SDK for the gateway, worker client and
 Cognee adapter. The gateway and AX worker images install this group. The worker client
