@@ -78,9 +78,12 @@ class RuntimeConfigTests(unittest.TestCase):
              patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
              patch('popot_agents.worker.http_harness.execute_tool', return_value='ok') as tool:
-            self.assertEqual(run_http('task', {'tools':['utc_time']}), 'done')
+            answer = run_http('task', {'tools':['utc_time']})
+        self.assertIn('Partial result', answer)
+        self.assertTrue(answer.endswith('done'))
         tool.assert_called_once()
-        self.assertIn('tools', requests[-1])
+        self.assertNotIn('tools', requests[-1])
+        self.assertEqual(requests[-1]['tool_choice'], 'none')
 
     def test_memory_budget_validation_rejects_impossible_capture_and_nonfinite_timeouts(self):
         from popot_agents.runtime_config import load_runtime_config

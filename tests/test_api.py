@@ -276,9 +276,12 @@ class HttpHarnessTests(unittest.TestCase):
                       side_effect=lambda: clock[0]), \
                 patch("popot_agents.worker.http_harness.execute_tool", side_effect=execute), \
                 redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(RuntimeError, "turn deadline exceeded"):
-                run_http("calculate", {"tools": ["calculate"], "max_tool_rounds": 3})
+            answer = run_http("calculate", {"tools": ["calculate"], "max_tool_rounds": 3})
+        self.assertIn('Partial result', answer)
         self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(len(tool_timeouts), 1)
+        final = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(final['tool_choice'], 'none')
         self.assertTrue(all(0 < value <= 0.4 for value in tool_timeouts))
 
     @patch("popot_agents.worker.http_harness.request.urlopen")

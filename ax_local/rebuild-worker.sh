@@ -33,4 +33,5 @@ fi
 printf '%s\n' "$IMAGE_DIGEST" > "$IMAGE_FILE"
 
 bash "$ROOT/ax_local/compose.sh" up --build --force-recreate -d --wait --wait-timeout 300 api mcp-server
+python3 "$ROOT/ax_local/cluster/resource_monitoring.py" ensure-forward
 echo "AX worker and local API/MCP rebuilt"

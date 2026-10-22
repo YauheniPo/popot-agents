@@ -23,6 +23,8 @@ class ToolStep(BaseModel):
     name: str = Field(min_length=1, max_length=200, pattern=r'^[a-zA-Z0-9_.:-]+$')
     status: Literal['success', 'error']
     output_chars: int = Field(default=0, ge=0, le=100000000)
+    recall_outcome: Literal['useful', 'empty', 'warming_up'] | None = None
+    chunks: int | None = Field(default=None, ge=0, le=20)
 
 
 class SessionEvent(BaseModel):
@@ -52,10 +54,19 @@ async def session_event(payload: SessionEvent, user: User = Depends(get_authenti
     await ensure_and_touch_session(session_id=payload.session_id, user_id=user.id,
                                    dataset_id=dataset_id)
     sm = get_session_manager(dataset_id=dataset_id)
-    for tool in payload.tools:
+    if payload.tools:
+        # Each SDK trace append rewrites session state and updates lifecycle
+        # metrics. The pinned SDK sanitizes each container to 20 items, so use
+        # ordered batches (at most 10 x 20) inside one trace to retain all 200.
+        steps = [
+            {'name': tool.name, 'status': tool.status, 'output_chars': tool.output_chars,
+             **({'recall_outcome': tool.recall_outcome, 'chunks': tool.chunks}
+                if tool.recall_outcome is not None else {})} for tool in payload.tools]
         await sm.add_agent_trace_step(user_id=str(user.id), session_id=payload.session_id,
-            origin_function=tool.name, status=tool.status, generate_feedback_with_llm=False,
-            method_return_value={'output_chars': tool.output_chars})
+            origin_function='popot.tools',
+            status='error' if any(tool.status == 'error' for tool in payload.tools) else 'success',
+            generate_feedback_with_llm=False,
+            method_return_value={'tool_batches': [steps[i:i + 20] for i in range(0, len(steps), 20)]})
     if payload.status != 'running':
         await accumulate_usage(session_id=payload.session_id, user_id=user.id,
             tokens_in=payload.tokens_in, tokens_out=payload.tokens_out,

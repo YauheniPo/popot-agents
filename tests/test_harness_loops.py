@@ -19,6 +19,39 @@ def tool_call(identifier, name, arguments):
 
 
 class HttpRecoveryLoopTests(unittest.TestCase):
+    def test_final_report_reads_tool_history_as_evidence_without_continuing_the_tool_loop(self):
+        requests, state = [], {}
+        report = {'status': 'completed', 'answer': 'Verified calculation; publication remains.',
+                  'evidence': ['calculation returned 4'], 'remaining_work': ['publish'], 'errors': []}
+        def respond(call, **kwargs):
+            body = json.loads(call.data)
+            requests.append(body)
+            if len(requests) == 1:
+                message = {'tool_calls': [tool_call('proof', 'calculate', {'expression': '2+2'})]}
+            elif any(item['role'] == 'tool' for item in body['messages']):
+                # Reproduce the provider returning its report through bash echo.
+                message = {'tool_calls': [tool_call('echo-report', 'bash', {'command': 'echo report'})]}
+            else:
+                message = {'content': json.dumps(report)}
+            return io.BytesIO(json.dumps({'choices': [{'message': message}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='4') as execute, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('Calculate and publish', {'tools': ['calculate', 'bash'], 'max_tool_rounds': 1},
+                              state=state)
+        self.assertIn('Verified calculation', answer)
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertEqual(state['outcome']['evidence'], ['calculation returned 4'])
+        self.assertEqual(len(requests), 2)
+        execute.assert_called_once()
+        transcript = json.loads(requests[-1]['messages'][-1]['content'])
+        proof = {'role': 'tool', 'tool_call_id': 'proof', 'content': '4'}
+        self.assertIn(proof, transcript)
+        self.assertIn(proof, state['messages'])
+        self.assertNotIn('tools', requests[-1])
+        self.assertEqual(requests[-1]['tool_choice'], 'none')
+
     def test_structured_status_is_language_independent_and_unfinished_work_cannot_be_complete(self):
         for text in ('Completed', 'Готово', '完了'):
             with self.subTest(text=text):
@@ -84,7 +117,8 @@ class HttpRecoveryLoopTests(unittest.TestCase):
                 self.assertEqual(len(requests), 3)
                 self.assertNotIn('tools', requests[-1])
                 self.assertEqual(requests[-1]['tool_choice'], 'none')
-                self.assertEqual(requests[-1]['messages'][-2]['content'], '2')
+                transcript = json.loads(requests[-1]['messages'][-1]['content'])
+                self.assertEqual(transcript[-1]['content'], '2')
 
     def test_final_round_does_not_execute_requested_writes_or_capture_complete_memory(self):
         requests = []

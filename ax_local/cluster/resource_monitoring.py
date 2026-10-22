@@ -1,6 +1,7 @@
 """Extend the existing local Prometheus with pod and sandbox resource metrics.
 
 Usage: python3 ax_local/cluster/resource_monitoring.py install
+       python3 ax_local/cluster/resource_monitoring.py ensure-forward
        python3 ax_local/cluster/resource_monitoring.py forward
 The forward command supervises a loopback-only Grafana port-forward; it exits
 when another copy already holds the lock. No host PID namespace is required.
@@ -10,11 +11,13 @@ import argparse
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
+from urllib import request
 
 if __package__:
     from .resource_dashboard import dashboard
@@ -29,6 +32,8 @@ from ax_local.cluster.build_versions import BUILD_VERSIONS
 
 LOCAL = ROOT / 'ax_local/.local'
 NS = 'otel-system'
+FORWARD_ARGS = ['-n', NS, 'port-forward', '--address=127.0.0.1',
+                'service/grafana', '3002:3000']
 BEGIN, END = '  # popot-resources begin', '  # popot-resources end'
 
 
@@ -263,11 +268,57 @@ def install():
         print(cluster.run('-n', NS, 'rollout', 'status', f'deployment/{name}', '--timeout=600s').strip())
     cluster.run('-n', NS, 'exec', 'deployment/prometheus', '--', 'promtool', 'check', 'config',
                 '/etc/prometheus/prometheus.yml')
-    LOCAL.mkdir(parents=True, exist_ok=True)
-    with (LOCAL / 'resource-monitoring-forward.log').open('ab') as log:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'forward'],
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    ensure_forward()
     print('Resource dashboard: http://127.0.0.1:3002/d/popot-resources')
+
+
+def grafana_healthy():
+    try:
+        client = request.build_opener(request.ProxyHandler({}))
+        with client.open('http://127.0.0.1:3002/api/health', timeout=3) as response:
+            health = json.loads(response.read(8192))
+            return response.status == 200 and isinstance(health, dict) and health.get('database') == 'ok'
+    except (OSError, ValueError):
+        return False
+
+
+def ensure_forward():
+    if grafana_healthy():
+        return
+    LOCAL.mkdir(parents=True, exist_ok=True)
+    # Serialize recovery without competing for the long-lived supervisor's lock.
+    with (LOCAL / 'resource-monitoring-recovery.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if grafana_healthy():
+            return
+        cluster = Cluster()
+        if not cluster.run('-n', NS, 'get', 'service', 'grafana', '--ignore-not-found', '-o', 'name').strip():
+            print('Grafana is not installed; run resource_monitoring.py install')
+            return
+        expected = ' '.join(cluster.command + FORWARD_ARGS)
+        processes = subprocess.run(['ps', '-axo', 'pid=,command='], check=True,
+                                   capture_output=True, text=True, timeout=5).stdout
+        for line in processes.splitlines():
+            pid, command = line.strip().split(maxsplit=1)
+            # Match the exact project kubeconfig, context, service and port.
+            # Never kill an unrelated listener on 3002 or the supervisor.
+            if command == expected:
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        print('Recovering Grafana connection on 127.0.0.1:3002', flush=True)
+        with (LOCAL / 'resource-monitoring-forward.log').open('ab') as log:
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'forward'],
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if grafana_healthy():
+                print('Grafana connection restored', flush=True)
+                return
+            time.sleep(1)
+        raise RuntimeError('Grafana on 127.0.0.1:3002 did not recover; see '
+                           + str(LOCAL / 'resource-monitoring-forward.log'))
 
 
 def forward():
@@ -282,8 +333,7 @@ def forward():
             raise SystemExit(0)
         signal.signal(signal.SIGTERM, stop_forward)
         while True:
-            command = cluster.command + ['-n', NS, 'port-forward', '--address=127.0.0.1',
-                                         'service/grafana', '3002:3000']
+            command = cluster.command + FORWARD_ARGS
             child = subprocess.Popen(command)
             try:
                 child.wait()
@@ -300,10 +350,10 @@ def forward():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['install', 'forward'])
+    parser.add_argument('command', choices=['install', 'forward', 'ensure-forward'])
     command = parser.parse_args().command
     try:
-        install() if command == 'install' else forward()
-    except subprocess.CalledProcessError as error:
-        print(error.stderr or str(error), file=sys.stderr)
+        {'install': install, 'forward': forward, 'ensure-forward': ensure_forward}[command]()
+    except (subprocess.CalledProcessError, RuntimeError) as error:
+        print(getattr(error, 'stderr', None) or str(error), file=sys.stderr)
         raise SystemExit(1)

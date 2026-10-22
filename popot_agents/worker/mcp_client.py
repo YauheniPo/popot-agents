@@ -9,11 +9,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.tools import MAX_TOOL_OUTPUT, safe_tool_env
+from popot_agents.progress import trace_event
+from popot_agents.tools import MAX_TOOL_OUTPUT, preserve_tool_output, safe_tool_env
 
 
 class MCPToolError(RuntimeError):
     """The server returned isError: the model may correct its tool arguments."""
+
+
+class MCPTransportError(MCPToolError):
+    """No confirmed response; external effects must be checked before retrying."""
 
 
 def _bearer_token(config):
@@ -127,8 +132,17 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> di
 async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
     from mcp import Client
 
-    async with Client(_streams(config)) as client:
-        result = await client.call_tool(native_name, arguments=arguments)
+    result = None
+    try:
+        async with Client(_streams(config)) as client:
+            result = await client.call_tool(native_name, arguments=arguments)
+    except Exception as exc:
+        if result is None:
+            raise
+        # A completed RPC must not become an unknown write when closing its
+        # transport fails. Preserve the received result, including is_error.
+        trace_event('mcp_cleanup_failed', tool=native_name,
+                    error=_error_text(config, exc), result_received=True)
     parts = []
     for item in result.content:
         kind = getattr(item, "type", None)
@@ -144,7 +158,7 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
         result.structured_content or {}, ensure_ascii=False)
     if result.is_error:
         raise MCPToolError(output)
-    return output[:MAX_TOOL_OUTPUT] + ("\n[output truncated]" if len(output) > MAX_TOOL_OUTPUT else "")
+    return preserve_tool_output(output)
 
 
 def call_tool(config: dict, native_name: str, arguments: dict,
@@ -159,6 +173,6 @@ def call_tool(config: dict, native_name: str, arguments: dict,
         # Redact before truncation so a token cut in the middle cannot leak.
         raise MCPToolError(_error_text(config, exc)[:MAX_TOOL_OUTPUT]) from None
     except (TimeoutError, asyncio.TimeoutError) as exc:
-        raise RuntimeError("MCP tool call timed out") from exc
+        raise MCPTransportError("MCP tool call timed out; outcome is unknown") from None
     except Exception as exc:
-        raise RuntimeError(f"MCP tool {native_name} failed: {_error_text(config, exc)}") from None
+        raise MCPTransportError(f"MCP tool {native_name} failed: {_error_text(config, exc)}") from None

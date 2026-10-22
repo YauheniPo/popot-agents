@@ -48,7 +48,11 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
             "role": {"type": "string", "enum": allowed},
             "task": {"type": "string", "description": "Task or corrective instructions with requirements and relevant input data"},
             "session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
-                           "description": "Existing unfinished child sessionId; omit only for a new task"}},
+                           "description": "Existing unfinished child sessionId; omit only for a new task"},
+            "replaces_session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
+                "description": "Failed non-resumable child being replaced for the same subtask. "
+                               "Runtime carries its prior result and resolves that failure on success. "
+                               "Never combine with session_id; resumable children must be continued."}},
             "required": ["role", "task"], "additionalProperties": False}}}
     poll_interval = float(environ.get("AX_DELEGATION_POLL_SECONDS", "0.5"))
 
@@ -149,8 +153,9 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
                         limit = RUNTIME["limits"]["tool_output_chars"]
                         result.update(answer=answer[:limit], truncated=len(answer) > limit)
                         if result['outcome'].get('status') != 'completed':
-                            result.update(isError=True, error='delegated task is incomplete; inspect outcome and '
-                                          'continue with the same role and session_id when resumable')
+                            result.update(isError=True, error='delegated task is incomplete; inspect evidence and '
+                                          'remaining work. Resume the same session only for required work '
+                                          'when enough time remains; otherwise report partial.')
                         if not answer.strip() or result['truncated']:
                             result.update(isError=True, error='delegated answer is empty or truncated; '
                                           'inspect the child session before repeating external actions')

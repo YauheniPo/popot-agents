@@ -4,12 +4,76 @@ import json
 from pathlib import Path
 import tempfile
 from unittest.mock import MagicMock, patch
+from ax_local.cluster import resource_monitoring as monitoring
 
 from ax_local.cluster.resource_monitoring import extend_prometheus_config, local_context, migrate_prometheus_storage
 from ax_local.cluster.resource_dashboard import dashboard
 
 
 class ResourceMonitoringTests(unittest.TestCase):
+    def test_forward_check_preserves_a_healthy_tunnel(self):
+        with patch.object(monitoring, 'grafana_healthy', return_value=True), \
+             patch.object(monitoring.subprocess, 'Popen') as start, \
+             patch.object(monitoring.subprocess, 'run') as processes:
+            monitoring.ensure_forward()
+        start.assert_not_called()
+        processes.assert_not_called()
+
+    def test_forward_check_restarts_only_this_projects_stuck_tunnel(self):
+        cluster = MagicMock(command=['kubectl', '--kubeconfig=/project/kubeconfig',
+                                      '--context=kind-test', '--request-timeout=30s'])
+        command = ' '.join(cluster.command + ['-n', 'otel-system', 'port-forward',
+                                              '--address=127.0.0.1', 'service/grafana', '3002:3000'])
+        listing = f'123 {command}\n456 kubectl --context=other port-forward service/grafana 3002:3000\n'
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(monitoring, 'LOCAL', Path(directory)), \
+             patch.object(monitoring, 'Cluster', return_value=cluster), \
+             patch.object(monitoring, 'grafana_healthy', side_effect=[False, False, True]), \
+             patch.object(monitoring.subprocess, 'run', return_value=MagicMock(stdout=listing)), \
+             patch.object(monitoring.subprocess, 'Popen') as start, \
+             patch('os.kill') as kill, patch.object(monitoring.time, 'sleep'):
+            monitoring.ensure_forward()
+        kill.assert_called_once_with(123, monitoring.signal.SIGTERM)
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0][-1], 'forward')
+        self.assertTrue(start.call_args.kwargs['start_new_session'])
+
+    def test_forward_check_reports_failed_recovery(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(monitoring, 'LOCAL', Path(directory)), \
+             patch.object(monitoring, 'Cluster', return_value=MagicMock(command=['kubectl'])), \
+             patch.object(monitoring, 'grafana_healthy', return_value=False), \
+             patch.object(monitoring.subprocess, 'run', return_value=MagicMock(stdout='')), \
+             patch.object(monitoring.subprocess, 'Popen'), \
+             patch.object(monitoring.time, 'monotonic', side_effect=[0, 31]):
+            with self.assertRaisesRegex(RuntimeError, 'Grafana.*3002'):
+                monitoring.ensure_forward()
+
+    def test_forward_check_skips_monitoring_that_is_not_installed(self):
+        cluster = MagicMock()
+        cluster.run.return_value = ''
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(monitoring, 'LOCAL', Path(directory)), \
+             patch.object(monitoring, 'Cluster', return_value=cluster), \
+             patch.object(monitoring, 'grafana_healthy', return_value=False), \
+             patch.object(monitoring.subprocess, 'Popen') as start:
+            monitoring.ensure_forward()
+        start.assert_not_called()
+
+    def test_health_probe_rejects_timeout_invalid_response_and_unhealthy_database(self):
+        for value in (TimeoutError(), b'not json', b'[]', b'{"database":"failing"}'):
+            with self.subTest(value=value):
+                client = MagicMock()
+                if isinstance(value, Exception):
+                    client.open.side_effect = value
+                else:
+                    response = client.open.return_value.__enter__.return_value
+                    response.status = 200
+                    response.read.return_value = value
+                with patch.object(monitoring.request, 'build_opener', return_value=client):
+                    self.assertFalse(monitoring.grafana_healthy())
+                self.assertEqual(client.open.call_args.kwargs['timeout'], 3)
+
     def test_resources_are_loaded_from_service_sections_in_monitoring_config(self):
         from ax_local.resource_config import load_monitoring
         resources={'requests':{'cpu':'100m','memory':'128Mi'},'limits':{'cpu':'1','memory':'512Mi'}}

@@ -18,7 +18,7 @@
     "memory_recall_seconds": 20,
     "memory_session_start_seconds": 3,
     "memory_session_finish_seconds": 5,
-    "memory_summary_seconds": 30,
+    "memory_summary_seconds": 120,
     "memory_capture_min_seconds": 8,
     "memory_capture_margin_seconds": 5,
     "memory_recall_min_seconds": 1,
@@ -32,8 +32,8 @@
   "limits": {
     "request_bytes": 262144,
     "message_chars": 30000,
-    "history_bytes": 500000,
-    "socket_message_bytes": 1048576,
+    "history_bytes": 2000000,
+    "socket_message_bytes": 16777216,
     "tool_output_chars": 24000,
     "write_file_bytes": 500000,
     "download_bytes": 20000000,
@@ -44,7 +44,7 @@
   },
   "model": {
     "default_max_tool_rounds": 40,
-    "request_retries": 1,
+    "request_retries": 0,
     "temperature": null,
     "max_tokens": null,
     "final_answer_reserve_seconds": 120,

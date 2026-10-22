@@ -35,7 +35,8 @@ class AxAgentRunner:
     def __init__(self, image: str, model: str, base_url: str,
                  context: str = AX_CONFIG["context"],
                  proxy_token: str | None = None, model_parameters: dict | None = None,
-                 worker_queue: WorkerQueue | None = None) -> None:
+                 worker_queue: WorkerQueue | None = None,
+                 upstream_host: str | None = None) -> None:
         if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image):
             raise ValueError("AX worker image must be pinned by sha256 digest")
         if not context.startswith("kind-") or not re.fullmatch(r"[a-z0-9-]+", context):
@@ -45,6 +46,7 @@ class AxAgentRunner:
         self.image = image
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.upstream_host = upstream_host
         self.context = context
         self.snapshot_mode = AX_CONFIG['snapshot_mode']
         self.proxy_token = proxy_token
@@ -105,6 +107,8 @@ class AxAgentRunner:
                 "timeout_seconds", RUNTIME["timeouts"]["turn_seconds"])
                 - RUNTIME["timeouts"]["turn_response_margin_seconds"])),
         }
+        if self.upstream_host:
+            env['HARNESS_UPSTREAM_HOST'] = self.upstream_host
         if self.model_parameters:
             env['HARNESS_MODEL_PARAMETERS_JSON'] = json.dumps(self.model_parameters)
         if role_config.get('harness2', {}).get('enabled'):

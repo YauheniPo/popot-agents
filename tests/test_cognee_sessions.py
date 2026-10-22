@@ -10,6 +10,23 @@ from popot_agents.worker.cognee_memory import CogneeMemory
 
 @unittest.skipUnless(os.getenv('COGNEE_SESSION_TEST_URL'), 'local Cognee integration opt-in')
 class SessionContractTests(unittest.TestCase):
+    def test_large_tool_journal_preserves_all_entries(self):
+        client = CogneeMemory(os.environ['COGNEE_SESSION_TEST_URL'],
+                              os.environ['DEFAULT_USER_PASSWORD'], timeout=5)
+        event = {'session_id': 'popot-journal-' + uuid.uuid4().hex,
+                 'dataset_name': 'popot-diagnostics', 'role': 'integration_test', 'status': 'running'}
+        tools = [{'name': 'cognee.recall', 'status': 'success', 'output_chars': 37,
+                  'recall_outcome': 'useful', 'chunks': 1}] + [
+            {'name': 'bash', 'status': 'success', 'output_chars': i} for i in range(199)]
+        client.session_event(event)
+        client.session_event({**event, 'status': 'completed', 'tools': tools})
+        detail = client._request('/api/v1/sessions/' + event['session_id'])
+        trace = next(t for t in detail['traces'] if t['origin_function'] == 'popot.tools')
+        recorded = [step for batch in trace['method_return_value']['tool_batches'] for step in batch]
+        self.assertEqual(recorded, tools)
+        self.assertEqual(detail['status'], 'completed')
+        self.assertIsNotNone(detail['ended_at'])
+
     def test_auth_validation_terminal_state_and_trace_privacy(self):
         origin = os.environ['COGNEE_SESSION_TEST_URL']
         client = CogneeMemory(origin, os.environ['DEFAULT_USER_PASSWORD'])

@@ -106,8 +106,10 @@ Harness² запускается внутри выбранного HTTP-ворк
 Постоянного общего агента-оптимизатора нет. Закреплённая библиотека устанавливается
 в образ из группы `harness2` в `pyproject.toml`.
 
-Сейчас режим `execution` включён у `analyst`, `backend_engineer`,
-`frontend_engineer`, `qa_engineer` и `code_reviewer`. У `chat`, `planner`,
+Сейчас режим `execution` включён у `analyst`, `frontend_engineer` и `qa_engineer`.
+`backend_engineer` и `code_reviewer` начинают основную работу сразу: дополнительные
+пробные запуски отключены по умолчанию, их можно включить в конфигурации роли.
+У `chat`, `planner`,
 `tech_lead`, `project_operator` и `cron_demo` дополнительных прогонов нет: координацию с побочными
 действиями и обычный разговор повторять ради подбора инструкций не нужно.
 
@@ -255,7 +257,7 @@ DATA уменьшает объём сохраняемого состояния, 
 автоматически вызывает `resume`, ждёт готовности worker, выполняет следующий
 ход и снова приостанавливает задачу.
 
-AX Task хранится **7200 секунд (2 часа)** после последнего завершённого хода.
+AX Task хранится **86400 секунд (24 часа)** после последнего завершённого хода.
 Настройка находится в `suspend_retention_seconds` в `ax_local/config.json` и имеет
 приоритет над `ttl_seconds` роли. После этого API удаляет Task, сохраняя историю
 сессии. История новых AX-сессий не истекает автоматически; явное удаление чата
@@ -373,8 +375,10 @@ Cognee используют SDK 2.x. Fetch/Git требуют SDK 1.x и зап�
 
 Параметры модели берутся из `model_parameters` выбранного провайдера в
 `config/agents.json` и передаются через `HARNESS_MODEL_PARAMETERS_JSON` всем
-его worker, включая дочерние A2A-задачи. Рабочие роли используют `omniroute`
-или `omniroute_code`: thinking отключён, выход ограничен 8192 токенами.
+его worker, включая дочерние A2A-задачи. Для профилей `omniroute`
+и `omniroute_code` thinking отключён, выход ограничен 8192 токенами.
+`backend_engineer` и `code_reviewer` используют `ollama_cloud` с
+`OLLAMA_CLOUD_MODEL=deepseek-v4.1-flash:1017`; reasoning остаётся по умолчанию провайдера.
 Для OpenRouter передаётся `reasoning.enabled=false`, для NVIDIA — нативный
 `chat_template_kwargs.enable_thinking=false`. Оба параметра проверены через
 шлюз 2026-10-20. Это предотвращает расход всего выходного бюджета только на
@@ -504,7 +508,8 @@ Compose API/MCP. Уже запущенные контейнеры Compose при
 Роль выбирает профиль через `agent` в `config/roles/`. Профиль из
 `config/agents.json` задаёт endpoint, имя переменной модели (`model_env`) и
 параметры модели. Значение модели берётся из `.env`: например,
-`backend_engineer → omniroute_code → OMNIROUTE_CODE_MODEL`,
+`backend_engineer / code_reviewer → ollama_cloud → OLLAMA_CLOUD_MODEL`,
+`frontend_engineer → omniroute_code → OMNIROUTE_CODE_MODEL`,
 `analyst → omniroute → OMNIROUTE_MODEL`,
 `chat → openrouter → OPENROUTER_MODEL`. Общего провайдера или модели AX нет.
 Дочерние A2A-задачи и cron также используют профиль своей роли. Все профили
@@ -578,7 +583,7 @@ cooldown, circuit breaker и ссылки на секреты — в `config/omn
 подключениями, четырьмя моделями и четырьмя комбо; Auto Combos отключены.
 В рабочих комбо заданы ожидание одного target 45 секунд и бюджет каскада 105 секунд;
 разрешено не более трёх попыток без повторения исчерпанной цепочки. HTTP harness делает
-не более одного повтора вместо прежних десяти. Для `ax-harness-free` предусмотрен
+ноль повторов всей цепочки (`request_retries: 0`). Для `ax-harness-free` предусмотрен
 один target с ожиданием до 90 секунд и общим бюджетом 105 секунд.
 У `ax-ops-free` четыре targets: ожидание одного до 60 секунд, общий бюджет
 105 секунд и не более четырёх попыток. Сжатие контекста отключено.
@@ -652,9 +657,10 @@ Hosted-доступ NVIDIA здесь используется для локал
    [фильтрация OmniRoute работает fail-open](https://github.com/diegosouzapw/OmniRoute/blob/v3.8.51/docs/routing/AUTO-COMBO.md).
    При недоступности всех бесплатных targets задача может завершиться ошибкой.
 
-3. В `config/roles/` роли вне разработки выбирают `"agent": "omniroute"`.
-   `backend_engineer`, `frontend_engineer` и `code_reviewer` выбирают
-   `"agent": "omniroute_code"`. Примените конфигурацию
+3. В `config/roles/` общие роли выбирают `"agent": "omniroute"`,
+   `frontend_engineer` — `"agent": "omniroute_code"`, а `backend_engineer` и
+   `code_reviewer` — `"agent": "ollama_cloud"` с `OLLAMA_API_KEY` и
+   `OLLAMA_CLOUD_MODEL=deepseek-v4.1-flash:1017` из `.env`. Примените конфигурацию
    через `bash ax_local/up.sh` и начните новую сессию. Проверочный MCP-вызов:
 
    ```json
@@ -809,11 +815,19 @@ Runtime автоматически вызывает нужного коллег�
 `owner`, `repo`, `pullNumber`. Он читает diff и существующие комментарии,
 создаёт pending review для проверенного head SHA, добавляет замечания с
 `path`, `line`, `side` и публикует review с `event=COMMENT`. В результате
-должны быть ссылки на опубликованные замечания. При смене head SHA или чужом
-pending review публикация останавливается. Без PR замечания возвращаются
+должны быть ссылки на опубликованные замечания. При смене head SHA нужна
+повторная проверка исходников. Существующий pending review агент может проверить,
+завершить либо удалить и создать заново, включая черновики предыдущих сессий. Без PR замечания возвращаются
 родительскому агенту. При отсутствии замечаний пустые комментарии не создаются.
 Токену нужны права **Pull requests: write**; комментарии будут от имени владельца
-токена. Инструкция reviewer запрещает approve, merge и изменения исходников.
+токена. APPROVE и REQUEST_CHANGES доступны согласно результатам проверки и задаче.
+Reviewer может запускать shell-проверки, читать файлы порциями и делегировать
+`qa_engineer`/`analyst`; merge и изменение проверяемых исходников не входят в задачу.
+Большие ответы MCP сохраняются в `.tool-results/`; инструмент `read_tool_output`
+читает их порциями без повторного запроса к GitHub. История/checkpoint — до
+2 000 000 байт, socket — 16 MiB, запрос к model proxy — 8 MiB. Ожидание модели —
+120 секунд на запрос без повтора всей цепочки со стороны harness. Переключение
+провайдеров остаётся внутри OmniRoute; общий дедлайн хода сохраняется.
 
 GitHub MCP авторизуется автоматически через `GITHUB_PERSONAL_ACCESS_TOKEN` из `.env`.
 Для чтения репозиториев нужны права чтения, для изменений через `backend_engineer` —
@@ -952,16 +966,31 @@ bash compose.sh --env-file .env -f ax_local/compose.yaml logs --tail=500 api | g
 Родитель передаёт конкретные исправления и оставшуюся работу. При `blocked`
 сначала нужно устранить причину блокировки; повторять публикацию вслепую нельзя.
 
-Блокировка публикации из-за чужого pending review сохраняется в checkpoint:
-продолжение не возвращает инструменты записи. Если продолжение завершается
-ошибкой, родитель сохраняет предыдущий ответ ребёнка, доказательства и оставшуюся
-работу вместе с новой ошибкой. Несколько попыток одной дочерней сессии не
-превращаются в отдельные незавершённые подзадачи.
+Если продолжение завершается ошибкой, родитель сохраняет предыдущий ответ
+ребёнка, доказательства и оставшуюся работу вместе с новой ошибкой. Несколько
+попыток одной дочерней сессии не превращаются в отдельные незавершённые подзадачи.
+Для известной невосстановимой дочерней сессии можно явно указать
+`replaces_session_id` вместо `session_id`: runtime передаст её результат новой
+сессии той же роли и снимет прежнюю ошибку только после подтверждённого успеха
+замены. Восстановимую сессию заменять этим параметром нельзя. Предыдущие решения,
+включая отвергнутые findings, сохраняются в handoff; внешние действия проверяются
+перед повтором. Невосстановимая ошибка ребёнка оставляет родителю partial-checkpoint,
+а не уничтожает весь ход исключением.
 
 После исчерпания повторов временной ошибки запроса к модели harness использует
-резерв финального ответа, не выполняя инструменты повторно. Если модель снова
-недоступна или пытается вызвать инструмент вопреки `tool_choice=none`, runtime
-возвращает частичный результат и checkpoint с уже полученными ответами инструментов.
+резерв финального ответа, не выполняя инструменты повторно. Финальный запрос
+получает историю без provider reasoning как текстовые доказательства в отдельном
+диалоге с `tool_choice=none`. При исчерпании рабочего бюджета результат может быть
+`completed`, если структурированный ответ содержит подтверждения выполнения всех
+требований и нет оставшейся работы, ошибок и незавершённых делегирований.
+Подтверждения из структурированного partial-ответа родителя сохраняются вместе
+с результатами незавершённых подзадач. Если модель снова недоступна или пытается
+вызвать инструмент, runtime возвращает частичный результат и checkpoint с уже
+полученными ответами инструментов.
+
+Извлечение заметок Cognee запрашивает `response_format=json_object`, использует параметры выбранной модели, включая
+настройки reasoning, и ждёт до 120 секунд в пределах оставшегося времени хода,
+оставляя резерв на запись. Таймаут извлечения не отменяет результат задачи.
 
 Продолжение разрешено только исходному родителю с исходной ролью. Оно расходует
 общий `max_calls_per_turn` и оставшееся время родительского хода; лимиты не
@@ -1245,8 +1274,8 @@ also updates the workers that host the gVisor sandboxes.
 Code review turns inherit the shared 900-second budget (within the AX 1920-second route
 timeout). The HTTP harness reserves up to `model.final_answer_reserve_seconds`
 (currently 120 seconds) from `config/runtime.json` for a final answer, stops
-new tools before that reserve, and returns an explicitly partial result if the
-work budget expires. A final model timeout also returns a partial result; it
+new tools before that reserve, and reports the verified outcome when the work
+budget expires. Unverified completion and a final model timeout return partial; it
 never repeats external writes. Partial turns are marked failed in Cognee and
 are not captured as completed project knowledge. A missing response does not
 undo already published GitHub reviews/comments; inspect them before retrying.
@@ -1358,9 +1387,14 @@ throttling и таймауты API при обновлении дашборда.
 
 Отдельно установить/обновить мониторинг:
 `python3 ax_local/cluster/resource_monitoring.py install`.
-После перезагрузки компьютера `up.sh` снова запускает соединение с Grafana;
-для запуска только соединения используйте
-`python3 ax_local/cluster/resource_monitoring.py forward`.
+При запуске `up.sh` и `rebuild-worker.sh` проверяется HTTP-доступность Grafana.
+Рабочее соединение сохраняется; зависший туннель этого проекта перезапускается.
+Скрипт ждёт восстановления до 30 секунд, затем сообщает об ошибке и путь к логу.
+Если мониторинг ещё не установлен, пересборка worker пропускает эту проверку;
+`up.sh` устанавливает мониторинг и проверяет соединение после установки.
+Для отдельной проверки и восстановления используйте
+`python3 ax_local/cluster/resource_monitoring.py ensure-forward`.
+Команда `forward` запускает supervisor в текущем терминале.
 Его лог: `ax_local/.local/resource-monitoring-forward.log`. Соединение слушает
 только `127.0.0.1` и автоматически восстанавливается после замены pod Grafana.
 Установщик проверяет локальный kind context; production-кластеры не поддерживает.

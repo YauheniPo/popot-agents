@@ -137,9 +137,38 @@ Recall and capture share the existing turn deadline and have short request
 timeouts. An unavailable memory service, invalid summary or exhausted budget
 does not turn a completed task into a failure. Worker events report
 `memory_recalled`, `memory_saved`, `memory_skipped`, `memory_recall_failed` and
-`memory_capture_failed`; a successful task answer alone does not prove indexing
-completed. There is no capture for failed turns, and no automatic backfill of
+`memory_capture_failed`. Recall events and Cognee session tool traces distinguish
+`useful`, `empty`, and `warming_up` outcomes and include the useful chunk count.
+Warming-up notices are not injected as project knowledge. Capture skipped for lack
+of remaining time emits `memory_skipped` with `insufficient_time`.
+A successful task answer alone does not prove indexing
+completed. Capture also runs for `partial` and `blocked` results, preserving verified intermediate
+findings with the task status in their provenance. Evidence checks still apply;
+unfinished work must not be described as completed. Explicit `failed` results and
+unhandled exceptions do not trigger capture. There is no automatic backfill of
 past tasks. Start new sessions after rebuilding workers.
+
+Extraction requests use JSON-object response mode where supported and still
+validate the summary shape and evidence. Ollama Cloud does not guarantee
+[structured outputs](https://docs.ollama.com/capabilities/structured-outputs),
+so its extraction requests omit `response_format` and request
+`reasoning_effort=none` with temperature zero. This applies only to memory
+extraction; the main task retains its configured reasoning settings. Ollama's
+[thinking controls](https://docs.ollama.com/api/openai-compatibility) are
+model-dependent: `/api/show` reports supported levels and the default. The
+deployed `deepseek-v4.1-flash:1017` supports disabled thinking and defaults to
+`high`, which can consume the extraction token budget before JSON is emitted.
+AX supplies the upstream hostname separately from its credential-hiding proxy
+address, so the same extraction settings apply inside workers.
+
+Responses marked `finish_reason=length` or another abnormal finish are rejected
+even if their text parses as JSON. Invalid or incomplete extraction gets one
+correction within the existing deadline; external task actions and memory writes
+are not replayed. `memory_summary_response` reports attempt, finish reason and
+content/reasoning character counts, never the summary or reasoning text.
+`memory_summary_retry` distinguishes `truncated_summary` from
+`invalid_summary_shape`. Use these events to diagnose `memory_capture_failed`;
+a successful `memory_session_recorded` only confirms the separate session journal.
 
 Use a stable project slug, e.g. `[project: popot-agents]`, and pass it to delegates. Store
 concise verified decisions, fixes and check results with their source/ref, role
@@ -201,3 +230,10 @@ operations; standard session listing/detail routes remain upstream. It uses
 Cognee's SQLite cache in the persistent system volume, with the upstream
 seven-day default trace TTL. Session aggregate rows survive trace expiry.
 Journal failures are logged and do not discard a successful task result.
+Tool metadata is written in one ordered `popot.tools` trace containing
+`tool_batches` (up to ten lists of twenty records), followed by the lifecycle
+trace. This fits the pinned SDK's twenty-item container limit and avoids one
+SDK cache/metrics update per tool while preserving status and recall metadata.
+The SDK dashboard counts failed traces, including a failed tool batch, rather
+than individual failed tools; individual outcomes remain in `tool_batches`.
+Lifecycle failures include a redacted error message and the start/finish phase.

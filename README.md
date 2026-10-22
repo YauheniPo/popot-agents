@@ -162,14 +162,16 @@ Choose either `effort` or `reasoning.max_tokens`, not both. Use
 `{"enabled": true}` for provider defaults. Omitting `reasoning` leaves provider
 behavior unchanged. Active OmniRoute profiles and the direct `openrouter`
 profile disable reasoning and cap output at 8192 tokens. The direct OpenRouter
-model is pinned to `cohere/north-mini-code:free`; working roles use explicit
-OmniRoute fallback combos instead of the random `openrouter/free` pool.
+model is pinned to `cohere/north-mini-code:free`; roles using OmniRoute use explicit
+fallback combos instead of the random `openrouter/free` pool.
 The optional `nous` profile retains its provider-default reasoning setting,
 but Solar Mini 4 is excluded from AX combos after malformed tool arguments in
 the 2026-10-20 experiment.
 Ollama's configured `qwen2.5-coder:14b` does not advertise a separate thinking
-mode; the `ollama_cloud` profile has
-no model selected in the local environment and keep reasoning unset.
+mode. `backend_engineer` and `code_reviewer` use the `ollama_cloud` profile with
+`OLLAMA_CLOUD_MODEL=deepseek-v4.1-flash:1017` and `OLLAMA_API_KEY`. They connect
+directly to `https://ollama.com/v1` through the AX provider proxy. Reasoning is
+left at the provider default.
 Recheck support when changing a profile's model.
 Model/provider support still determines which options work, including whether
 reasoning can be disabled or returned. `openrouter/free` chooses models dynamically.
@@ -218,8 +220,8 @@ probe, restore, response and deletion timeouts, plus `delegation` and `proxy`
 policies, are in `ax_local/config.json`.
 AX user sessions suspend after each saved answer and automatically resume on
 the next message with the same `sessionId`. `suspend_retention_seconds`
-defaults to 7200 seconds and overrides the role's worker idle lifetime in AX.
-After two hours without continuation, AX deletes the task; a later message
+defaults to 86400 seconds and overrides the role's worker idle lifetime in AX.
+After 24 hours without continuation, AX deletes the task; a later message
 restores the saved conversation in a new worker. New AX session histories stay
 available until explicit chat deletion. The default `snapshot_mode: data` restores
 workspace files, cold boots the harness and reloads the conversation; `full` is
@@ -232,6 +234,23 @@ New worker starts wait in FIFO order for up to 3600 seconds; continuation of an
 existing worker does not acquire another slot. The shared MCP upstream budget
 is 7200 seconds to cover queueing, startup and the model turn. See
 [AX worker queue](ax_local/README.md#лимит-worker-и-очередь-запуска).
+Model requests keep a 120-second socket timeout to cover OmniRoute's 105-second
+fallback budget. Harness retries default to zero: the gateway already switches
+providers, so a failed chain is not repeated in full. The remaining turn budget
+still caps every request; partial-result finalization remains available. Direct
+provider deployments can configure `model.request_retries` if needed.
+Successful MCP output longer than 24,000 characters is saved in full under
+`.tool-results/` in the sandbox. The model receives a preview and path, and can use
+`read_tool_output` (available whenever MCP tools are present) to read later pages.
+`read_file` also accepts zero-based character `offset` and `limit` (up to 24,000).
+These artifacts survive DATA snapshots with the workspace. Shell output still uses
+its preview limit; redirect large command logs to a workspace file and page it.
+History/checkpoints allow 2,000,000 UTF-8 bytes, with a 16 MiB socket envelope and an
+8 MiB AX model-proxy request limit. These are finite limits, not automatic history
+summarization; the selected model's context window remains an independent limit.
+Longer snapshot retention also keeps worker slots occupied longer. API restarts
+still do not recover in-flight delegated calls automatically.
+
 Role-specific timeouts are overrides in `config/roles/`, not shared defaults.
 With the current settings, every bundled role gets 900 seconds, the harness gets 885,
 and it reserves up to 120 seconds for its final answer. Changing the shared
@@ -316,15 +335,16 @@ The feature team roles are:
 | `project_operator` | Analyze local services, model routing, metrics, memory and pods; prepare and apply reviewed local changes | Real Holmes jobs, project inspection/change tools, PromQL and Cognee memory; no shell or worker admin credentials |
 
 The `chat` and `analyst` roles also remain available. `analyst` uses the
-`omniroute` profile; backend, frontend and code review use `omniroute_code`.
-Other roles use `omniroute`. Change a role's `agent` field to another configured
+`omniroute` profile; backend, code review and QA use `ollama_cloud`, while frontend
+uses `omniroute_code`. Change a role's `agent` field to another configured
 profile if needed, and set that profile's model and credentials in `.env`.
 
 Select `planner` or `qa_engineer` in the MCP request above to use those roles.
 
-Harness² uses isolated AX trial executions for analyst, backend, frontend, QA
-and reviewer roles before the main task. Trials are sequential, bounded and use
-read-only GitHub access. See [configuration and execution evidence](ax_local/README.md#harness2-для-ролей-ax).
+Harness² uses isolated AX trial executions for analyst and frontend roles
+before the main task. Backend, reviewer and QA roles start directly by default;
+their role config can enable trials explicitly. Trials are sequential, bounded
+and use read-only GitHub access. See [configuration and execution evidence](ax_local/README.md#harness2-для-ролей-ax).
 
 The task and chat responses include `sessionId`, `role`, and `agent`; send only
 `sessionId` on later messages. The role and
@@ -464,8 +484,10 @@ target with the user if the explicitly requested branch does not exist.
 
 MCP `isError` results are returned to the model as failed tool results so it can
 correct arguments or choose another permitted tool within the existing turn and
-round limits. MCP transport errors and tool timeouts still fail the turn;
-an uncertain tool write is not automatically retried.
+round limits. MCP transport errors and timeouts return `outcome_unknown: true`
+to the same agent, which must read current external state before repeating a
+write. A transport cleanup error after a received response preserves that response
+and logs `mcp_cleanup_failed`; the runtime never automatically retries the write.
 
 ### Offline authentication checks
 
@@ -492,9 +514,10 @@ Invalid JSON/object arguments, local input validation errors, completed file or
 clone failures and MCP `isError` results are fed back to the model. The model can
 correct arguments or choose another permitted step. Shell exit codes already
 return as tool output. Before repeating an operation with possible partial
-effects, the model is instructed to inspect its result. Unknown/disallowed tools,
-tool transport failures, tool timeouts and runtime configuration errors still stop
-the turn; the harness does not blindly replay uncertain writes.
+effects, the model is instructed to inspect its result. Unknown/disallowed tool
+names return the permitted tool names without executing anything. MCP transport
+failures return an explicit unknown outcome; runtime configuration and unhandled
+local errors still stop the turn. The harness does not blindly replay uncertain writes.
 
 For completion requests only, `model.request_retries` permits bounded retries on
 socket timeouts and HTTP 502/503/504. Each attempt resends the same conversation
@@ -518,15 +541,32 @@ turn starts a fresh budget. These limits bound attempts, not guarantee completio
 
 After the configured number of tool rounds, every HTTP role gets one final
 model request with no tool schemas and `tool_choice=none`, within the remaining
-turn deadline. This request summarizes the available evidence as a partial
-result; it cannot execute more tools, repeat writes or mark project-memory
-capture successful. Reaching the round limit no longer discards completed
-work through a tool-call-limit error. The time reserve may trigger this final
-request earlier.
+turn deadline. It receives the conversation as quoted evidence without provider
+reasoning blocks. A structured `completed` result is accepted only with nonempty
+evidence, no remaining work/errors and no unresolved delegated failures or model
+failure; otherwise the result remains partial. It cannot execute tools, repeat
+writes or mark project-memory capture successful. The time reserve may trigger
+this final request earlier, reserving a useful request window (up to 30 seconds,
+capped at half a short turn) before reporting. New or resumed child executions
+require at least 60 seconds of work budget, excluding the parent's final reserve;
+otherwise the tool returns an explicit refusal and the unfinished work remains visible.
+
+An explicit structured partial result ends the turn without forcing another child
+execution. Invalid final JSON or a premature completion claim gets one correction;
+repeated invalid output returns a partial checkpoint instead of consuming all rounds.
+Blank result-list entries are removed, but an explicit partial status is never
+promoted to completed. Parent answers include concise child status, evidence and
+remaining work; full child answers stay in checkpoint/tool history instead of being
+recursively appended to the user-facing result.
+Requests to resume an already completed child return its previous verified result
+with `continuation_skipped=true` and an explicit notice that no new work ran.
+Fresh verification requires a new task, not continuation of a completed session.
 
 `code_reviewer` has code-review, diagnosing-bugs, codebase-design, TDD and handoff
 skills, with GitHub tools for reading files, commits and PRs and publishing inline
-review comments. The reviewer has no file-edit or merge tools. In AX, engineers
+review comments. It can use bash, clone sources, read/write local verification
+artifacts and delegate to QA or analyst. Instructions keep reviewed source unchanged;
+merging PRs remains outside its tools. In AX, engineers
 are instructed to delegate changed code to it and address findings before claiming
 completion. Each allowed specialist's `description` is included in the delegation
 tool schema; existing roles without that field fall back to their instructions.
@@ -534,30 +574,29 @@ Reviewers cannot access the parent's workspace: pass the diff, source context,
 requirements and test results, or a readable repository/ref/PR. This is a model
 instruction, not a server-enforced review gate.
 
+For review-only tasks, a parent with an available `code_reviewer` delegates before
+conducting a full duplicate review. The reviewer owns the review and delegates only
+bounded specialist checks, not the entire review to QA or an analyst.
+The reviewer treats parent candidates as hypotheses: only defects
+introduced or worsened by the diff with a current failure scenario become inline
+findings. Pre-existing issues and hypothetical hardening do not fill a finding
+quota. Accepted and rejected decisions belong in handoffs; continuation preserves
+rejections unless new evidence changes them. Required checks precede publication;
+after verifying publication the reviewer returns the result without optional extra work.
+
 When given a PR, the reviewer checks its diff and existing comments, creates a
 pending review pinned to the head SHA, adds findings at the relevant file/line,
 and submits with `method=submit_pending` and `event=COMMENT`. Inline findings use
-the separate `add_comment_to_pending_review` tool. The runtime restricts the
-review-write tool to pending creation and comment submission; deletion, thread
-resolution and approval are rejected before contacting GitHub. It verifies
-publication and returns links.
-The runtime permits comments and submission only after a successful `create`
-for the same owner/repository/PR in the current call. Failed creation grants no
-access to an existing pending review. Creation requires the reviewed `commitID`;
-inline comments require a positive diff `line` and explicit `side`. A review
-cannot be recreated after creation or submission in that call.
-GitHub's "User can only have one pending review per pull request" conflict blocks
-further review writes, including remaining writes in the same batch, and removes
-publication tools from subsequent model requests. Read tools remain available
-to finish the analysis and return verified findings with the publication blocker.
-If the model attempts a blocked write again, the next request requires a final
-answer without tools. A final timeout or tool request still returns the blocker
-without another publication attempt. Incomplete runs do not capture durable memory.
-Without a PR it returns findings to the author. A changed head SHA or an existing
-pending review belonging to another run stops publication and is reported.
-The token needs **Pull requests: write** in addition to code read access.
-GitHub attributes comments to the account owning the token. Review submission is
-model-directed; merges and source edits remain outside its available tools.
+the separate `add_comment_to_pending_review` tool. Existing pending reviews can be
+inspected, completed or deleted and replaced, including drafts from previous runs.
+The runtime preserves the discovered GitHub review-write schema instead of narrowing
+its operations or events. Errors remain recoverable so the model can inspect the
+current state and choose a supported operation. Inline comments still require a
+positive diff line and explicit side. Approval or requesting changes must match the
+verified findings and user request. Publication must be verified and linked.
+Without a PR the reviewer returns findings to the author. A changed head SHA stops
+publication until the changed source is reviewed. The token needs **Pull requests:
+write** in addition to code read access; comments use the token owner's account.
 The last tool round is reserved for a partial status answer when the work is incomplete.
 Unknown or disallowed tool names return a recoverable error listing the available
 tools. They are never executed; other results in the same batch are preserved.

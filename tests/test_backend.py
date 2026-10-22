@@ -222,7 +222,8 @@ class BackendRoleTests(unittest.TestCase):
             server.server_close()
             thread.join()
         self.assertEqual(answer, "done")
-        self.assertEqual(calls[0]["tools"], [discovered["mcp__fetch__fetch"]["schema"]])
+        self.assertEqual(calls[0]["tools"], [discovered["mcp__fetch__fetch"]["schema"],
+                                            harness_tools.TOOL_SCHEMAS["read_tool_output"]])
         self.assertEqual(calls[1]["messages"][-1]["content"], "page text")
         self.assertEqual(call.call_args.args, (config["fetch"], "fetch", {"url": "https://example.com"}))
 

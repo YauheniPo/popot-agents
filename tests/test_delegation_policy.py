@@ -12,6 +12,32 @@ PR = 'https://github.com/example/project/pull/70'
 
 
 class DelegationRoutingTests(unittest.TestCase):
+    def test_final_partial_preserves_parent_findings_alongside_unfinished_child(self):
+        self.delegate.return_value = json.dumps({
+            'sessionId': '0123456789abcdef', 'role': 'code_reviewer', 'state': 'TASK_STATE_COMPLETED',
+            'answer': 'Diff inspected; tests remain.', 'resumable': True,
+            'outcome': {'status': 'partial', 'evidence': ['diff read'],
+                        'remaining_work': ['run tests'], 'errors': []}})
+        report = {'status': 'partial', 'answer': 'Parent verified existing comments.',
+                  'evidence': ['comments inspected'], 'remaining_work': ['publish'], 'errors': []}
+        replies = [
+            {'tool_calls': [{'id': 'review', 'function': {'name': 'delegate_task',
+                'arguments': json.dumps({'role': 'code_reviewer', 'task': 'Review'})}}]},
+            {'content': json.dumps(report)}]
+        state = {}
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=lambda *a, **kw:
+                   io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())), \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('Review ' + PR, {**self.role, 'max_tool_rounds': 1},
+                              extra_tools=self.tools, state=state)
+        self.assertIn('Parent verified existing comments', answer)
+        self.assertIn('Diff inspected', answer)
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertEqual(state['outcome']['evidence'], ['comments inspected', 'diff read'])
+        self.assertEqual(state['outcome']['remaining_work'], ['publish', 'run tests'])
+        self.delegate.assert_called_once()
+
     def test_final_fallback_keeps_child_blocker_and_evidence_after_failed_continuation(self):
         session = '0123456789abcdef'
         for resume_fails in (False, True):
@@ -201,8 +227,10 @@ class DelegationRoutingTests(unittest.TestCase):
                 result = {'sessionId': '0123456789abcdef', 'role': 'code_reviewer',
                           'state': 'TASK_STATE_COMPLETED', 'answer': 'text', 'truncated': False}
                 self.delegate.return_value = json.dumps({**result, **changes})
-                with self.assertRaisesRegex(RuntimeError, 'delegat'):
-                    self.run_task('Review this PR ' + PR, specialist='code_reviewer')
+                answer, _, _ = self.run_task('Review this PR ' + PR, specialist='code_reviewer')
+                self.assertIn('Partial result', answer)
+                self.assertIn('delegation to code_reviewer', answer)
+                self.assertNotIn('Suggested comments', answer)
 
     def test_missing_delegation_tool_cannot_be_executed(self):
         _answer, _model, local = self.run_task('Review this PR ' + PR,
@@ -299,8 +327,10 @@ class DelegationRoutingTests(unittest.TestCase):
                                      'HARNESS_MODEL': 'fake'}, clear=True), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply), \
              redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
-                run_http('Проверь тесты.', self.role, extra_tools=self.tools)
+            answer = run_http('Проверь тесты.', self.role, extra_tools=self.tools)
+            self.assertIn('Partial result', answer)
+            self.assertNotIn('Everything succeeded', answer)
+            self.assertNotIn('budget exhausted', answer)
 
     def test_failed_delegation_preserves_redacted_child_diagnostic(self):
         from popot_agents.worker.delegation_policy import completed_answer
@@ -337,8 +367,10 @@ class DelegationRoutingTests(unittest.TestCase):
                                      'HARNESS_MODEL': 'fake'}, clear=True), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply), \
              redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer.*1111111111111111'):
-                run_http('Check API and UI tests.', self.role, extra_tools=self.tools)
+            answer = run_http('Check API and UI tests.', self.role, extra_tools=self.tools)
+            self.assertIn('1111111111111111', answer)
+            self.assertIn('Partial result', answer)
+            self.assertNotIn('All requested checks succeeded', answer)
         self.assertEqual(self.delegate.call_count, 2)
 
     def _delegation_sequence(self, tasks, outcomes, *, batch=False, forced_final=False):
@@ -351,7 +383,7 @@ class DelegationRoutingTests(unittest.TestCase):
         def delegate(*_args, **_kwargs):
             outcome = outcomes.pop(0)
             if forced_final and not outcomes:
-                now[0] = 59.0
+                now[0] = 179.0
             if isinstance(outcome, Exception):
                 raise outcome
             return json.dumps({'role': 'qa_engineer', 'sessionId': '1111111111111111',
@@ -361,7 +393,7 @@ class DelegationRoutingTests(unittest.TestCase):
         def reply(*_args, **_kwargs):
             return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
         with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake',
-                                     'HARNESS_TURN_TIMEOUT_SECONDS': '60'}, clear=True), \
+                                     'HARNESS_TURN_TIMEOUT_SECONDS': '180'}, clear=True), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply), \
              patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
              redirect_stderr(io.StringIO()):
@@ -370,17 +402,20 @@ class DelegationRoutingTests(unittest.TestCase):
     def test_successful_retry_resolves_only_the_identical_subtask(self):
         self.assertEqual(self._delegation_sequence(['Check API', 'Check API'], [False, True]),
                          'All requested checks succeeded')
-        with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
-            self._delegation_sequence(['Check API', 'Check UI', 'Check API'], [False, False, True])
+        answer = self._delegation_sequence(['Check API', 'Check UI', 'Check API'], [False, False, True])
+        self.assertIn('Partial result', answer)
+        self.assertNotIn('All requested checks succeeded', answer)
 
     def test_same_batch_and_reused_call_id_do_not_merge_distinct_subtasks(self):
-        with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
-            self._delegation_sequence(['Check API', 'Check UI'], [False, True], batch=True)
+        answer = self._delegation_sequence(['Check API', 'Check UI'], [False, True], batch=True)
+        self.assertIn('Partial result', answer)
+        self.assertNotIn('All requested checks succeeded', answer)
 
     def test_recoverable_delegation_exception_cannot_be_hidden_by_another_subtask(self):
         from popot_agents.tools import ToolExecutionError
-        with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
-            self._delegation_sequence(['Check API', 'Check UI'], [ToolExecutionError('failed'), True])
+        answer = self._delegation_sequence(['Check API', 'Check UI'], [ToolExecutionError('failed'), True])
+        self.assertIn('Partial result', answer)
+        self.assertNotIn('All requested checks succeeded', answer)
 
     def test_forced_partial_answer_preserves_failed_subtask_and_rejects_success_claim(self):
         answer = self._delegation_sequence(['Check API', 'Check UI'], [False, True], forced_final=True)
@@ -393,8 +428,8 @@ class DelegationRoutingTests(unittest.TestCase):
         from popot_agents.runtime_config import RUNTIME
         history = [{'role': 'user', 'content': 'Review ' + PR + '\n' +
                     'x' * RUNTIME['limits']['message_chars']}]
-        with self.assertRaisesRegex(RuntimeError, 'delegation to code_reviewer'):
-            self.run_task(history, specialist='code_reviewer')
+        answer, _, _ = self.run_task(history, specialist='code_reviewer')
+        self.assertIn('Partial result', answer)
         self.delegate.assert_not_called()
         rejection = json.loads(self.requests[-1]['messages'][-1]['content'])
         self.assertIn('context exceeds', rejection['error'])
