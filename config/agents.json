@@ -6,7 +6,8 @@
     "command": ["python", "-m", "popot_agents.worker.http_harness"],
     "environment": {"HARNESS_BASE_URL": "https://openrouter.ai/api/v1", "HARNESS_API_KEY_ENV": "OPENROUTER_API_KEY"},
     "env_names": ["OPENROUTER_API_KEY"],
-    "model_env": "OPENROUTER_MODEL"
+    "model_env": "OPENROUTER_MODEL",
+    "model_parameters": {"reasoning": {"enabled": true, "exclude": false}}
   },
   "ollama": {
     "image": "popot-agent-worker:local",
@@ -48,7 +49,8 @@
     "command": ["python", "-m", "popot_agents.worker.http_harness"],
     "environment": {"HARNESS_BASE_URL": "https://inference-api.nousresearch.com/v1", "HARNESS_API_KEY_ENV": "NOUS_API_KEY"},
     "env_names": ["NOUS_API_KEY"],
-    "model_env": "NOUS_MODEL"
+    "model_env": "NOUS_MODEL",
+    "model_parameters": {"reasoning": {"enabled": true, "exclude": false}}
   },
   "nvidia_nim": {
     "image": "popot-agent-worker:local",
@@ -57,6 +59,7 @@
     "command": ["python", "-m", "popot_agents.worker.http_harness"],
     "environment": {"HARNESS_BASE_URL": "https://integrate.api.nvidia.com/v1", "HARNESS_API_KEY_ENV": "NVIDIA_API_KEY"},
     "env_names": ["NVIDIA_API_KEY"],
-    "model_env": "NVIDIA_MODEL"
+    "model_env": "NVIDIA_MODEL",
+    "model_parameters": {"chat_template_kwargs": {"enable_thinking": true}}
   }
 }

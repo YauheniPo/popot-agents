@@ -32,12 +32,12 @@ async def _streams(config: dict):
         token = safe_tool_env().get(token_name)
         if not token:
             raise ValueError(f"required MCP environment variable is missing or not selected: {token_name}")
-        import httpx
+        import httpx2
         from mcp.client.streamable_http import streamable_http_client
 
-        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"},
+        async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"},
                                      follow_redirects=False) as client:
-            async with streamable_http_client(config["url"], http_client=client) as (read, write, _):
+            async with streamable_http_client(config["url"], http_client=client) as (read, write):
                 yield read, write
     else:
         from mcp.client.stdio import stdio_client
@@ -62,16 +62,17 @@ def _error_text(config: dict, exc: Exception) -> str:
 
 async def _discover_one(alias: str, config: dict) -> dict:
     async with _streams(config) as (read, write):
-        from mcp import ClientSession
+        from mcp import ClientSession, types
 
         async with ClientSession(read, write) as session:
             await session.initialize()
             listed, cursors = {}, set()
             cursor = None
             while True:
-                page = await session.list_tools(cursor=cursor) if cursor else await session.list_tools()
+                page = await session.list_tools(params=types.PaginatedRequestParams(
+                    cursor=cursor)) if cursor else await session.list_tools()
                 listed.update({tool.name: tool for tool in page.tools})
-                cursor = getattr(page, "nextCursor", None)
+                cursor = page.next_cursor
                 if not cursor:
                     break
                 if cursor in cursors:
@@ -90,7 +91,7 @@ async def _discover_one(alias: str, config: dict) -> dict:
             "schema": {"type": "function", "function": {
                 "name": name,
                 "description": tool.description or f"{alias}: {native_name}",
-                "parameters": tool.inputSchema,
+                "parameters": tool.input_schema,
             }},
         }
     return result
@@ -135,8 +136,8 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
         elif kind == "resource_link":
             parts.append(f"Resource link (content not loaded): {item.uri}")
     output = "\n".join(parts) or json.dumps(
-        getattr(result, "structuredContent", None) or {}, ensure_ascii=False)
-    if result.isError:
+        getattr(result, "structured_content", None) or {}, ensure_ascii=False)
+    if result.is_error:
         raise MCPToolError(output)
     return output[:MAX_TOOL_OUTPUT] + ("\n[output truncated]" if len(output) > MAX_TOOL_OUTPUT else "")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import signal
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from typing import Callable, Mapping
 from urllib.parse import urlsplit
 
 from popot_agents.tools import TOOL_SCHEMAS
+from popot_agents.progress import (is_progress_message, emit_progress, observe_progress,
+                                   format_progress, progress_observer)
 from popot_agents.role_env import selected_role_env, validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
@@ -66,7 +69,7 @@ class DockerAgentRunner:
     def __init__(
         self,
         image: str = "popot-agent-worker:local",
-        timeout_seconds: int = RUNTIME["worker"]["default_timeout_seconds"],
+        timeout_seconds: int = RUNTIME["timeouts"]["turn_seconds"],
         network: str = "none",
         env_names: list[str] | None = None,
         command: list[str] | None = None,
@@ -161,7 +164,7 @@ class DockerAgentRunner:
         workspace = self.workspace_path(container_name, role_config, create=True)
         host_workspace = self.workspace_host_path(container_name, role_config)
         configured_tools = set((role_config or {}).get("tools", []))
-        resources = {**RUNTIME["worker"], **self.resources}
+        resources = {**RUNTIME["docker"], **self.resources}
         isolate_tools = bool(configured_tools & {"bash", "git_clone"}
                              or (role_config or {}).get("mcpServers"))
         command = [
@@ -196,8 +199,8 @@ class DockerAgentRunner:
         if self.model_env:
             environment["HARNESS_MODEL"] = os.environ[self.model_env]
         turn_timeout = (role_config or {}).get("timeout_seconds", self.timeout_seconds)
-        environment["HARNESS_TURN_TIMEOUT_SECONDS"] = str(max(RUNTIME["worker"]["min_timeout_seconds"],
-            turn_timeout - RUNTIME["worker"]["response_margin_seconds"]))
+        environment["HARNESS_TURN_TIMEOUT_SECONDS"] = str(max(RUNTIME["timeouts"]["min_turn_seconds"],
+            turn_timeout - RUNTIME["timeouts"]["turn_response_margin_seconds"]))
         if self.model_parameters:
             environment["HARNESS_MODEL_PARAMETERS_JSON"] = json.dumps(self.model_parameters)
         environment["HARNESS_SESSION_MODE"] = self.session_mode
@@ -234,7 +237,7 @@ class DockerAgentRunner:
             try:
                 subprocess.run(
                     ["docker", "rm", "-f", container_name],
-                    capture_output=True, timeout=RUNTIME["timeouts"]["docker_remove_seconds"], check=False,
+                    capture_output=True, timeout=RUNTIME["docker"]["remove_timeout_seconds"], check=False,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 pass
@@ -265,12 +268,12 @@ class DockerAgentRunner:
                         "--label", f"popot.chat_id={chat_id}", self.image,
                         "python", "-u", "-m", CHAT_WORKER_MODULE, "serve"])
         started = subprocess.run(command, text=True, capture_output=True,
-                                 timeout=RUNTIME["timeouts"]["docker_start_seconds"], check=False)
+                                 timeout=RUNTIME["docker"]["start_timeout_seconds"], check=False)
         if started.returncode != 0:
             existing = subprocess.run(
                 ["docker", "inspect", "--format",
                  '{{ index .Config.Labels "popot.chat_id" }}', container_name],
-                text=True, capture_output=True, timeout=RUNTIME["timeouts"]["docker_inspect_seconds"], check=False,
+                text=True, capture_output=True, timeout=RUNTIME["docker"]["inspect_timeout_seconds"], check=False,
             )
             if existing.returncode != 0 or existing.stdout.strip() != chat_id:
                 detail = started.stderr.strip().splitlines()
@@ -278,10 +281,10 @@ class DockerAgentRunner:
         chat = DockerChat(container_name,
                           (role_config or {}).get("timeout_seconds", self.timeout_seconds),
                           self.workspace_host_path(container_name, role_config))
-        for _ in range(RUNTIME["worker"]["startup_probe_attempts"]):
+        for _ in range(RUNTIME["docker"]["startup_probe_attempts"]):
             ready = subprocess.run(
                 ["docker", "exec", container_name, "python", "-m", CHAT_WORKER_MODULE, "ping"],
-                text=True, capture_output=True, timeout=RUNTIME["timeouts"]["docker_probe_seconds"], check=False,
+                text=True, capture_output=True, timeout=RUNTIME["docker"]["probe_timeout_seconds"], check=False,
             )
             if ready.returncode == 0:
                 try:
@@ -290,7 +293,7 @@ class DockerAgentRunner:
                         return chat
                 except json.JSONDecodeError:
                     pass
-            time.sleep(RUNTIME["worker"]["startup_probe_interval_seconds"])
+            time.sleep(RUNTIME["docker"]["startup_probe_interval_seconds"])
         chat.close()
         raise AgentRunError("chat worker did not become ready")
 
@@ -314,7 +317,7 @@ class DockerChat:
                 ["docker", "logs", "--tail", str(RUNTIME["logging"]["worker_log_tail_lines"]),
                  self.container_name],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=RUNTIME["timeouts"]["docker_inspect_seconds"], check=False,
+                timeout=RUNTIME["docker"]["inspect_timeout_seconds"], check=False,
             )
             if completed.returncode != 0:
                 return
@@ -351,7 +354,7 @@ class DockerChat:
             completed = subprocess.run(
                 ["docker", "exec", self.container_name,
                  "python", "-m", CHAT_WORKER_MODULE, "ping"],
-                text=True, capture_output=True, timeout=RUNTIME["timeouts"]["docker_probe_seconds"], check=False,
+                text=True, capture_output=True, timeout=RUNTIME["docker"]["probe_timeout_seconds"], check=False,
             )
             return completed.returncode == 0 and json.loads(completed.stdout).get("status") == "ok"
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
@@ -362,7 +365,7 @@ class DockerChat:
             ["docker", "exec", "--interactive", self.container_name,
              "python", "-m", CHAT_WORKER_MODULE, "restore"],
             input=json.dumps({"messages": messages}, ensure_ascii=False),
-            text=True, capture_output=True, timeout=RUNTIME["timeouts"]["docker_restore_seconds"], check=False,
+            text=True, capture_output=True, timeout=RUNTIME["docker"]["restore_timeout_seconds"], check=False,
         )
         if completed.returncode != 0:
             raise AgentRunError("chat worker could not restore history")
@@ -375,12 +378,16 @@ class DockerChat:
 
     def send(self, message: str) -> dict[str, str]:
         try:
-            completed = subprocess.run(
-                ["docker", "exec", "--interactive", self.container_name,
-                 "python", "-m", CHAT_WORKER_MODULE, "message"],
-                input=json.dumps({"message": message}, ensure_ascii=False),
-                text=True, capture_output=True, timeout=self.timeout_seconds, check=False,
-            )
+            command = ["docker", "exec", "--interactive", self.container_name,
+                       "python", "-m", CHAT_WORKER_MODULE, "message"]
+            callback = progress_observer()
+            if callback is not None:
+                completed = self._stream_message(command, message, callback)
+            else:
+                completed = subprocess.run(
+                    command, input=json.dumps({"message": message}, ensure_ascii=False),
+                    text=True, capture_output=True, timeout=self.timeout_seconds, check=False,
+                )
         finally:
             self._capture_logs()
         if completed.returncode != 0:
@@ -395,6 +402,65 @@ class DockerChat:
             raise AgentRunError("chat worker returned no answer")
         return {"answer": result["answer"]}
 
+    def _stream_message(self, command, message, callback):
+        data = json.dumps({'message': message, 'progress': True}, ensure_ascii=False).encode()
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + self.timeout_seconds
+        pending, answer, sent = b'', '', 0
+        try:
+            os.set_blocking(process.stdin.fileno(), False)
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdin, selectors.EVENT_WRITE, 'in')
+                selector.register(process.stdout, selectors.EVENT_READ, 'out')
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(['docker', 'exec'], self.timeout_seconds)
+                    for key, _ in selector.select(min(remaining, .2)):
+                        if key.data == 'in':
+                            try:
+                                sent += os.write(key.fileobj.fileno(), data[sent:sent + 65536])
+                            except BrokenPipeError:
+                                # An early worker failure can close stdin before
+                                # the request is sent; still read its response.
+                                sent = len(data)
+                            if sent == len(data):
+                                selector.unregister(key.fileobj)
+                                process.stdin.close()
+                            continue
+                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        pending += chunk
+                        if len(pending) > 8 * 1024 * 1024:
+                            raise AgentRunError('chat worker response is too large')
+                        while b'\n' in pending:
+                            line, pending = pending.split(b'\n', 1)
+                            try:
+                                item = json.loads(line)
+                            except (ValueError, UnicodeDecodeError) as exc:
+                                raise AgentRunError('chat worker returned invalid JSON') from exc
+                            if isinstance(item, dict) and 'progress' in item:
+                                if is_progress_message(item['progress']):
+                                    callback(item['progress'])
+                            else:
+                                answer = line.decode('utf-8')
+                code = process.wait(timeout=max(.001, deadline - time.monotonic()))
+                if pending:
+                    raise AgentRunError('chat worker returned an incomplete response')
+                return subprocess.CompletedProcess(command, code, answer, '')
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=3)
+            process.stdin.close()
+            process.stdout.close()
+
     def close(self) -> None:
         if not self.closed:
             self.closed = True
@@ -402,7 +468,7 @@ class DockerChat:
             try:
                 subprocess.run(["docker", "rm", "-f", self.container_name],
                                text=True, capture_output=True,
-                               timeout=RUNTIME["timeouts"]["docker_remove_seconds"], check=False)
+                               timeout=RUNTIME["docker"]["remove_timeout_seconds"], check=False)
             except (OSError, subprocess.TimeoutExpired):
                 pass
 
@@ -516,8 +582,8 @@ def load_roles(path: str | Path, agents: Mapping[str, DockerAgentRunner]) -> dic
             raise ValueError(f"role {name} needs a persistent workspace")
         if permissions.get("internet") and agents[agent].network != "bridge":
             raise ValueError(f"role {name} needs a networked agent profile")
-        timeout = config.get("timeout_seconds", RUNTIME["worker"]["default_timeout_seconds"])
-        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= RUNTIME["worker"]["max_timeout_seconds"]:
+        timeout = config.get("timeout_seconds", RUNTIME["timeouts"]["turn_seconds"])
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= RUNTIME["timeouts"]["max_turn_seconds"]:
             raise ValueError(f"role {name} has invalid timeout_seconds")
         ttl = config.get("ttl_seconds", RUNTIME["sessions"]["default_idle_seconds"])
         if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 0:
@@ -610,7 +676,7 @@ class ChatServer(ThreadingHTTPServer):
         self.session_locks = weakref.WeakValueDictionary()
         self.session_locks_guard = threading.Lock()
         self.worker_managers = ()
-        self.task_slots = threading.BoundedSemaphore(RUNTIME["worker"]["max_concurrent_tasks"])
+        self.task_slots = threading.BoundedSemaphore(RUNTIME["docker"]["max_concurrent_tasks"])
         self.pending_expired: set[str] = set()
         self.idle_seconds = idle_seconds
         self.last_prune = 0.0
@@ -725,13 +791,37 @@ def create_server(
                 return None
             return str(runner.workspace_host_path(container_name, saved.get("roleConfig")))
 
+        def _progress(self, message: str) -> None:
+            if not is_progress_message(message) or getattr(self, '_progress_broken', False):
+                return
+            try:
+                if not getattr(self, '_stream_started', False):
+                    self.connection.settimeout(5)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/x-ndjson; charset=utf-8')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('X-Accel-Buffering', 'no')
+                    self.end_headers()
+                    self._stream_started = True
+                    self.close_connection = True
+                self.wfile.write((json.dumps({'type': 'progress', 'message': message}, ensure_ascii=False) + '\n').encode())
+                self.wfile.flush()
+            except OSError:
+                self._progress_broken = True
+
         def _reply(self, status: int, payload: dict) -> None:
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            if getattr(self, '_stream_started', False):
+                self._progress(format_progress('completed' if status < 400 else 'failed', status=status))
+                if not getattr(self, '_progress_broken', False):
+                    self.wfile.write((json.dumps({'type': 'result', 'status': status, 'result': payload}, ensure_ascii=False) + '\n').encode())
+                    self.wfile.flush()
+            else:
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             print(json.dumps({
                 "event": "response", "request_id": self._request_id,
                 "client_ip": self.client_address[0],
@@ -963,11 +1053,13 @@ def create_server(
                     with self.server.live_lock:
                         self.server.live[session_id] = record
             try:
+                emit_progress('turn_started')
                 result = record.worker.send(message.strip())
                 history = record.messages + [
                     {"role": "user", "content": message.strip()},
                     {"role": "assistant", "content": result["answer"]},
                 ]
+                emit_progress('saving')
                 self.server.store.save(session_id, record.agent, history,
                                        record.role, role_config)
                 record.messages = history
@@ -1007,10 +1099,13 @@ def create_server(
                 self._reply(503, {"error": "orchestrator is busy; retry later"})
                 return
             try:
-                if self.path == "/tasks":
-                    self._task(payload)
-                else:
-                    self._message(payload)
+                streaming = self.headers.get('Accept') == 'application/x-ndjson'
+                with observe_progress(self._progress if streaming else None):
+                    emit_progress('accepted')
+                    if self.path == "/tasks":
+                        self._task(payload)
+                    else:
+                        self._message(payload)
             except subprocess.TimeoutExpired:
                 self._reply(504, {"error": "agent timed out"})
             except FileNotFoundError:

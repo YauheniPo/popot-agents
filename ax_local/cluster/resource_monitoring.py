@@ -68,7 +68,7 @@ def extend_prometheus_config(original: str, node: str = 'popot-ax-control-plane'
 
 class Cluster:
     def __init__(self):
-        config = json.loads((ROOT / 'ax_local/config.json').read_text())
+        config = json.loads((ROOT / 'config/runtime.json').read_text())
         self.context = local_context(config)
         self.command = ['kubectl', f'--kubeconfig={LOCAL / "kubeconfig"}',
                         f'--context={self.context}', '--request-timeout=30s']

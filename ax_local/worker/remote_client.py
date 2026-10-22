@@ -6,8 +6,10 @@ import os
 import re
 import socket
 import sys
+from popot_agents.progress import is_progress_message
 
 RESPONSE_PREFIX = "POPOT_AX_RESPONSE:"
+PROGRESS_PREFIX = "POPOT_AX_PROGRESS:"
 MAX_ENCODED_REQUEST_BYTES = 200000
 
 
@@ -20,15 +22,17 @@ def call(encoded: str) -> dict:
         connection.settimeout(float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS", "180")) + 10)
         connection.connect(socket_path)
         connection.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-        chunks = []
-        while True:
-            chunk = connection.recv(65536)
-            if not chunk:
-                raise RuntimeError("AX chat worker closed the connection")
-            chunks.append(chunk)
-            if chunk.endswith(b"\n"):
-                break
-    return json.loads(b"".join(chunks))
+        with connection.makefile('rb') as reader:
+            while True:
+                line = reader.readline(8 * 1024 * 1024 + 1)
+                if not line or not line.endswith(b'\n'):
+                    raise RuntimeError("AX chat worker closed the connection or response is too large")
+                result = json.loads(line)
+                if isinstance(result, dict) and 'progress' in result:
+                    if payload.get('progress') is True and is_progress_message(result['progress']):
+                        print(PROGRESS_PREFIX + json.dumps(result['progress'], ensure_ascii=False), flush=True)
+                    continue
+                return result
 
 
 def main(args: list[str]) -> None:

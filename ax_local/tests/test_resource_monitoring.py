@@ -7,6 +7,27 @@ from ax_local.cluster.resource_dashboard import dashboard
 
 
 class ResourceMonitoringTests(unittest.TestCase):
+    def test_cluster_totals_include_all_namespaces_and_ignore_display_filters(self):
+        result = dashboard()
+        for title, metric, unit in [('Cluster CPU (cores)', 'container_cpu_usage_seconds_total', 'cores'),
+                                    ('Cluster memory (working set)', 'container_memory_working_set_bytes', 'bytes')]:
+            chart = next(p for p in result['panels'] if p['title'] == title)
+            expression = chart['targets'][0]['expr']
+            self.assertIn(metric, expression)
+            self.assertIn('sum(', expression)
+            self.assertIn('namespace!=""', expression)
+            self.assertIn('container!="POD"', expression)
+            for name in ('namespace', 'pod', 'role', 'task', 'process'):
+                self.assertNotIn('$' + name, expression)
+            self.assertEqual(chart['fieldConfig']['defaults']['unit'], unit)
+            nodes = chart['targets'][1]['expr']
+            self.assertIn(metric, nodes)
+            self.assertIn('sum(', nodes)
+            self.assertIn('id="/"', nodes)
+            self.assertIn('job="popot-cadvisor"', nodes)
+            for name in ('namespace', 'pod', 'role', 'task', 'process'):
+                self.assertNotIn('$' + name, nodes)
+
     def test_role_filters_include_history_and_scope_tasks_and_processes(self):
         result = dashboard()
         variables = {v['name']: v for v in result['templating']['list']}

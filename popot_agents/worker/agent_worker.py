@@ -29,7 +29,7 @@ def run_harness(task: str) -> str:
     if type(max_turns) is not int or not 1 <= max_turns <= cap:
         raise ValueError(f"max_tool_rounds must be between 1 and {cap}")
     timeout = float(os.getenv("HARNESS_TURN_TIMEOUT_SECONDS",
-                             str(RUNTIME["worker"]["default_timeout_seconds"])))
+                             str(RUNTIME["timeouts"]["turn_seconds"])))
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("HARNESS_TURN_TIMEOUT_SECONDS must be positive and finite")
     command = [

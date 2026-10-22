@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from ax_local.api.ax_runner import AxAgentRunner
 from ax_local.api.worker_queue import WorkerQueue
-from ax_local.config import AX_CONFIG
+from popot_agents.runtime_config import AX_CONFIG
 from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
 from tests.test_chat import FakeRunner
 from tests import test_chat as chat_tests
@@ -319,8 +319,8 @@ class AxWorkerCapacityTests(unittest.TestCase):
                 server.server_close()
 
     def test_queue_defaults_are_ten_workers_and_one_hour(self):
-        self.assertEqual(AX_CONFIG['ax']['max_workers'], 10)
-        self.assertEqual(AX_CONFIG['ax']['worker_queue_timeout_seconds'], 3600)
+        self.assertEqual(AX_CONFIG['max_workers'], 10)
+        self.assertEqual(AX_CONFIG['worker_queue_timeout_seconds'], 3600)
 
 
 if __name__ == '__main__':

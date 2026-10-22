@@ -69,7 +69,8 @@ class SubstrateCleanupTests(unittest.TestCase):
             root = Path(directory).resolve()
             script = root / 'ax_local/cluster/substrate_cleanup.py'
             script.parent.mkdir(parents=True)
-            (root / 'ax_local/config.json').write_text(json.dumps({'ax': {'context': 'kind-test'}}))
+            (root / 'config').mkdir()
+            (root / 'config/runtime.json').write_text(json.dumps({'ax': {'context': 'kind-test'}}))
             local = root / 'ax_local/.local'
             (local / 'bin').mkdir(parents=True)
             (local / 'bin/ko').touch()
@@ -101,7 +102,8 @@ class SubstrateCleanupTests(unittest.TestCase):
                 shutil.copyfile(substrate_cleanup.__file__, script)
                 shutil.copytree(Path(substrate_cleanup.__file__).with_name('cleanup_go'),
                                 script.with_name('cleanup_go'))
-                (root / 'ax_local/config.json').write_text(json.dumps({'ax': {'context': 'kind-test'}}))
+                (root / 'config').mkdir()
+                (root / 'config/runtime.json').write_text(json.dumps({'ax': {'context': 'kind-test'}}))
                 local = root / 'ax_local/.local'
                 (local / 'bin').mkdir(parents=True)
                 (local / 'bin/ko').touch()

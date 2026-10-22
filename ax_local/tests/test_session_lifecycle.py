@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ax_local.api.ax_runner import AxAgentRunner, AxChat
-from ax_local.config import AX_CONFIG
+from popot_agents.runtime_config import AX_CONFIG
 from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
 from popot_agents.orchestrator.session_store import SessionStore
 from tests.test_chat import FakeChat

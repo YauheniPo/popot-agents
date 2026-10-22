@@ -26,6 +26,8 @@ compose.yaml      Local deployment
 
 Run local tests with `python -m unittest discover -s tests -p 'test_*.py'`.
 Run the API without Compose with `python -m popot_agents.orchestrator.main`.
+Install test and runtime dependencies with `python -m pip install --group ci`
+(requires pip 25.1 or newer).
 
 ## CI and code quality
 
@@ -100,12 +102,16 @@ See [memory/README.md](memory/README.md) for setup, datasets and AX integration.
 
 ## Runtime settings
 
-Edit [config/runtime.json](config/runtime.json) for shared non-secret settings.
+Edit [config/runtime.json](config/runtime.json) for all non-secret runtime settings.
+Common settings, Docker execution and AX execution share this one file.
 `sessions` sets the default worker idle time, session retention, and cleanup
-interval. `worker` sets Docker resources, startup probing, and
+interval. `docker` sets Docker resources, startup probing, command timeouts, and
 `max_concurrent_tasks` (default: 3). When all task slots are busy, the API
 returns HTTP 503; `/healthz` remains available. `timeouts` covers
-model, MCP, tool, Docker, and database calls. `limits` sets request, history,
+shared turn budgets (`turn_seconds`, `max_turn_seconds`, `min_turn_seconds`,
+`turn_response_margin_seconds`) plus model, MCP, tool and database calls.
+`ax` sets the local cluster, task resources, worker admission queue, suspend
+retention, provider/model selection, `ax.delegation` and `ax.proxy`. `limits` sets request, history,
 tool output, and file sizes. `logging` sets how much of an MCP request body is
 recorded and the worker log tail and file size limits. `model` sets the default
 tool-round limit, `request_retries` (a non-negative integer; 0 disables retries), and optional
@@ -117,7 +123,14 @@ from starting. Changes require
 `docker compose up --build -d worker-image orchestrator mcp-server` to
 rebuild the stack; existing chat containers keep their old settings until they
 are restarted. For direct Python runs, `POPOT_RUNTIME_CONFIG` can select another
-JSON file before process startup.
+complete JSON file before process startup; AX uses that same loaded config.
+Local cluster scripts read the repository's `config/runtime.json` directly.
+Docker concurrency/resources and AX admission/resources remain separate because
+these backends enforce different limits. All required values are explicit in
+JSON: missing or unknown fields fail validation instead of restoring legacy defaults.
+Custom configs using the former `worker` section or separate AX JSON must be
+migrated to this layout. Provider profiles stay in `config/agents.json`, role
+instructions/tools in `config/roles.json`, and secrets in `.env`.
 
 Agent-specific `resources` and `model_parameters` can override the runtime
 defaults in [config/agents.json](config/agents.json). For example, an HTTP
@@ -130,6 +143,63 @@ All bundled roles also inherit `model.default_max_tool_rounds` (40) from runtime
 To override it for one agent role, add `"max_tool_rounds": 20` to that role in
 `config/roles.json`. Removing the field restores inheritance. Both values must
 be integers from 1 to `model.max_tool_rounds` (currently 80); zero does not mean unlimited.
+
+HTTP profiles can also pass OpenRouter's optional `reasoning` object through
+`model_parameters`, for example in the `openrouter` block of `config/agents.json`:
+
+```json
+"model_parameters": {
+  "reasoning": {"effort": "medium", "exclude": false}
+}
+```
+
+Supported fields are `effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+`max`), a positive integer `max_tokens`, and boolean `enabled`/`exclude`.
+Choose either `effort` or `reasoning.max_tokens`, not both. Use
+`{"enabled": true}` for provider defaults. Omitting `reasoning` leaves provider
+behavior unchanged. The `openrouter` and `nous` profiles explicitly set
+`{"enabled": true, "exclude": false}`. Their configured models were checked on
+2026-10-10 against each provider's `/v1/models` catalog: `openrouter/free` and
+`inclusionai/ling-3.0-flash-fin:free` advertise `reasoning` support. A live
+OpenRouter probe returned reasoning; Nous chat completion requests returned
+HTTP 404 both with and without reasoning, despite the model being listed.
+Ollama's configured `qwen2.5-coder:14b` does not advertise a separate thinking
+mode; the `ollama_cloud`, `ollama_claude` and `ollama_claude_local` profiles have
+no model selected in the local environment and keep reasoning unset.
+Recheck support when changing a profile's model.
+Model/provider support still determines which options work, including whether
+reasoning can be disabled or returned. `openrouter/free` chooses models dynamically.
+See [OpenRouter reasoning parameters](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+
+The `nvidia_nim` profile uses `NVIDIA_MODEL=nvidia/nemotron-3-super-120b-a12b`
+in `.env.example` and the local `.env`, with NVIDIA's native thinking option:
+
+```json
+"model_parameters": {"chat_template_kwargs": {"enable_thinking": true}}
+```
+
+Only boolean `enable_thinking` is accepted inside `chat_template_kwargs`.
+This is a provider-specific option, distinct from OpenRouter's `reasoning` object.
+[Nemotron 3 Super](https://build.nvidia.com/nvidia/nemotron-3-super-120b-a12b/modelcard)
+supports tool use and configurable thinking. A live check on 2026-10-10 completed
+a tool-call/result/answer cycle and returned `reasoning_content`.
+The NVIDIA account's `/v1/models` catalog also listed
+[`moonshotai/kimi-k3`](https://build.nvidia.com/moonshotai/kimi-k3/modelcard) and
+[`deepseek-ai/deepseek-v4.1-flash`](https://build.nvidia.com/deepseek-ai/deepseek-v4.1-flash/modelcard).
+Kimi K3 passed the same short probe, but its required reasoning history across
+turns is not fully preserved by our session storage; it needs further harness
+work before use in persistent chats. DeepSeek did not respond within the probe's
+45-second deadline. These are availability/compatibility checks, not a quality benchmark.
+Changing `NVIDIA_MODEL` configures the `nvidia_nim` profile. To use it in AX,
+set the relevant role's `agent` to `nvidia_nim` in `config/roles.json` and rebuild.
+
+Docker and AX both use the role's profile from `config/agents.json`: its
+`model_env` names the model variable in `.env`, and `model_parameters` reaches
+the worker via `HARNESS_MODEL_PARAMETERS_JSON`. Delegated and scheduled tasks
+use their own role's profile. These are deployment settings, not additional
+`run_task` arguments. Rebuild after editing the profile (`bash ax_local/up.sh`
+for AX); new workers receive the settings.
+
 Provider credentials and deployment
 ports remain in `.env`; existing `AGENT_CHAT_IDLE_SECONDS` and
 `MCP_UPSTREAM_TIMEOUT_SECONDS` process environment variables override their
@@ -140,14 +210,14 @@ Shared turn settings are defined only in `config/runtime.json`:
 
 | Section | Settings |
 | --- | --- |
-| `worker` | Default/max task timeout, minimum harness budget and `response_margin_seconds` for returning the answer and recording the session |
 | `model` | Model retries, default/max tool rounds and final-answer reserve (`final_answer_reserve_seconds`, capped by turn budget / `final_answer_reserve_divisor`) |
-| `timeouts` | Model/tool/transport calls, automatic memory recall, session start/finish and memory summary/capture budgets |
+| `timeouts` | Default/max turn time, minimum harness budget, response margin, model/tool/transport calls and memory request budgets |
 | `memory` | Recall count, summary attempts/tokens, evidence/context/text limits and maximum notes/traced tools |
 
-Both Docker and AX use these shared values. AX-specific CLI, route, startup,
-probe, restore, response and deletion timeouts remain together under `ax` in
-`ax_local/config.json`; delegation and proxy policies stay in that same file.
+Both Docker and AX use these shared values. Backend-specific settings live in
+`docker` and `ax` in the same file. AX-specific CLI, route, startup, probe,
+restore, response and deletion timeouts are under `ax`; delegation and proxy
+policies are under `ax.delegation` and `ax.proxy`.
 AX user sessions suspend after each saved answer and automatically resume on
 the next message with the same `sessionId`. `ax.suspend_retention_seconds`
 defaults to 7200 seconds and overrides the role's worker idle lifetime in AX.
@@ -180,6 +250,13 @@ The memory limits for note count and trace count must stay within the pinned
 Cognee API contract; invalid values are rejected at startup.
 
 ## Connect Claude or Codex through MCP
+
+Python dependency versions are defined only in [pyproject.toml](pyproject.toml).
+The `mcp` group selects the SDK, `worker` adds the compatible Fetch/Git servers,
+`orchestrator` supplies database access, and `ax` supplies A2A/HTTP dependencies.
+Dockerfiles install these groups directly; `ci` includes all runtime groups and
+test tools. The `build` group pins pip after bootstrapping group support in older
+base images. Rebuild the MCP and worker images together after SDK upgrades.
 
 After setting `.env` as described in "Start and try", start the MCP service
 with the rest of the stack:
@@ -328,10 +405,18 @@ start/completion, tools available to
 the HTTP model, the number of tool calls it chose, visible assistant messages,
 tool names and safe argument summaries, tool results or result sizes, and the
 final answer. Shell commands, file contents, and arbitrary
-tool output are summarized to avoid exposing credentials. Provider-private
-reasoning is not available through this API. The `/tasks` response is
-synchronous and does not stream tokens. Rebuild the worker image and start a new
+tool output are summarized to avoid exposing credentials. Reasoning fields
+actually returned by the provider (`reasoning`, `reasoning_content`,
+`reasoning_details`) appear in `assistant_reasoning` trace/progress events with
+credential redaction. No explanation is invented when the provider omits them;
+encrypted blocks remain opaque. The original blocks are preserved unchanged in
+assistant messages sent back to the model during the tool loop. The harness
+receives each model response in full, so reasoning events arrive after that
+response, before tool execution or the final answer; this is not token streaming.
+Use an MCP `progressToken` to receive the events during the task. Rebuild the worker image and start a new
 session to see the new trace events.
+Both Docker and AX forward these events before the final answer. HTTP clients
+can request the same stream with `Accept: application/x-ndjson`.
 
 The orchestrator also logs each API request and response as JSON lines with a
 shared `request_id`, client IP and port, `User-Agent`, method, path, status, and

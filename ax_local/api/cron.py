@@ -12,10 +12,10 @@ from popot_agents.orchestrator.cron import cron_matches, validate_cron
 
 
 class CronScheduler:
-    def __init__(self, roles: dict, runner, store):
+    def __init__(self, roles: dict, runners: dict, store):
         self.entries = [(role, index, entry) for role, config in roles.items()
                         for index, entry in enumerate(config.get("cron", []))]
-        self.roles, self.runner, self.store = roles, runner, store
+        self.roles, self.runners, self.store = roles, runners, store
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
         self.active: set[tuple[str, int]] = set()
@@ -33,7 +33,8 @@ class CronScheduler:
             config = saved.get("roleConfig") or {}
             meta = config.get("_ax_cron")
             if meta and meta.get("state") in {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}:
-                self.runner.close_session(saved["sessionId"])
+                # AX Task deletion does not require the former provider profile.
+                next(iter(self.runners.values())).close_session(saved["sessionId"])
                 meta.update(state="TASK_STATE_FAILED", error="AX API restarted during cron run")
                 self.store.save(saved["sessionId"], saved["agent"], saved["messages"],
                                 saved["role"], config)
@@ -91,7 +92,8 @@ class CronScheduler:
         try:
             config["_ax_cron"]["state"] = "TASK_STATE_WORKING"
             self.store.save(session_id, config["agent"], [], key[0], config)
-            chat = self.runner.start_chat(session_id, config, cancel_event=self.stop_event)
+            chat = self.runners[config['agent']].start_chat(
+                session_id, config, cancel_event=self.stop_event)
             with self.lock:
                 self.chats[key] = chat
             if self.stop_event.is_set():

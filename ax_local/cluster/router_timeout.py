@@ -44,7 +44,7 @@ def ensure_router_timeout(kubeconfig: Path, context: str, timeout_seconds: int,
 
 def main() -> None:
     if len(sys.argv) != 3:
-        raise SystemExit("usage: router_timeout.py LOCAL_KUBECONFIG AX_CONFIG_JSON")
+        raise SystemExit("usage: router_timeout.py LOCAL_KUBECONFIG RUNTIME_CONFIG_JSON")
     kubeconfig = Path(sys.argv[1]).resolve()
     config = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
     ax = config["ax"]

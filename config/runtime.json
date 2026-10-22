@@ -4,20 +4,6 @@
     "retention_days": 7,
     "prune_interval_seconds": 60
   },
-  "worker": {
-    "default_timeout_seconds": 900,
-    "max_concurrent_tasks": 3,
-    "memory": "1536m",
-    "cpus": 2,
-    "pids_limit": 256,
-    "tmpfs_mb": 64,
-    "workspace_tmpfs_mb": 512,
-    "startup_probe_attempts": 40,
-    "startup_probe_interval_seconds": 0.25,
-    "max_timeout_seconds": 1800,
-    "min_timeout_seconds": 0.1,
-    "response_margin_seconds": 15
-  },
   "timeouts": {
     "model_request_seconds": 120,
     "mcp_discovery_seconds": 60,
@@ -27,11 +13,6 @@
     "git_clone_seconds": 180,
     "file_action_seconds": 60,
     "file_download_seconds": 60,
-    "docker_start_seconds": 30,
-    "docker_probe_seconds": 5,
-    "docker_restore_seconds": 30,
-    "docker_inspect_seconds": 10,
-    "docker_remove_seconds": 10,
     "postgres_connect_seconds": 10,
     "memory_request_seconds": 5,
     "memory_recall_seconds": 20,
@@ -42,7 +23,11 @@
     "memory_capture_margin_seconds": 5,
     "memory_recall_min_seconds": 1,
     "memory_tool_request_seconds": 60,
-    "memory_skill_import_seconds": 600
+    "memory_skill_import_seconds": 600,
+    "turn_seconds": 900,
+    "max_turn_seconds": 1800,
+    "min_turn_seconds": 0.1,
+    "turn_response_margin_seconds": 15
   },
   "limits": {
     "request_bytes": 262144,
@@ -89,5 +74,63 @@
     "text_chars": 1600,
     "quote_chars": 600,
     "trace_tool_limit": 200
+  },
+  "docker": {
+    "max_concurrent_tasks": 3,
+    "memory": "1536m",
+    "cpus": 2,
+    "pids_limit": 256,
+    "tmpfs_mb": 64,
+    "workspace_tmpfs_mb": 512,
+    "startup_probe_attempts": 40,
+    "startup_probe_interval_seconds": 0.25,
+    "start_timeout_seconds": 30,
+    "probe_timeout_seconds": 5,
+    "restore_timeout_seconds": 30,
+    "inspect_timeout_seconds": 10,
+    "remove_timeout_seconds": 10
+  },
+  "ax": {
+    "context": "kind-popot-ax",
+    "atespace": "ate-demo-counter",
+    "worker_pool_name": "popot-workers",
+    "workspace_name": "popot-local",
+    "task_resources": {
+      "requests": {
+        "cpu": "500m",
+        "memory": "512Mi"
+      },
+      "limits": {
+        "cpu": "2",
+        "memory": "1536Mi"
+      }
+    },
+    "task_debug": true,
+    "cli_timeout_seconds": 60,
+    "route_timeout_seconds": 1920,
+    "startup_timeout_seconds": 300,
+    "startup_probe_interval_seconds": 3,
+    "session_backend": "postgres",
+    "probe_timeout_seconds": 15,
+    "restore_timeout_seconds": 30,
+    "response_margin_seconds": 10,
+    "delete_timeout_seconds": 5,
+    "suspend_retention_seconds": 7200,
+    "max_workers": 10,
+    "worker_queue_timeout_seconds": 3600,
+    "delegation": {
+      "enabled": true,
+      "port": 8005,
+      "max_depth": 5,
+      "max_calls_per_turn": 8,
+      "turn_timeout_seconds": 900,
+      "poll_interval_seconds": 0.5
+    },
+    "proxy": {
+      "port": 8004,
+      "response_margin_seconds": 5,
+      "max_request_bytes": 2097152,
+      "max_response_bytes": 4194304
+    }
   }
 }

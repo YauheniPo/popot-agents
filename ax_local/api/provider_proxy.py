@@ -12,8 +12,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import error, request
 
-from popot_agents.runtime_config import RUNTIME
-from ..config import AX_CONFIG
+from popot_agents.runtime_config import AX_CONFIG, RUNTIME
 
 
 @dataclass(frozen=True)
@@ -26,9 +25,10 @@ class Provider:
 
 def resolve_provider(name: str, model: str, profiles: dict, environ: dict) -> Provider:
     if not isinstance(name, str) or name not in profiles:
-        raise ValueError("AX_LOCAL_PROVIDER must name a configured provider")
+        raise ValueError("provider must name a configured agent profile")
     if not isinstance(model, str) or not model.strip() or len(model) > 300:
-        raise ValueError("AX_LOCAL_MODEL must name a model")
+        source = profiles[name].get('model_env') or 'HARNESS_MODEL'
+        raise ValueError(f"provider {name} requires a valid model in {source}")
     profile = profiles[name]
     environment = profile.get("environment", {})
     base_url = environment.get("HARNESS_BASE_URL", "")
@@ -62,11 +62,19 @@ def network_address_toward(host: str, port: int) -> str:
         return connection.getsockname()[0]
 
 
-def dispatch_request(selected: Provider, token: str, path: str,
+def authorized_provider(routes: dict[str, Provider], authorization: str) -> Provider | None:
+    for token, provider in routes.items():
+        if hmac.compare_digest(authorization.encode(), f'Bearer {token}'.encode()):
+            return provider
+    return None
+
+
+def dispatch_request(routes: dict[str, Provider], path: str,
                      authorization: str, body: bytes) -> tuple[int, bytes]:
     if path != "/v1/chat/completions":
         return 404, b'{}'
-    if not hmac.compare_digest(authorization, f"Bearer {token}"):
+    selected = authorized_provider(routes, authorization)
+    if selected is None:
         return 401, b'{}'
     if len(body) < 1 or len(body) > AX_CONFIG["proxy"]["max_request_bytes"]:
         return 413, b'{}'
@@ -99,7 +107,7 @@ def dispatch_request(selected: Provider, token: str, path: str,
         return (504 if timed_out else 502), b'{}'
 
 
-def start_proxy(selected: Provider, token: str, host: str = "0.0.0.0",
+def start_proxy(routes: dict[str, Provider], host: str = "0.0.0.0",
                 port: int = AX_CONFIG["proxy"]["port"]) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, status: int, body: bytes) -> None:
@@ -114,9 +122,8 @@ def start_proxy(selected: Provider, token: str, host: str = "0.0.0.0",
 
         def do_POST(self) -> None:
             authorization = self.headers.get("Authorization", "")
-            if self.path != "/v1/chat/completions" or not hmac.compare_digest(
-                    authorization, f"Bearer {token}"):
-                status, body = dispatch_request(selected, token, self.path,
+            if self.path != "/v1/chat/completions" or authorized_provider(routes, authorization) is None:
+                status, body = dispatch_request(routes, self.path,
                                                 authorization, b"")
                 self._reply(status, body)
                 return
@@ -129,7 +136,7 @@ def start_proxy(selected: Provider, token: str, host: str = "0.0.0.0",
                 self._reply(413, b'{}')
                 return
             body = self.rfile.read(size)
-            status, answer = dispatch_request(selected, token, self.path,
+            status, answer = dispatch_request(routes, self.path,
                                               authorization, body)
             self._reply(status, answer)
 

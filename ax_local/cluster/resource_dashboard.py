@@ -28,6 +28,25 @@ def dashboard() -> dict:
                         'tooltip': {'mode': 'multi', 'sort': 'desc'}},
         })
 
+    all_containers = 'job="popot-cadvisor",namespace!="",container!="",container!="POD"'
+    nodes = 'job="popot-cadvisor",id="/"'
+    for title, metric, unit in [
+        ('Cluster CPU (cores)', 'container_cpu_usage_seconds_total', 'cores'),
+        ('Cluster memory (working set)', 'container_memory_working_set_bytes', 'bytes'),
+    ]:
+        def total(selector):
+            value = f'{metric}{{{selector}}}'
+            if unit == 'cores':
+                value = f'rate({value}[$__rate_interval])'
+            return f'sum({value})'
+
+        panel(title, total(all_containers), unit, 'All pods',
+              'Totals across all namespaces, independent of dashboard filters. '
+              'Nodes includes system overhead outside pods. These two lines overlap; do not add them. '
+              + ('1 core = 100% of one CPU.' if unit == 'cores' else 'Memory is the working set, not allocated requests or limits.'))
+        panels[-1]['targets'].append({'refId': 'B', 'expr': total(nodes),
+                                     'legendFormat': 'Nodes including system overhead'})
+
     panel('Pod CPU (cores)', f'sum by(namespace,pod)(rate(container_cpu_usage_seconds_total{{{containers}}}[$__rate_interval]))',
           'cores', '{{namespace}} / {{pod}}', '1 core = 100% of one CPU.')
     panel('Pod memory (working set)', f'sum by(namespace,pod)(container_memory_working_set_bytes{{{containers}}})',
