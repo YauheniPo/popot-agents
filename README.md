@@ -404,6 +404,16 @@ unprivileged user inside the container. Model credentials are not forwarded to
 Bash or MCP subprocesses. The host project directory is not mounted into the sandbox. There is no Docker
 socket in the worker. Workspace files are restored from the retained AX snapshot;
 after Task deletion, only saved conversation history remains.
+The worker image includes `rsync`, `ripgrep`, `unzip`, C/C++ build tools, `make`
+and `pkg-config`, alongside Python/venv/pip, Node/npm, Git and curl.
+Both `$HOME` and the tool user's passwd home point to the durable `/workspace`;
+tools that expand `~agent` (including Ansible local connections) use the same
+writable directory. User-installed Python commands in `/workspace/.local/bin`
+are on the tool PATH; npm's global prefix also uses `/workspace/.local` so CLI
+packages can be installed without root. Project dependencies can be installed
+in virtual environments or locally through npm. Startup restores `/dev/shm` to mode `1777`
+inside the sandbox so the unprivileged tool user can create multiprocessing
+semaphores (including those needed by Ansible). Tools still run as UID 10001.
 
 The same role's `mcpServers` section starts the public reference
 [Fetch MCP server](https://github.com/modelcontextprotocol/servers/blob/main/src/fetch/README.md)
@@ -574,6 +584,17 @@ otherwise the tool returns an explicit refusal and the unfinished work remains v
 An explicit structured partial result ends the turn without forcing another child
 execution. Invalid final JSON or a premature completion claim gets one correction;
 repeated invalid output returns a partial checkpoint instead of consuming all rounds.
+The correction is tool-free even when the first invalid answer was already a final
+request; both attempts share the original deadline. Empty content and truncated
+responses are invalid, and JSON wrapped in a single Markdown code fence is accepted.
+Ollama Cloud final requests disable thinking, as memory extraction already does,
+without changing the work requests. `final_result_invalid` reports the validation
+reason, finish reason and content length; `final_result_recovered` confirms recovery.
+If correction fails, the response retains attributed child results and bounded,
+redacted tool receipts in `answer` and `evidence`, without promoting the task to
+completed. Raw invalid responses stay in the checkpoint; reasoning is not used as
+a substitute for an answer. Memory recall failures include a redacted diagnostic
+message and remain nonfatal.
 Blank result-list entries are removed, but an explicit partial status is never
 promoted to completed. Parent answers include concise child status, evidence and
 remaining work; full child answers stay in checkpoint/tool history instead of being
@@ -603,6 +624,29 @@ findings. Pre-existing issues and hypothetical hardening do not fill a finding
 quota. Accepted and rejected decisions belong in handoffs; continuation preserves
 rejections unless new evidence changes them. Required checks precede publication;
 after verifying publication the reviewer returns the result without optional extra work.
+Once the diff and required checks are covered, no new findings is a completed review.
+A generic request to leave review comments does not require a summary publication
+when there are no new findings. Parent agents must not restart the search just to
+produce comments. Role instructions require explicit original-user authorization
+to resolve or reopen threads; a missing reply tool is not such authorization.
+These are model instructions, not a deterministic authorization filter.
+The runtime adds `review_checkpoint` for reviewers. After six work rounds, only
+that tool is offered and other tools are refused until a valid checkpoint is
+recorded. Covered paths and candidate decisions accumulate without discarding older
+entries; a changed decision must cite new evidence and identify what it supersedes.
+Only `remaining_work` is replaced. Each subsequent work request is reminded of
+the accumulated decisions and the specific unfinished work, rather than restarting
+the review. Empty `remaining_work` switches the next
+request to a tool-free final answer and blocks further calls in the same batch.
+This enforces the transition after the reviewer's declaration; it does not prove
+the review is complete or detect repeated reasoning inside one model response.
+CI job status must not be presented as proof of individual tests running without
+skips, or of a particular failing step, without a test report or step log.
+Tool-free final reporting receives ordered, attributed tool receipts and task
+context, excluding the assistant's earlier prose and reasoning. Checkpoints,
+delegated reports and historical memory have separate source labels. This prevents
+earlier model assertions from masquerading as direct receipts; it is not a semantic
+validator of every factual claim in the generated answer.
 
 When given a PR, the reviewer checks its diff and existing comments, creates a
 pending review pinned to the head SHA, adds findings at the relevant file/line,

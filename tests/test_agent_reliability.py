@@ -27,7 +27,7 @@ class AgentReliabilityTests(unittest.TestCase):
                 if role == 'code_reviewer':
                     self.assertIn('You own the review', prompt)
 
-    def run_sequence(self, replies, *, delegate=None, clock=None, timeout=900, role=None, state=None):
+    def run_sequence(self, replies, *, delegate=None, clock=None, timeout=900, role=None, state=None, env=None):
         from ax_local.worker.delegation import make_tools
         bodies = []
         tools = make_tools({'AX_DELEGATION_URL': 'http://fake', 'AX_DELEGATION_TOKEN': 'test',
@@ -42,7 +42,7 @@ class AgentReliabilityTests(unittest.TestCase):
                 message = message()
             return io.BytesIO(json.dumps({'choices': [{'message': message}]}).encode())
         with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake',
-                                    'HARNESS_TURN_TIMEOUT_SECONDS': str(timeout)}, clear=True), \
+                                    'HARNESS_TURN_TIMEOUT_SECONDS': str(timeout), **(env or {})}, clear=True), \
              patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: clock[0] if clock else 0), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=response), \
              redirect_stderr(io.StringIO()):

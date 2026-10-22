@@ -404,6 +404,17 @@ class TurnMemoryTests(unittest.TestCase):
         client.remember.assert_not_called()
         self.assertEqual(client.session_event.call_args.args[0]['status'], 'failed')
 
+    def test_recall_failure_reports_redacted_cause_and_remains_optional(self):
+        client = Mock()
+        client.recall.side_effect = RuntimeError('HTTP 503 private-password')
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.trace') as trace:
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=client)
+            self.assertEqual(memory.context(10), '')
+        event = next(c.kwargs for c in trace.call_args_list if c.args[0] == 'memory_recall_failed')
+        self.assertIn('HTTP 503', event['error'])
+        self.assertNotIn('private-password', event['error'])
+
     def test_optional_model_recall_failure_is_recoverable(self):
         client = Mock()
         client.recall.return_value = []

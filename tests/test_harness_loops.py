@@ -47,7 +47,8 @@ class HttpRecoveryLoopTests(unittest.TestCase):
         execute.assert_called_once()
         transcript = json.loads(requests[-1]['messages'][-1]['content'])
         proof = {'role': 'tool', 'tool_call_id': 'proof', 'content': '4'}
-        self.assertIn(proof, transcript)
+        self.assertIn({'source': 'tool_result', 'tool': 'calculate',
+                       'call_id': 'proof', 'content': '4'}, transcript)
         self.assertIn(proof, state['messages'])
         self.assertNotIn('tools', requests[-1])
         self.assertEqual(requests[-1]['tool_choice'], 'none')

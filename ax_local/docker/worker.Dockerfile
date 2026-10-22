@@ -18,7 +18,8 @@ RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
 
 FROM python-base
 LABEL com.popot.project="popot-agents"
-RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl git nodejs npm \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash build-essential ca-certificates curl git nodejs npm pkg-config ripgrep rsync unzip \
     && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml /build/pyproject.toml
 RUN python -m pip install --no-cache-dir --upgrade 'pip>=25.1' \
@@ -32,7 +33,9 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN python -m playwright install --with-deps chromium \
     && chmod -R a+rX /opt/playwright \
     && rm -rf /var/lib/apt/lists/*
-RUN useradd --create-home --uid 10001 agent && mkdir /workspace
+# AX remaps image ownership; use its writable durable workspace for both HOME
+# and passwd lookups (Ansible expands ~agent independently of the environment).
+RUN mkdir /workspace && useradd --no-create-home --home-dir /workspace --uid 10001 agent
 COPY --from=ax-runner /ax-task-runner /usr/local/bin/ax-task-runner
 COPY --from=ax-runner /src/ax/cmd/ax-task-runner/antigravity_bootstrap.py /usr/local/bin/antigravity_bootstrap.py
 WORKDIR /app

@@ -20,6 +20,15 @@ BACKEND_TOOLS = [
 
 
 class BackendRoleTests(unittest.TestCase):
+    def test_user_installed_commands_are_on_tool_path(self):
+        with patch.dict(os.environ, {'PATH': '/usr/bin'}, clear=True), \
+             patch.object(harness_tools, 'WORKSPACE_ROOT', Path('/workspace')):
+            env = harness_tools.safe_tool_env()
+        self.assertEqual(env['HOME'], '/workspace')
+        self.assertIn('/workspace/.local/bin', env['PATH'].split(os.pathsep))
+        self.assertIn('/usr/bin', env['PATH'].split(os.pathsep))
+        self.assertEqual(env['NPM_CONFIG_PREFIX'], '/workspace/.local')
+
     def test_role_env_is_forwarded_to_tools_without_other_credentials(self):
         with patch.dict(os.environ, {"HARNESS_TOOL_ENV_NAMES_JSON": '["GITHUB_TOKEN"]',
                  "GITHUB_TOKEN": "selected-secret",

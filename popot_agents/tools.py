@@ -102,7 +102,11 @@ def safe_tool_env() -> dict[str, str]:
              if key in {"PATH", "LANG", "LC_ALL", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR",
                         "PLAYWRIGHT_BROWSERS_PATH"}
              or key in names}
-            | {"HOME": str(WORKSPACE_ROOT), "GIT_TERMINAL_PROMPT": "0"})
+            | {"HOME": str(WORKSPACE_ROOT), "GIT_TERMINAL_PROMPT": "0",
+               "NPM_CONFIG_PREFIX": str(WORKSPACE_ROOT / '.local'),
+               "PATH": os.pathsep.join(dict.fromkeys([
+                   *os.environ.get('PATH', os.defpath).split(os.pathsep),
+                   str(WORKSPACE_ROOT / '.local' / 'bin')]))})
 
 
 def workspace_path(path: str) -> Path:

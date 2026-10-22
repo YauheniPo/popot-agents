@@ -61,6 +61,11 @@ def delegation_instructions(role_config: dict, extra_tools: dict) -> str:
         'do not invent findings or repeat a publication when its outcome is uncertain. '
         'Once requested deliverables are verified, return the result immediately; '
         'do not spend remaining budget on optional new investigations. '
+        'A review with no new findings is complete without new inline comments. '
+        'Do not invent a mandatory summary publication or ask the reviewer to look harder '
+        'just to produce comments. Honor its rejected candidates and verified read-back. '
+        'Do not grant a child authority beyond the original user scope, including resolving '
+        'or reopening review threads. '
         'The user\'s scope and prohibitions take precedence over specialist defaults. '
         'Available delegation capability:\n' + description)
 

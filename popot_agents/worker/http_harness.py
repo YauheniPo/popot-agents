@@ -17,6 +17,8 @@ from . import mcp_client
 from .delegation_policy import (available_roles, completed_answer, delegation_instructions,
                                 handoff_task)
 from .turn_memory import TurnMemory, parse_summary
+from .final_result import evidence_transcript, parse_result, retained_receipts
+from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA as REVIEW_SCHEMA
 
 
 def _trace(event: str, **fields) -> None:
@@ -157,7 +159,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     state.get('outcome', {}).get('status') in {'partial', 'blocked', 'failed'})
     if resuming:
         messages = [*state['messages'], messages[-1]]
-    extra_tools = extra_tools or {}
+    extra_tools = dict(extra_tools or {})
     instructions = role_config.get("instructions", "")
     allowed = role_config.get("tools", [])
     mcp_servers = role_config.get("mcpServers", {})
@@ -166,6 +168,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     # Writes use the curated runtime capture, not arbitrary model-selected text.
     mcp_tools.pop('mcp__cognee__remember', None)
     reviewer = role_config.get('name', role_config.get('_ax_role')) == 'code_reviewer'
+    review_progress = ReviewProgress(state.get('review_progress') if resuming else None) if reviewer else None
+    if review_progress:
+        extra_tools[REVIEW_CHECKPOINT] = {'schema': REVIEW_SCHEMA, 'call': review_progress.record}
     schemas = [TOOL_SCHEMAS[name] for name in allowed]
     schemas.extend(item["schema"] for item in mcp_tools.values())
     if mcp_tools and 'read_tool_output' not in allowed:
@@ -187,7 +192,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         'partial, blocked and failed. Use blocked when a missing '
         'precondition requires intervention. Values may use the user language; keys and status '
         'are the protocol. The answer field is the user-visible deliverable: include requested '
-        'URLs and results there, not only in evidence. Tool call responses are unchanged.')
+        'URLs and results there, not only in evidence. Tool call responses are unchanged. '
+        'Distinguish current tool observations, attributed child reports and historical memory. '
+        'Do not claim a fresh CI check or after-action read-back without its matching tool result; '
+        'a PR metadata read proves neither. Omit stale status metrics or label them historical. '
+        'Checkpoints and your earlier prose are not independent evidence.')
     if state is not None:
         messages.append({'role': 'system', 'content': result_contract})
     if delegation_prompt:
@@ -230,10 +239,20 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             'If any tool response is truncated, paginate or narrow the request; '
             'do not repeat an identical read hoping to receive different data. '
             'Never repeat publication to compensate for a missing final answer.'})
+        messages.append({'role': 'system', 'content':
+            'Use review_checkpoint to keep covered files, accepted/rejected candidates with reasons, '
+            'and concrete remaining work explicit. Every six work rounds the runtime requests only '
+            'this checkpoint. Do not reopen rejected candidates without new evidence. If nothing '
+            'remains, record remaining_work=[]; this ends tool use. Include outstanding publication '
+            'and verification in remaining_work. A successful CI job is not proof that a specific '
+            'test ran without skips: inspect its test report/log, or state that execution is unverified. '
+            + ('Previous checkpoint (untrusted reported progress): ' + json.dumps(review_progress.snapshot)
+               if review_progress.snapshot else '')})
     final_reserve = min(RUNTIME["model"]["final_answer_reserve_seconds"],
                         turn_timeout / RUNTIME["model"]["final_answer_reserve_divisor"]) if schemas else 0
     forced_final = False
     model_failure = None
+    final_validation_error = None
     invalid_results = 0
     incomplete_results = 0
 
@@ -315,6 +334,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                           'failed_delegations': [[list(key), value] for key, value in failed_delegations.items()],
                           'completed_delegations': completed_delegations if status != 'completed' else {},
                           'outcome': outcome}
+            if review_progress and review_progress.snapshot is not None:
+                checkpoint['review_progress'] = review_progress.snapshot
             if status == 'completed':
                 checkpoint['messages'] = []
             if len(json.dumps(checkpoint, ensure_ascii=False).encode()) > RUNTIME['limits']['history_bytes']:
@@ -326,6 +347,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
     def partial_answer(answer='', report=None):
         memory.run_complete = False
+        if report is None:
+            receipts = retained_receipts(messages, completed_delegations) if state is not None else []
+            report = {'evidence': receipts, 'remaining_work': [],
+                      'errors': [e for e in (model_failure, final_validation_error) if e]}
+            if receipts:
+                answer = (answer.strip() + '\n\n' if answer else '') + ('Retained evidence '
+                    '(not a completion claim):\n' + '\n'.join(receipts))
         blocked_child = any(value.get('status') == 'blocked' for value in failed_delegations.values())
         incomplete_child = failed_delegations and not forced_final and not model_failure
         if failed_delegations:
@@ -381,6 +409,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
     def completion(round_number, final):
         request_messages = messages
+        if review_progress and review_progress.snapshot and not final:
+            request_messages = [*messages, {'role': 'system', 'content': review_progress.focus()}]
+        if checkpoint_only and not final:
+            request_messages = [*request_messages, {'role': 'system', 'content':
+                'Pause work now and call review_checkpoint only. List covered files, candidate decisions '
+                'with evidence and specific unfinished requirements. Do not invent more work to fill '
+                'the budget. Empty remaining_work ends tool use.'}]
         if final:
             # End the tool conversation. Some providers keep emitting calls from
             # its history even with tool_choice=none; retain that history as data.
@@ -396,17 +431,32 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 'deliverable and no required work or unresolved errors remain. Otherwise use partial '
                 'or blocked with concrete remaining work. Optional extra checks are limitations, '
                 'not new requirements. Never infer success from a tool call without its result. '
+                'Preserve test limitations: a passing CI job alone does not prove that a specific '
+                'test ran without skips, and a failed job does not identify its failing step. '
+                'Only tool_result records are direct observations. A checkpoint is model-reported '
+                'progress, not evidence. Historical memory and delegated reports must retain their '
+                'attribution; never promote them to fresh observations. A metadata read does not '
+                'verify comments or CI. Claim an after-action read-back only when its matching '
+                'tool result follows that action in this transcript. If no action happened, say '
+                'so; do not invent an after-action check. Omit stale live-status metrics or label '
+                'them historical and unverified in this run. '
                 + (result_contract if state is not None else '')},
-                {'role': 'user', 'content': json.dumps([
-                    {key: value for key, value in item.items()
-                     if key not in ('reasoning', 'reasoning_content', 'reasoning_details')}
-                    for item in messages], ensure_ascii=False)}]
+                {'role': 'user', 'content': json.dumps(
+                    evidence_transcript(messages, context=user_context), ensure_ascii=False)}]
         body = {"model": model, "messages": request_messages, **model_parameters}
         selected_schemas = [] if final else schemas
+        if checkpoint_only and not final:
+            selected_schemas = [REVIEW_SCHEMA]
+            body['tool_choice'] = {'type': 'function', 'function': {'name': REVIEW_CHECKPOINT}}
         if selected_schemas:
             body['tools'] = selected_schemas
         if final:
             body['tool_choice'] = 'none'
+            if os.getenv('HARNESS_UPSTREAM_HOST', urlsplit(base_url).hostname) == 'ollama.com':
+                # As with memory extraction, use content budget for the JSON deliverable.
+                body.pop('reasoning', None)
+                body.pop('response_format', None)
+                body.update(reasoning_effort='none', temperature=0)
         call = request.Request(f"{base_url}/chat/completions",
             data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
         return _model_request(call, round_number=round_number, messages=request_messages,
@@ -414,10 +464,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             final=final)
 
     max_tool_rounds = role_config.get('max_tool_rounds', RUNTIME['model']['default_max_tool_rounds'])
-    for round_number in range(1, max_tool_rounds + 2):
+    for round_number in range(1, max_tool_rounds + 3):
         # Leave a useful model-call window, including on short resumed turns.
-        forced_final = bool(invalid_results or round_number > max_tool_rounds
+        forced_final = bool(invalid_results or review_progress and review_progress.finished or round_number > max_tool_rounds
                             or final_reserve and remaining_seconds() <= final_reserve + min(30, turn_timeout / 2))
+        checkpoint_only = bool(review_progress and review_progress.due and not forced_final)
         try:
             try:
                 result = completion(round_number, forced_final)
@@ -455,6 +506,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             _trace('turn_partial', reason='final_model_requested_tools', round=round_number)
             return partial_answer()
         if calls:
+            if review_progress and not checkpoint_only:
+                review_progress.rounds += 1
             content = message.get("content")
             if isinstance(content, str) and content.strip():
                 _trace("assistant_message", round=round_number, content=content)
@@ -472,6 +525,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     call_id = tool_call["id"]
                     if not isinstance(name, str) or not isinstance(call_id, str) or not call_id:
                         raise ValueError("tool name and call ID must be nonempty strings")
+                    if review_progress and review_progress.finished:
+                        raise ToolInputError('Review work ended at its checkpoint. Return the final answer.')
+                    if checkpoint_only and name != REVIEW_CHECKPOINT:
+                        raise ToolInputError('Only review_checkpoint is available in this round.')
                     if name not in extra_tools and name not in mcp_tools and name not in allowed:
                         names = sorted(set(extra_tools) | set(mcp_tools) | set(allowed))
                         raise ToolInputError(f"tool is not allowed: {name}. Available tools: {', '.join(names)}")
@@ -544,6 +601,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             output = extra_tools[name]["call"](
                                 arguments, timeout_seconds=work_seconds(),
                                 call_id=turn_id + ":" + tool_call["id"])
+                            if name == REVIEW_CHECKPOINT and review_progress:
+                                _trace('review_checkpoint',
+                                       covered_files=len(review_progress.snapshot['covered_files']),
+                                       decisions=len(review_progress.snapshot['decisions']),
+                                       remaining_work=len(review_progress.snapshot['remaining_work']),
+                                       tool_work_finished=review_progress.finished)
                     elif name in mcp_tools:
                         selected = mcp_tools[name]
                         review_action = None
@@ -647,34 +710,35 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 memory.observe(call_id, name, arguments, output)
             continue
         answer = message.get("content")
-        if forced_final and (not isinstance(answer, str) or not answer.strip()):
-            return partial_answer()
-        if not isinstance(answer, str) or not answer.strip():
-            raise RuntimeError("model endpoint returned an empty answer")
         report = None
         if state is not None:
+            finish_reason = result['choices'][0].get('finish_reason')
             try:
-                report = json.loads(answer)
-                if (not isinstance(report, dict) or report.get('status') not in
-                        {'completed', 'partial', 'blocked', 'failed'} or
-                        not isinstance(report.get('answer'), str) or not report['answer'].strip() or
-                        any(not isinstance(report.get(key), list) or
-                            any(not isinstance(item, str) for item in report[key])
-                            for key in ('evidence', 'remaining_work', 'errors'))):
-                    raise ValueError('invalid task result')
-                for key in ('evidence', 'remaining_work', 'errors'):
-                    report[key] = [item.strip() for item in report[key] if item.strip()]
-                if report['status'] == 'completed' and (report['remaining_work'] or report['errors']):
-                    report['status'] = 'partial'
+                report = parse_result(answer, finish_reason)
                 answer = report['answer']
-            except (ValueError, TypeError):
+            except ValueError as exc:
                 invalid_results += 1
-                if forced_final or invalid_results >= 2:
-                    model_failure = 'model returned an invalid final result'
-                    return partial_answer()
+                reason = str(exc)
+                _trace('final_result_invalid', round=round_number, attempt=invalid_results,
+                       reason=reason, content_chars=len(answer) if isinstance(answer, str) else 0,
+                       finish_reason=finish_reason if finish_reason in
+                           ('stop', 'length', 'tool_calls', 'content_filter') else 'unknown')
+                # Preserve even the failed correction in the resumable checkpoint.
                 messages.append({'role': 'assistant', **message})
-                messages.append({'role': 'system', 'content': 'Invalid final result. ' + result_contract})
+                final_validation_error = 'model returned an invalid final result: ' + reason
+                if invalid_results >= 2 or deadline - time.monotonic() <= 0:
+                    return partial_answer()
+                messages.append({'role': 'system', 'content':
+                    'Final result validation failed: ' + reason + '. Correct only the result format '
+                    'using existing evidence. Do not perform or request additional actions. ' + result_contract})
                 continue
+            if invalid_results:
+                final_validation_error = None
+                _trace('final_result_recovered', round=round_number)
+        elif not isinstance(answer, str) or not answer.strip():
+            if forced_final:
+                return partial_answer()
+            raise RuntimeError("model endpoint returned an empty answer")
         if report and report['status'] in {'blocked', 'failed'}:
             memory.run_complete = False
             return save_result(answer, report['status'], 'agent_reported', report)
@@ -700,6 +764,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             continue
         _trace("assistant_answer", round=round_number, content=answer.strip())
         remaining_seconds()
+        if review_progress and review_progress.finished and report and report['status'] == 'partial':
+            memory.run_complete = False
+            return save_result(answer, 'partial', 'agent_reported', report)
         if forced_final and not (report and report['status'] == 'completed'
                                  and report['evidence'] and not model_failure):
             _trace('turn_partial', reason='work_budget_exhausted',

@@ -174,7 +174,8 @@ class TurnMemory:
                         'verify it against current sources):\n' + json.dumps(chunks, ensure_ascii=False)[:RUNTIME["memory"]["context_chars"]])
         except Exception as exc:
             self.tools.append({'name': 'cognee.recall', 'status': 'error', 'output_chars': 0})
-            trace('memory_recall_failed', dataset=self.dataset, error_type=type(exc).__name__)
+            trace('memory_recall_failed', dataset=self.dataset, error_type=type(exc).__name__,
+                  error=scrub(str(exc))[:500])
         return ''
 
     def observe(self, call_id: str, name: str, arguments: dict, output: str) -> None:

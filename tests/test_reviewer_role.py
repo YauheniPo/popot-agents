@@ -34,6 +34,14 @@ class ReviewerRoleTests(unittest.TestCase):
         for config in roles.values():
             self.assertTrue(config['description'].strip())
 
+    def test_review_scope_has_stopping_rule_and_explicit_thread_authorization(self):
+        roles = load_roles(ROOT / 'config/roles', load_agents(ROOT / 'config/agents.json'))
+        instructions = roles['code_reviewer']['instructions']
+        self.assertIn('Do not resolve or reopen threads unless the original user explicitly requests it', instructions)
+        self.assertIn('Do not reconsider a rejected candidate without new evidence', instructions)
+        self.assertIn('no new findings is a completed review', instructions)
+        self.assertNotIn('resolve or reopen threads based on verified code', instructions)
+
     def test_description_is_optional_but_validated_when_present(self):
         roles = {'chat': {'agent': 'openrouter', 'instructions': 'Chat.', 'tools': []}}
         with tempfile.TemporaryDirectory() as directory:

@@ -50,13 +50,14 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(target.read_text(), 'keep this file')
 
     def test_root_overlay_allows_tool_uid_to_traverse_before_harness_starts(self):
-        modes = {"/": 0o700, "/workspace": 0o755}
+        modes = {"/": 0o700, "/workspace": 0o755, "/dev/shm": 0o755}
 
         def start_harness():
             # UID 10001 must cross / to execute Python or read its stdlib.
             self.assertEqual(modes["/"], 0o711)
             self.assertEqual(modes["/"] & 0o022, 0)
             self.assertEqual(modes["/workspace"], 0o1777)
+            self.assertEqual(modes["/dev/shm"], 0o1777)
 
         with patch("ax_local.worker.entrypoint.os.makedirs"), \
              patch("ax_local.worker.entrypoint.os.geteuid", return_value=0), \
@@ -87,7 +88,9 @@ class EntrypointTests(unittest.TestCase):
              patch("ax_local.worker.entrypoint.os.chmod") as chmod, \
              patch("ax_local.worker.entrypoint.serve") as serve:
             main()
-        chmod.assert_called_once_with("/workspace", 0o1777)
+        self.assertEqual(chmod.call_count, 2)
+        chmod.assert_any_call("/workspace", 0o1777)
+        chmod.assert_any_call("/dev/shm", 0o1777)
         serve.assert_called_once_with()
 
 

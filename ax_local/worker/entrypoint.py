@@ -55,6 +55,10 @@ def main() -> None:
         # This workspace belongs to one actor; the sticky bit lets UID 10001
         # create files without letting it remove files owned by root.
         os.chmod("/workspace", 0o1777)
+        # AX creates /dev/shm as root:0755. POSIX semaphores used by
+        # multiprocessing/Ansible need the standard sticky writable directory.
+        os.makedirs("/dev/shm", exist_ok=True)
+        os.chmod("/dev/shm", 0o1777)
     prepare_socket(SOCKET_PATH)
     tools = make_tools()
     tools.update(make_project_tools())
