@@ -2,7 +2,42 @@
 name = "popot-agents"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["psycopg[binary]==3.3.6"]
+[dependency-groups]
+build = ["pip==26.2"]
+mcp = ["mcp==2.3.0"]
+worker = [
+    {include-group = "mcp"},
+    "mcp-server-fetch==2026.10.19",
+    "mcp-server-git==2026.10.19",
+]
+orchestrator = ["psycopg[binary]==3.3.6"]
+ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.54.0"]
+ci = [
+    {include-group = "build"},
+    {include-group = "worker"},
+    {include-group = "orchestrator"},
+    {include-group = "ax"},
+    "pytest==9.1.1",
+    "coverage==7.16.2",
+]
 
-[project.optional-dependencies]
-ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.42.0"]
+[tool.pytest.ini_options]
+testpaths = ["tests", "ax_local/tests"]
+addopts = "--import-mode=importlib"
+junit_family = "xunit2"
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["popot_agents", "ax_local", "memory"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+[tool.coverage.xml]
+output = "reports/coverage.xml"
+
+[tool.coverage.html]
+directory = "reports/coverage-html"

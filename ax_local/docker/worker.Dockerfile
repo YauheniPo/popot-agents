@@ -14,11 +14,13 @@ FROM python:3.12-slim
 LABEL com.popot.project="popot-agents"
 RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir mcp==1.30.0 mcp-server-fetch==2026.8.18 mcp-server-git==2026.8.18 a2a-sdk==1.2.2
+WORKDIR /app
+COPY pyproject.toml ./
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir --group build --group worker --group ax
 RUN useradd --create-home --uid 10001 agent && mkdir /workspace
 COPY --from=ax-runner /ax-task-runner /usr/local/bin/ax-task-runner
 COPY --from=ax-runner /src/ax/cmd/ax-task-runner/antigravity_bootstrap.py /usr/local/bin/antigravity_bootstrap.py
-WORKDIR /app
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/
 COPY popot_agents/progress.py /app/popot_agents/
