@@ -25,8 +25,8 @@ RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETA
     && rm /tmp/kubectl.sha256
 WORKDIR /app
 COPY pyproject.toml ./
-RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir --group build --group orchestrator --group ax
+RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
+    && python -m pip install --no-cache-dir --only-binary=:all: --group build --group orchestrator --group ax
 COPY --from=ax-cli /ax /usr/local/bin/ax
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/

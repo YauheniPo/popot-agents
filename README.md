@@ -61,6 +61,12 @@ targeting `main`, excluding Dependabot. This supports the Cloud Free plan; other
 branch pushes run tests only. The scanner imports Python and graph coverage and waits for
 the server's Quality Gate; a failed gate fails the job.
 
+In SonarCloud **Administration > New Code**, set **Number of days** to **30**
+for this project. This server-side setting defines the period evaluated by the
+`Sonar way` gate. Without a new-code definition, the API can return gate status
+`NONE`, which also fails the scanner's gate check. Keep the gate check enabled
+and configure the new-code period before rerunning the analysis.
+
 The SonarCloud project must use CI-based analysis (disable Automatic Analysis if
 enabled), with `main` analyzed before its first PR analysis. Link the project to
 the GitHub repository in SonarCloud for PR decoration. To enforce checks before
@@ -851,7 +857,8 @@ stored in `config/agents.json` or placed in the Docker command arguments.
 Inside Compose the API listens on `0.0.0.0:8000`, while the published host port
 is bound to `127.0.0.1`. The orchestrator has access to the Docker socket,
 which grants it broad control over the host's Docker daemon. Keep the API local
-and allow only trusted callers. Running
+and allow only trusted callers. The Docker orchestrator intentionally runs as
+root to access the socket and host-backed data directories. Running
 `python -m popot_agents.orchestrator.main` directly still listens on
 `127.0.0.1:8000` by default. `API_HOST`, `API_PORT`,
 `AGENT_ENV_FILE`, and `AGENT_PROFILES_FILE` override the listener, env file,

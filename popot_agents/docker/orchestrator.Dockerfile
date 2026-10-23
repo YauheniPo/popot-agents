@@ -4,8 +4,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends docker-cli \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml ./
-RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir --group build --group orchestrator
+RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
+    && python -m pip install --no-cache-dir --only-binary=:all: --group build --group orchestrator
 
 COPY popot_agents/__init__.py popot_agents/tools.py /app/popot_agents/
 COPY popot_agents/runtime_config.py /app/popot_agents/

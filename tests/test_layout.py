@@ -12,11 +12,15 @@ class ProjectLayoutTests(unittest.TestCase):
     def test_docker_compose_keeps_shared_paths_and_existing_project_identity(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
-            env_file = Path(directory) / '.env'
+            project_root = Path(directory).resolve() / 'project'
+            (project_root / 'popot_agents').mkdir(parents=True)
+            compose_file = project_root / 'popot_agents/compose.yaml'
+            shutil.copyfile(root / 'popot_agents/compose.yaml', compose_file)
+            env_file = project_root / '.env'
             env_file.write_text('POPOT_DB_PASSWORD=layout-test\n')
             result = subprocess.run(
                 ['docker', 'compose', '--env-file', str(env_file), '-f',
-                 str(root / 'popot_agents/compose.yaml'), 'config',
+                 str(compose_file), 'config',
                  '--format', 'json', '--no-env-resolution'], cwd=directory,
                 env={key: value for key, value in os.environ.items()
                      if not key.startswith('COMPOSE_')},
@@ -31,14 +35,14 @@ class ProjectLayoutTests(unittest.TestCase):
             'mcp-server': 'docker/mcp.Dockerfile',
         }.items():
             with self.subTest(service=name):
-                self.assertEqual(services[name]['build']['context'], str(root))
+                self.assertEqual(services[name]['build']['context'], str(project_root))
                 self.assertEqual(services[name]['build']['dockerfile'], dockerfile)
                 self.assertTrue((root / dockerfile).is_file())
-                self.assertEqual(services[name]['develop']['watch'][0]['path'], str(root))
+                self.assertEqual(services[name]['develop']['watch'][0]['path'], str(project_root))
         orchestrator = services['orchestrator']
-        self.assertEqual(orchestrator['env_file'][0]['path'], str(root / '.env'))
+        self.assertEqual(orchestrator['env_file'][0]['path'], str(env_file))
         mounts = {item['target']: item['source'] for item in orchestrator['volumes']}
-        self.assertEqual(mounts['/data/legacy-sessions'], str(root / '.sessions'))
+        self.assertEqual(mounts['/data/legacy-sessions'], str(project_root / '.sessions'))
         self.assertFalse((root / 'compose.yaml').exists())
 
     def test_orchestrator_loads_profiles_and_roles_from_config_directory(self):
