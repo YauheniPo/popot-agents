@@ -23,9 +23,11 @@ RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETA
     && printf '%s  %s\n' "$(cat /tmp/kubectl.sha256)" /usr/local/bin/kubectl | sha256sum -c - \
     && chmod +x /usr/local/bin/kubectl \
     && rm /tmp/kubectl.sha256
-RUN pip install --no-cache-dir 'psycopg[binary]==3.3.6' 'a2a-sdk[http-server]==1.2.2' 'uvicorn==0.42.0'
-COPY --from=ax-cli /ax /usr/local/bin/ax
 WORKDIR /app
+COPY pyproject.toml ./
+RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
+    && python -m pip install --no-cache-dir --only-binary=:all: --group build --group orchestrator --group ax
+COPY --from=ax-cli /ax /usr/local/bin/ax
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/
 COPY popot_agents/progress.py /app/popot_agents/

@@ -5,8 +5,8 @@
 !popot_agents/tools.py
 !popot_agents/runtime_config.py
 !popot_agents/role_env.py
-!popot_agents/progress.py
 !popot_agents/skills.py
+!popot_agents/progress.py
 !skills/
 !skills/**
 !popot_agents/worker/
@@ -15,8 +15,6 @@
 !config/runtime.json
 !ax_local/
 !ax_local/__init__.py
-!ax_local/docker/
-!ax_local/docker/versions.env
 !ax_local/worker/
 !ax_local/worker/**
 **/__pycache__/

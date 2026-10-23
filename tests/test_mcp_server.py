@@ -21,10 +21,10 @@ class ImagePackagingTests(unittest.TestCase):
         dockerfile = project / "docker" / "mcp.Dockerfile"
         with tempfile.TemporaryDirectory() as directory:
             image_root = Path(directory)
-            for line in dockerfile.read_text().replace('\\\n', '').splitlines():
-                parts = shlex.split(line)
-                if not parts or parts[0] != "COPY":
+            for line in dockerfile.read_text().splitlines():
+                if not line.startswith('COPY '):
                     continue
+                parts = shlex.split(line)
                 destination = parts[-1]
                 sources = parts[1:-1]
                 for source in sources:
@@ -244,7 +244,7 @@ class GatewayTests(unittest.TestCase):
         self.assertFalse(server.transport_settings["json_response"])
         self.assertTrue(server.transport_settings["transport_security"]["enable_dns_rebinding_protection"])
         from popot_agents.mcp_server import MCPHTTPLoggingMiddleware
-        logged_app = server.streamable_http_app()
+        logged_app = server.streamable_http_app(stateless_http=True, json_response=False)
         self.assertIsInstance(logged_app, MCPHTTPLoggingMiddleware)
         self.assertEqual(logged_app.app, "upstream-asgi-app")
 
