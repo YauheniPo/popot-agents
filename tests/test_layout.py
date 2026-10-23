@@ -21,7 +21,7 @@ class ProjectLayoutTests(unittest.TestCase):
             result = subprocess.run(
                 ['docker', 'compose', '--env-file', str(env_file), '-f',
                  str(compose_file), 'config',
-                 '--format', 'json', '--no-env-resolution'], cwd=directory,
+                 '--format', 'json'], cwd=directory,
                 env={key: value for key, value in os.environ.items()
                      if not key.startswith('COMPOSE_')},
                 text=True, capture_output=True)
@@ -40,7 +40,7 @@ class ProjectLayoutTests(unittest.TestCase):
                 self.assertTrue((root / dockerfile).is_file())
                 self.assertEqual(services[name]['develop']['watch'][0]['path'], str(project_root))
         orchestrator = services['orchestrator']
-        self.assertEqual(orchestrator['env_file'][0]['path'], str(env_file))
+        self.assertEqual(orchestrator['environment']['POPOT_DB_PASSWORD'], 'layout-test')
         mounts = {item['target']: item['source'] for item in orchestrator['volumes']}
         self.assertEqual(mounts['/data/legacy-sessions'], str(project_root / '.sessions'))
         self.assertFalse((root / 'compose.yaml').exists())
