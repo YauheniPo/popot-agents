@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,7 +71,9 @@ TOOL_SCHEMAS.update({
     "write_file": _tool("write_file", "Write a UTF-8 file inside the workspace, creating parent directories.",
                         {"path": {"type": "string"}, "content": {"type": "string"}},
                         ["path", "content"]),
-    "git_clone": _tool("git_clone", "Clone a public HTTPS Git repository into the workspace.",
+    "git_clone": _tool("git_clone", "Clone a public HTTPS Git repository into the workspace. "
+                       "For a PR or a pinned revision, pass its commit_sha to fetch, check out "
+                       "and verify that commit before reading source or running tests.",
                        {"url": {"type": "string"}, "directory": {
                            "type": "string", "minLength": 1, "maxLength": 80,
                            "pattern": "^" + CLONE_DIRECTORY_PATTERN + "$",
@@ -78,7 +81,9 @@ TOOL_SCHEMAS.update({
                                           "Use only letters, digits, dots, underscores and hyphens; "
                                           "start with a letter or digit. No absolute paths, slashes "
                                           "or existing folders.",
-                       }},
+                       }, "commit_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$",
+                           "description": "Full commit SHA from repository/PR metadata, not a file blob SHA. "
+                                          "On failure, do not use the checkout as reviewed source."}},
                        ["url", "directory"]),
     "download_file": _tool("download_file", "Download a public HTTP(S) file into the workspace, within the configured size limit.",
                            {"url": {"type": "string"}, "path": {"type": "string"}},
@@ -130,8 +135,10 @@ def _public_url(value: str, https_only: bool = False) -> str:
 
 
 def _run_command(command: list[str],
-                 timeout: float = RUNTIME["timeouts"]["tool_command_seconds"]) -> str:
-    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
+                 timeout: float = RUNTIME["timeouts"]["tool_command_seconds"],
+                 *, save_output: bool = False) -> str:
+    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace", newline="") as output:
+        timed_out = False
         try:
             options = {"cwd": WORKSPACE_ROOT, "env": safe_tool_env(),
                        "stdout": output, "stderr": subprocess.STDOUT,
@@ -139,22 +146,35 @@ def _run_command(command: list[str],
             if os.geteuid() == 0:
                 options.update(user=10001, group=10001)
             completed = subprocess.run(command, **options)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("command timed out") from exc
+        except subprocess.TimeoutExpired:
+            timed_out = True
         output.seek(0)
         snippet = output.read(MAX_TOOL_OUTPUT + 1)
-    if len(snippet) > MAX_TOOL_OUTPUT:
-        snippet = snippet[:MAX_TOOL_OUTPUT] + "\n[output truncated]"
+        truncated = len(snippet) > MAX_TOOL_OUTPUT
+        snippet = snippet[:MAX_TOOL_OUTPUT]
+        if truncated:
+            snippet += "\n[output truncated]"
+        if save_output:
+            output.seek(0)
+            path = _file_action('save_output', {}, input_file=output).strip()
+            snippet += (f"\nFull output: {path}\nRead with read_tool_output path={path} "
+                        f"offset={MAX_TOOL_OUTPUT if truncated else 0} limit={MAX_TOOL_OUTPUT}.")
+    if timed_out:
+        raise ToolExecutionError(f"command timed out; partial output:\n{snippet}")
     return f"exit_code={completed.returncode}\n{snippet}"
 
 
-def _file_action(action: str, arguments: dict, timeout_seconds: float | None = None) -> str:
-    options = {"input": json.dumps(arguments, ensure_ascii=False), "text": True,
-               "capture_output": True,
+def _file_action(action: str, arguments: dict, timeout_seconds: float | None = None,
+                 *, input_file=None) -> str:
+    options = {"capture_output": True,
                "timeout": min(RUNTIME["timeouts"]["file_action_seconds"], timeout_seconds)
                if timeout_seconds is not None else RUNTIME["timeouts"]["file_action_seconds"],
                "check": False,
                "env": safe_tool_env() | {"TOOL_WORKSPACE_ROOT": str(WORKSPACE_ROOT)}}
+    if input_file is None:
+        options['input'] = json.dumps(arguments, ensure_ascii=False).encode('utf-8')
+    else:
+        options['stdin'] = input_file
     if os.geteuid() == 0:
         options.update(user=10001, group=10001)
     completed = subprocess.run(
@@ -163,7 +183,7 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
     if completed.returncode != 0:
         raise ToolExecutionError(f"{action} failed with exit code {completed.returncode}; "
                                  "check the path, file permissions and workspace state before retrying")
-    return completed.stdout
+    return completed.stdout.decode('utf-8')
 
 
 def preserve_tool_output(output: str) -> str:
@@ -202,7 +222,8 @@ def execute_tool(name: str, arguments: dict, allowed: list[str],
             raise ToolInputError("bash requires a command up to 4000 characters")
         timeout = RUNTIME["timeouts"]["tool_command_seconds"]
         return _run_command(["bash", "--noprofile", "--norc", "-c", arguments["command"]],
-                            timeout=min(timeout, timeout_seconds) if timeout_seconds is not None else timeout)
+                            timeout=min(timeout, timeout_seconds) if timeout_seconds is not None else timeout,
+                            save_output=True)
     if name in {"read_file", "read_tool_output"}:
         if name == 'read_tool_output' and (not isinstance(arguments.get('path'), str)
                 or not re.fullmatch(r'\.tool-results/[a-f0-9]{32}\.txt', arguments['path'])):
@@ -226,8 +247,13 @@ def execute_tool(name: str, arguments: dict, allowed: list[str],
         workspace_path(arguments["path"])
         return _file_action("write", arguments, timeout_seconds)
     if name == "git_clone":
-        if set(arguments) != {"url", "directory"}:
-            raise ToolInputError("git_clone requires url and directory")
+        if not {'url', 'directory'} <= set(arguments) or set(arguments) - {'url', 'directory', 'commit_sha'}:
+            raise ToolInputError("git_clone requires url, directory and optional commit_sha")
+        commit = arguments.get('commit_sha')
+        if 'commit_sha' in arguments:
+            if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', commit):
+                raise ToolInputError('commit_sha must be a full 40-character hexadecimal commit SHA')
+            commit = commit.lower()
         url = _public_url(arguments["url"], https_only=True)
         directory = arguments["directory"]
         if not isinstance(directory, str) or not re.fullmatch(CLONE_DIRECTORY_PATTERN, directory):
@@ -239,13 +265,31 @@ def execute_tool(name: str, arguments: dict, allowed: list[str],
         if destination.exists():
             raise ToolInputError("clone destination already exists; use the existing checkout "
                                  "or choose a different directory name")
-        result = _run_command(["git", "clone", "--depth", "1", "--", url, str(destination)],
-                              timeout=min(RUNTIME["timeouts"]["git_clone_seconds"], timeout_seconds)
-                              if timeout_seconds is not None else RUNTIME["timeouts"]["git_clone_seconds"])
-        if not result.startswith("exit_code=0\n"):
-            raise ToolExecutionError("git_clone failed; check repository access and inspect the "
-                                     "destination for a partial checkout before retrying")
-        return f"cloned to {destination}\n{result}"
+        budget = RUNTIME["timeouts"]["git_clone_seconds"]
+        deadline = time.monotonic() + (min(budget, timeout_seconds) if timeout_seconds is not None else budget)
+        commands = [["git", "clone", "--depth", "1", *(['--no-checkout'] if commit else []),
+                     "--", url, str(destination)]]
+        if commit:
+            commands.extend([
+                ['git', '-C', str(destination), 'fetch', '--depth', '1', 'origin', commit],
+                ['git', '-C', str(destination), 'checkout', '--detach', commit],
+                ['git', '-C', str(destination), 'rev-parse', 'HEAD'],
+            ])
+        for command in commands:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ToolExecutionError('git_clone timed out; checkout is unverified')
+            try:
+                result = _run_command(command, timeout=remaining)
+            except RuntimeError as exc:
+                raise ToolExecutionError('git_clone failed; checkout is unverified: ' + str(exc)) from exc
+            if not result.startswith('exit_code=0\n'):
+                raise ToolExecutionError('git_clone failed during ' + command[1 if command[1] != '-C' else 3]
+                                         + '; checkout is unverified. Inspect the destination before retrying.\n'
+                                         + result)
+        if commit and result.split('\n', 1)[1].strip() != commit:
+            raise ToolExecutionError('git_clone HEAD does not match commit_sha; checkout is unverified')
+        return f"cloned to {destination}\n" + (f'verified_commit={commit}\n' if commit else '') + result
     if name == "download_file":
         if set(arguments) != {"url", "path"}:
             raise ToolInputError("download_file requires url and path")

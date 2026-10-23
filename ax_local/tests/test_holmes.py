@@ -16,6 +16,13 @@ TEST_MODEL = 'selected-free-combo'
 
 
 class HolmesTests(unittest.TestCase):
+    def test_prompt_templates_are_delivered_with_job_settings(self):
+        from popot_agents.prompts import render_prompt
+        data = next(o for o in manifests(CONFIG) if o['kind'] == 'ConfigMap')['data']
+        prompts = json.loads(data['settings.json'])['prompts']
+        self.assertEqual(prompts['diagnosis'], render_prompt('holmes/diagnosis'))
+        self.assertEqual(prompts['final_report'], render_prompt('holmes/final_report'))
+
     def test_job_and_runner_config_follow_service_settings(self):
         root=Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as directory:

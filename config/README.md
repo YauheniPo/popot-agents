@@ -11,6 +11,7 @@
 | [omniroute/settings.json](omniroute/settings.json) | Настройки шлюза, провайдеры, cooldown/circuit breaker и разрешения ключа AX |
 | [agents.json](agents.json) | Профили провайдеров, endpoint, имя переменной модели, параметры запросов |
 | [roles/](roles/) | Роли, инструкции, инструменты, память, делегирование, Harness² и бюджеты выполнения |
+| [prompts/](prompts/) | Markdown-шаблоны общих инструкций: делегирование, ревью, отчёт, память, Harness2, skills и Holmes |
 | [runtime.json](runtime.json) | Общие таймауты, ограничения сообщений/инструментов, память и разрешённые имена env |
 | [../ax_local/config.json](../ax_local/config.json) | Контекст kind, namespace/workers, ресурсы AX Task, прокси и backend сессий |
 | [../pyproject.toml](../pyproject.toml) | Версии образов и зависимостей, включая OmniRoute, Cognee, Holmes, Grafana и kube-state-metrics |

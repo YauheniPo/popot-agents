@@ -156,7 +156,7 @@ class BackendRoleTests(unittest.TestCase):
                 with patch("popot_agents.tools.os.geteuid", return_value=0):
                     with patch("popot_agents.tools.subprocess.run") as run:
                         run.return_value.returncode = 0
-                        run.return_value.stdout = "wrote code.py\n"
+                        run.return_value.stdout = b"wrote code.py\n"
                         execute_tool("write_file", {"path": "code.py", "content": "x"},
                                      ["write_file"])
                 self.assertEqual(run.call_args.kwargs["user"], 10001)

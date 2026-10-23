@@ -7,6 +7,7 @@
 !popot_agents/role_env.py
 !popot_agents/progress.py
 !popot_agents/skills.py
+!popot_agents/prompts.py
 !skills/
 !skills/**
 !popot_agents/orchestrator/

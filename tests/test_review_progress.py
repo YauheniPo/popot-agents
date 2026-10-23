@@ -21,6 +21,16 @@ class ReviewProgressTests(unittest.TestCase):
     result = staticmethod(helpers.AgentReliabilityTests.result)
     role = {'name': 'code_reviewer', 'tools': ['calculate']}
 
+    def test_review_requests_include_evidence_and_rerun_policy(self):
+        _, _, bodies = self.run_sequence([
+            {'tool_calls': [checkpoint(['Compare test_parser failure against base'])]},
+            self.result()], role=self.role)
+        content = '\n'.join(m['content'] for m in bodies[0]['messages'] if isinstance(m.get('content'), str))
+        for rule in ('test IDs and failure causes', 'same failure counts',
+                     'saved output', 'changed source, environment or invocation',
+                     'required check or an unresolved risk'):
+            self.assertIn(rule, content)
+
     def test_checkpoint_deltas_preserve_coverage_and_decision_history(self):
         from popot_agents.worker.review_progress import ReviewProgress
         progress = ReviewProgress()
@@ -54,6 +64,11 @@ class ReviewProgressTests(unittest.TestCase):
         self.assertNotIn('tools', bodies[-1])
         self.assertEqual(state['review_progress']['covered_files'], ['app.py'])
         self.assertEqual(state['outcome']['status'], 'completed')
+
+    def test_final_summary_keeps_failure_comparison_rule(self):
+        _, _, bodies = self.run_sequence([
+            {'tool_calls': [checkpoint()]}, self.result()], role=self.role)
+        self.assertIn('test IDs and failure causes', bodies[-1]['messages'][0]['content'])
 
     def test_checkpoint_final_partial_does_not_claim_budget_exhaustion(self):
         answer, state, _ = self.run_sequence([

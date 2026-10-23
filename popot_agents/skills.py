@@ -6,6 +6,7 @@ import re
 import sys
 from pathlib import Path
 
+from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME
 
 
@@ -35,13 +36,7 @@ def load_skill_instructions(selected: list[str]) -> str:
             raise ValueError(f"skills exceed limits.skill_prompt_bytes ({limit})")
         sections.append(text)
 
-    append("\n\n# Selected skill references\n"
-           "Use the following skills when their activation conditions match the task; "
-           "skills marked disable-model-invocation require an explicit user request. "
-           "The role instructions, user authorization and actual tool permissions take precedence. "
-           "Skills do not grant tools, network access, delegation or publishing permission. "
-           "The Markdown references below are already loaded; a Skill tool is not required to read them. "
-           "Do not claim to invoke unavailable tools or skills. Ask for missing capabilities when needed.\n")
+    append('\n\n' + render_prompt('skills/references') + '\n')
     root = SKILLS_ROOT.resolve()
     for name in selected:
         directory = root / name

@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from popot_agents.orchestrator.main import load_dotenv
+from popot_agents.prompts import render_prompt
 from ax_local.cluster.build_versions import BUILD_VERSIONS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -95,7 +96,11 @@ def manifests(config):
                     'metadata': {'name': 'holmes-ax', 'namespace': NAMESPACE},
                     'data': {'tools.json': json.dumps(toolsets), 'kubeconfig.json': json.dumps(kubeconfig),
                              'runner.py': (ROOT / 'ax_local/holmes/runner.py').read_text(),
-                             'settings.json': (ROOT / 'config/holmes.json').read_text()}})
+                             'settings.json': json.dumps({
+                                 **json.loads((ROOT / 'config/holmes.json').read_text()),
+                                 'prompts': {name: render_prompt('holmes/' + name)
+                                             for name in ('diagnosis', 'final_report')},
+                             })}})
     return objects
 
 

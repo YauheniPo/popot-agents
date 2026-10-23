@@ -7,12 +7,15 @@
 !popot_agents/role_env.py
 !popot_agents/progress.py
 !popot_agents/skills.py
+!popot_agents/prompts.py
 !skills/
 !skills/**
 !popot_agents/worker/
 !popot_agents/worker/**
 !config/
 !config/runtime.json
+!config/prompts/
+!config/prompts/**
 !ax_local/
 !ax_local/__init__.py
 !ax_local/cluster/
