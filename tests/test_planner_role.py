@@ -6,7 +6,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 from ax_local.api.delegation import A2AError, DelegationService, start_a2a_server
-from popot_agents.runtime_config import AX_CONFIG
+from ax_local.config import AX_CONFIG
 from ax_local.worker.delegation import make_tools
 from ax_local.tests import test_delegation as delegation_tests
 from popot_agents.orchestrator.main import create_server, load_agents, load_roles

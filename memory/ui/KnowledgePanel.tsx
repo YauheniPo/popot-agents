@@ -24,6 +24,10 @@ export default function KnowledgePanel({ records }: { records: KnowledgeRecord[]
                 Source: {sourceUrl ? <a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="text-[#43D9E8] underline">{record.sourceUri}</a> : <span>{record.sourceUri}</span>}
               </div>}
               <pre className="mt-2 whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">{record.text ? readableText(record.text) : 'Text is unavailable in the loaded graph.'}</pre>
+              {Object.keys(record.provenance).length > 0 && <details className="mt-2 text-xs text-[#7E8CA6]">
+                <summary className="cursor-pointer">Evidence and record metadata</summary>
+                <pre className="mt-1 whitespace-pre-wrap break-words">{JSON.stringify(record.provenance, null, 2)}</pre>
+              </details>}
               {record.summaries.length > 0 && <details className="mt-2 text-xs text-[#7E8CA6]">
                 <summary className="cursor-pointer">Extracted summaries · {record.summaries.length}</summary>
                 <p className="mt-1">Automatically extracted; verify against the source excerpt above.</p>

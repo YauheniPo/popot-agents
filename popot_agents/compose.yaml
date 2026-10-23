@@ -1,3 +1,5 @@
+name: popot-agents
+
 services:
   db:
     image: postgres:17
@@ -17,15 +19,15 @@ services:
   worker-image:
     image: popot-agent-worker:local
     build:
-      context: .
-      dockerfile: docker/worker.Dockerfile
+      context: ..
+      dockerfile: popot_agents/docker/worker.Dockerfile
     command: ["true"]
     develop:
       watch:
         - action: rebuild
-          path: .
+          path: ..
           include:
-            - docker/worker.Dockerfile
+            - popot_agents/docker/worker.Dockerfile
             - .dockerignore
             - popot_agents/__init__.py
             - popot_agents/runtime_config.py
@@ -39,14 +41,14 @@ services:
   orchestrator:
     image: popot-orchestrator:local
     build:
-      context: .
-      dockerfile: docker/orchestrator.Dockerfile
+      context: ..
+      dockerfile: popot_agents/docker/orchestrator.Dockerfile
     depends_on:
       db:
         condition: service_healthy
       worker-image:
         condition: service_completed_successfully
-    env_file: .env
+    env_file: ../.env
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 8000
@@ -64,7 +66,7 @@ services:
       - "127.0.0.1:${API_PUBLISH_PORT:-8000}:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./.sessions:/data/legacy-sessions:ro
+      - ../.sessions:/data/legacy-sessions:ro
       - ${HOME:?HOME is required}/.popot-agents/workspaces:/data/workspaces
       - ${HOME:?HOME is required}/.popot-agents/worker-logs:/data/worker-logs
     healthcheck:
@@ -76,9 +78,10 @@ services:
     develop:
       watch:
         - action: rebuild
-          path: .
+          path: ..
           include:
-            - docker/orchestrator.Dockerfile
+            - popot_agents/docker/orchestrator.Dockerfile
+            - popot_agents/config.json
             - .dockerignore
             - popot_agents/__init__.py
             - popot_agents/runtime_config.py
@@ -92,7 +95,7 @@ services:
   mcp-server:
     image: popot-mcp:local
     build:
-      context: .
+      context: ..
       dockerfile: docker/mcp.Dockerfile
     depends_on:
       orchestrator:
@@ -107,7 +110,7 @@ services:
     develop:
       watch:
         - action: rebuild
-          path: .
+          path: ..
           include:
             - docker/mcp.Dockerfile
             - .dockerignore

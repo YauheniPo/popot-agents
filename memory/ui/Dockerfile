@@ -10,10 +10,10 @@ RUN apk add --no-cache libc6-compat python3
 COPY --from=source /source/cognee-frontend/package*.json ./
 RUN npm ci
 COPY --from=source /source/cognee-frontend/ ./
-COPY linkedKnowledge.ts KnowledgePanel.tsx apply-overlay.py /overlay/
+COPY linkedKnowledge.ts KnowledgePanel.tsx knowledgeLabels.ts apply-overlay.py /overlay/
 RUN python3 /overlay/apply-overlay.py /app
 ENV NEXT_PUBLIC_IS_CLOUD_ENVIRONMENT=false NEXT_TELEMETRY_DISABLED=1
-RUN npx eslint src/modules/business/linkedKnowledge.ts src/modules/business/KnowledgePanel.tsx src/modules/business/panels/NodePanel.tsx 'src/app/(app)/business/BusinessView.tsx'
+RUN npx eslint src/modules/business/linkedKnowledge.ts src/modules/business/KnowledgePanel.tsx src/modules/business/knowledgeLabels.ts src/modules/business/layers/contentLayer.ts src/modules/business/panels/NodePanel.tsx 'src/app/(app)/business/BusinessView.tsx'
 RUN npm run build
 
 FROM cognee/cognee-ui:main-b32d8af AS runner

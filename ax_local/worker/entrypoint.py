@@ -1,10 +1,30 @@
 """Prepare AX's durable workspace for the unprivileged tool user, then serve chat."""
 
 import os
+import socket
+import stat
 
-from popot_agents.worker.session_worker import serve
+from popot_agents.worker.session_worker import SOCKET_PATH, serve
 from .delegation import make_tools
 from .process_metrics import ProcessMetrics
+
+
+def prepare_socket(path: str) -> None:
+    """Discard a dead listener left in a DATA snapshot, preserving other files."""
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(mode):
+        raise RuntimeError('AX chat socket path is not a socket')
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1)
+        try:
+            probe.connect(path)
+        except ConnectionRefusedError:
+            os.unlink(path)
+        else:
+            raise RuntimeError('AX chat socket is already in use')
 
 
 def main() -> None:
@@ -20,6 +40,7 @@ def main() -> None:
         # This workspace belongs to one actor; the sticky bit lets UID 10001
         # create files without letting it remove files owned by root.
         os.chmod("/workspace", 0o1777)
+    prepare_socket(SOCKET_PATH)
     tools = make_tools()
     with ProcessMetrics.from_env():
         if tools:

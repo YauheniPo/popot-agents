@@ -28,7 +28,7 @@ BEGIN, END = '  # popot-resources begin', '  # popot-resources end'
 
 
 def local_context(config: dict) -> str:
-    context = config['ax']['context']
+    context = config['context']
     if not context.startswith('kind-'):
         raise ValueError('resource monitoring only supports the local kind cluster')
     return context
@@ -68,7 +68,7 @@ def extend_prometheus_config(original: str, node: str = 'popot-ax-control-plane'
 
 class Cluster:
     def __init__(self):
-        config = json.loads((ROOT / 'config/runtime.json').read_text())
+        config = json.loads((ROOT / 'ax_local/config.json').read_text())
         self.context = local_context(config)
         self.command = ['kubectl', f'--kubeconfig={LOCAL / "kubeconfig"}',
                         f'--context={self.context}', '--request-timeout=30s']

@@ -199,6 +199,80 @@ class DelegationRoutingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
                 run_http('Проверь тесты.', self.role, extra_tools=self.tools)
 
+    def test_success_of_another_subtask_cannot_clear_failure_for_the_same_role(self):
+        replies = [
+            {'tool_calls': [{'id': 'check-api', 'type': 'function', 'function': {
+                'name': 'delegate_task', 'arguments': json.dumps({
+                    'role': 'qa_engineer', 'task': 'Check API tests'})}}]},
+            {'tool_calls': [{'id': 'check-ui', 'type': 'function', 'function': {
+                'name': 'delegate_task', 'arguments': json.dumps({
+                    'role': 'qa_engineer', 'task': 'Check UI tests'})}}]},
+            {'content': 'All requested checks succeeded'},
+        ]
+        self.delegate.side_effect = [
+            json.dumps({'role': 'qa_engineer', 'sessionId': '1111111111111111',
+                        'state': 'TASK_STATE_FAILED', 'isError': True, 'error': 'API unavailable'}),
+            json.dumps({'role': 'qa_engineer', 'sessionId': '2222222222222222',
+                        'state': 'TASK_STATE_COMPLETED', 'answer': 'UI verified'}),
+        ]
+        def reply(*_args, **_kwargs):
+            return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1',
+                                     'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply), \
+             redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer.*1111111111111111'):
+                run_http('Check API and UI tests.', self.role, extra_tools=self.tools)
+        self.assertEqual(self.delegate.call_count, 2)
+
+    def _delegation_sequence(self, tasks, outcomes, *, batch=False, forced_final=False):
+        calls = [{'id': 'reused-id' if batch else f'call-{index}', 'type': 'function',
+                  'function': {'name': 'delegate_task', 'arguments': json.dumps({
+                      'role': 'qa_engineer', 'task': task})}} for index, task in enumerate(tasks)]
+        replies = ([{'tool_calls': calls}] if batch else [{'tool_calls': [call]} for call in calls])
+        replies.append({'content': 'All requested checks succeeded'})
+        now = [0.0]
+        def delegate(*_args, **_kwargs):
+            outcome = outcomes.pop(0)
+            if forced_final and not outcomes:
+                now[0] = 59.0
+            if isinstance(outcome, Exception):
+                raise outcome
+            return json.dumps({'role': 'qa_engineer', 'sessionId': '1111111111111111',
+                               'state': 'TASK_STATE_COMPLETED' if outcome else 'TASK_STATE_FAILED',
+                               'answer': 'Verified', 'isError': not outcome})
+        self.delegate.side_effect = delegate
+        def reply(*_args, **_kwargs):
+            return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake',
+                                     'HARNESS_TURN_TIMEOUT_SECONDS': '60'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             redirect_stderr(io.StringIO()):
+            return run_http('Check API and UI tests.', self.role, extra_tools=self.tools)
+
+    def test_successful_retry_resolves_only_the_identical_subtask(self):
+        self.assertEqual(self._delegation_sequence(['Check API', 'Check API'], [False, True]),
+                         'All requested checks succeeded')
+        with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
+            self._delegation_sequence(['Check API', 'Check UI', 'Check API'], [False, False, True])
+
+    def test_same_batch_and_reused_call_id_do_not_merge_distinct_subtasks(self):
+        with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
+            self._delegation_sequence(['Check API', 'Check UI'], [False, True], batch=True)
+
+    def test_recoverable_delegation_exception_cannot_be_hidden_by_another_subtask(self):
+        from popot_agents.tools import ToolExecutionError
+        with self.assertRaisesRegex(RuntimeError, 'delegation.*qa_engineer'):
+            self._delegation_sequence(['Check API', 'Check UI'], [ToolExecutionError('failed'), True])
+
+    def test_forced_partial_answer_preserves_failed_subtask_and_rejects_success_claim(self):
+        answer = self._delegation_sequence(['Check API', 'Check UI'], [False, True], forced_final=True)
+        self.assertIn('Частичный результат', answer)
+        self.assertIn('qa_engineer', answer)
+        self.assertIn('1111111111111111', answer)
+        self.assertNotIn('All requested checks succeeded', answer)
+
     def test_large_user_context_is_rejected_before_child_execution(self):
         from popot_agents.runtime_config import RUNTIME
         history = [{'role': 'user', 'content': 'Review ' + PR + '\n' +

@@ -2,6 +2,8 @@ import json
 import asyncio
 import threading
 import unittest
+from email.parser import BytesParser
+from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
@@ -93,6 +95,33 @@ class CogneeMemoryTests(unittest.TestCase):
             names.append(re.search(rb'filename="([^"]+)"', self.calls[-1][2]).group(1))
         self.assertNotEqual(names[0], names[1])
         self.assertEqual(names[0], names[2])
+
+    def test_record_metadata_is_not_indexed_as_knowledge(self):
+        record = {'project': 'project-a', 'recorded_at': '2026-10-10T11:45:06+00:00',
+                  'agent_model': 'openrouter/free', 'references': ['https://github.com/a/b/pull/70'],
+                  'trust': 'historical; verify', 'memories': [
+                      {'kind': 'decision', 'text': 'PR #70 uses a 60-second retry for HTTP 429.',
+                       'source': 'call-private-id', 'evidence_quote': 'RETRY_SECONDS = 60'}]}
+        self.memory.remember(json.dumps(record), 'project-a')
+        _, headers, body = self.calls[-1]
+        message = BytesParser(policy=default).parsebytes(
+            ('Content-Type: ' + headers['Content-Type'] + '\r\n\r\n').encode() + body)
+        parts = {p.get_param('name', header='content-disposition'): p.get_payload(decode=True).decode()
+                 for p in message.iter_parts()}
+        self.assertIn('60-second retry for HTTP 429', parts['data'])
+        for value in ('2026-10-10', 'openrouter/free', 'call-private-id', 'evidence_quote'):
+            self.assertNotIn(value, parts['data'])
+        metadata = json.loads(parts['external_metadata'])[0]['popot_memory']
+        self.assertEqual(metadata['record'], record)
+        self.assertEqual(metadata['version'], 2)
+        self.assertEqual(json.loads(parts['labels']), [metadata['title']])
+
+    def test_malformed_record_fails_without_silently_losing_entries(self):
+        for items in ([], [{'kind': 'fact', 'text': ''}],
+                      [{'kind': 'fact', 'text': 'Valid'}, {'text': 7}]):
+            with self.subTest(items=items), self.assertRaises(ValueError):
+                self.memory.remember(json.dumps({'project': 'project-a', 'memories': items}), 'project-a')
+        self.assertEqual(self.calls, [])
 
     def test_recall_only_searches_requested_project_without_llm_completion(self):
         self.assertEqual(self.memory.recall('database decision', 'project-a'),

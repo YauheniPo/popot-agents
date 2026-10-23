@@ -5,7 +5,7 @@ from contextlib import redirect_stderr
 from urllib.error import URLError
 from unittest.mock import Mock, patch
 
-from popot_agents.runtime_config import AX_CONFIG
+from ax_local.config import AX_CONFIG
 from ax_local.api.provider_proxy import dispatch_request, make_upstream_request, resolve_provider, start_proxy
 from popot_agents.runtime_config import RUNTIME
 

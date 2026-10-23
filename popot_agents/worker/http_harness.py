@@ -203,6 +203,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
     def partial_answer(answer=''):
         memory.run_complete = False
+        if failed_delegations:
+            answer = 'Незавершённые подзадачи:\n' + '\n'.join(failed_delegations.values())
         return ('Частичный результат: лимит времени на работу исчерпан. '
                 'Полнота проверки не подтверждена. Выполненные внешние действия '
                 'могли сохраниться; перед повтором проверьте их результаты.'
@@ -266,6 +268,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             for tool_call in calls:
                 remaining_seconds()
                 name = None
+                delegation_key = None
                 tool_started_at = time.monotonic()
                 try:
                     function = tool_call["function"]
@@ -292,18 +295,15 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 raise ToolInputError('delegate_task requires an available specialist role')
                             if not isinstance(arguments.get('task'), str) or not arguments['task'].strip():
                                 raise ToolInputError('delegate_task requires a nonempty task')
+                            # Only a successful retry of the same role AND task
+                            # can resolve its failure. Another job for that role
+                            # (even with a reused model call ID) proves nothing.
+                            delegation_key = (arguments['role'], arguments['task'].strip())
                             arguments = {**arguments, 'task': handoff_task(
                                 arguments['task'], user_context, role_config)}
                         output = extra_tools[name]["call"](
                             arguments, timeout_seconds=work_seconds(),
                             call_id=turn_id + ":" + tool_call["id"])
-                        if name == 'delegate_task':
-                            try:
-                                completed_answer(output, arguments['role'])
-                            except RuntimeError as exc:
-                                failed_delegations[arguments['role']] = str(exc)
-                            else:
-                                failed_delegations.pop(arguments['role'], None)
                     elif name in mcp_tools:
                         selected = mcp_tools[name]
                         if selected['server'] == 'cognee':
@@ -341,6 +341,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     _trace("tool_error", round=round_number, name=name,
                            error_type=type(exc).__name__)
                     raise
+                if delegation_key is not None:
+                    try:
+                        completed_answer(output, delegation_key[0])
+                    except RuntimeError as exc:
+                        failed_delegations[delegation_key] = str(exc)
+                    else:
+                        failed_delegations.pop(delegation_key, None)
                 result_fields = ({"output": output} if name in {"calculate", "utc_time"}
                                  else {"output_chars": len(output)})
                 _trace("tool_result", round=round_number, name=name, call_id=call_id,
@@ -354,7 +361,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             return partial_answer()
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError("model endpoint returned an empty answer")
-        if failed_delegations and not forced_final:
+        if failed_delegations:
+            if forced_final:
+                return partial_answer()
             raise RuntimeError('; '.join(failed_delegations.values()))
         _trace("assistant_answer", round=round_number, content=answer.strip())
         remaining_seconds()

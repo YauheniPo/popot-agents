@@ -15,6 +15,7 @@ services:
       ENABLE_BACKEND_ACCESS_CONTROL: "true"
       REQUIRE_AUTHENTICATION: "true"
       GRAPH_EXTRACTOR: gliner_demo
+      ONTOLOGY_FILE_PATH: /app/popot-sync/project-ontology.ttl
       CACHING: "true"
       CACHE_BACKEND: sqlite
       AUTO_FEEDBACK: "false"
@@ -31,6 +32,7 @@ services:
       - ../popot_agents/runtime_config.py:/app/popot_agents/runtime_config.py:ro
       - ../popot_agents/role_env.py:/app/popot_agents/role_env.py:ro
       - ./session_api.py:/app/popot-sync/session_api.py:ro
+      - ./project-ontology.ttl:/app/popot-sync/project-ontology.ttl:ro
       - ./import_skills.py:/app/popot-sync/import_skills.py:ro
       - ../popot_agents/worker/cognee_memory.py:/app/popot-sync/cognee_memory.py:ro
     healthcheck:

@@ -26,6 +26,59 @@ from popot_agents.progress import emit_progress, observe_progress, scoped_progre
 ACTIVE = {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
 
 
+def _json_bytes(value) -> int:
+    # ASCII escaping is a conservative bound for the SDK's UTF-8 JSON, including
+    # the second layer of escaping around native events stored as strings.
+    return len(json.dumps(value, ensure_ascii=True).encode('ascii'))
+
+
+def _activity_budget() -> int:
+    return min(65536, RUNTIME['limits']['history_bytes'] // 4)
+
+
+def _bounded_progress(entry: dict, limit: int) -> dict | None:
+    original_bytes = _json_bytes(entry)
+    if original_bytes <= limit:
+        return entry
+    message = entry['message']
+    native = json.loads(message)
+    # Keep native event attribution and a raw preview; never synthesize a summary
+    # that could be mistaken for harness output. Truncation is explicit.
+    preview = {'event': native['event'][:128], 'truncated': True,
+               'original_bytes': original_bytes, 'preview': ''}
+    if isinstance(native.get('agent_role'), str):
+        preview['agent_role'] = native['agent_role'][:128]
+
+    def truncated(length):
+        preview['preview'] = message[:length]
+        return {'seq': entry['seq'], 'message': json.dumps(preview, ensure_ascii=False)}
+
+    if _json_bytes(truncated(0)) > limit:
+        return None
+    low, high = 0, min(len(message), limit)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _json_bytes(truncated(middle)) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return truncated(low)
+
+
+def _bounded_activity(activity, budget: int) -> list[dict]:
+    retained, size = [], 2  # JSON list brackets.
+    for entry in reversed(list(activity)[-64:]):
+        entry = _bounded_progress(entry, min(16384, max(0, budget - 2)))
+        if entry is None:
+            continue
+        entry_size = _json_bytes(entry) + (2 if retained else 0)
+        if size + entry_size > budget:
+            break
+        retained.append(entry)
+        size += entry_size
+    return list(reversed(retained))
+
+
 def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
     """Expose known diagnostics without forwarding arbitrary exception text."""
     code, reason = "worker_failed", "delegated AX worker failed; inspect local worker logs"
@@ -371,7 +424,9 @@ class DelegationService:
             if job.canceled.is_set() or job.run.canceled.is_set():
                 return
             job.activity_seq += 1
-            job.activity.append({'seq': job.activity_seq, 'message': message})
+            job.activity = deque(_bounded_activity(
+                [*job.activity, {'seq': job.activity_seq, 'message': message}],
+                _activity_budget()), maxlen=64)
 
     def _execute(self, job: Job):
         # Each child owns its observer; parent clients read only their authorized
@@ -424,8 +479,6 @@ class DelegationService:
         if job:
             with job.lock:
                 activity = list(job.activity)
-        if activity:
-            task['metadata']['activity'] = activity
         if meta.get("error"):
             task["status"]["message"] = {"messageId": saved["sessionId"] + "-error",
                 "role": "ROLE_AGENT", "parts": [{"text": meta["error"]}]}
@@ -434,6 +487,14 @@ class DelegationService:
         if meta["state"] == "TASK_STATE_COMPLETED":
             task["artifacts"] = [{"artifactId": saved["sessionId"] + "-answer", "name": "answer",
                                   "parts": [{"text": meta["answer"]}]}]
+        # Result/status takes precedence, including for old persisted Tasks whose
+        # progress predates these limits. The transport's extra 4096 bytes remain
+        # reserved for the SDK envelope and protobuf metadata number formatting.
+        budget = min(_activity_budget(), max(0,
+            RUNTIME['limits']['history_bytes'] - _json_bytes(task) - 64))
+        activity = _bounded_activity(activity, budget)
+        if activity:
+            task['metadata']['activity'] = activity
         return task
 
     def close(self):

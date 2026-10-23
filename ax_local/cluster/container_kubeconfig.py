@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-CONTEXT = json.loads((Path(__file__).resolve().parents[2] / "config/runtime.json").read_text(encoding="utf-8"))["ax"]["context"]
+CONTEXT = json.loads((Path(__file__).resolve().parents[2] / "ax_local/config.json").read_text(encoding="utf-8"))["context"]
 
 
 def rewrite_for_container(config: dict) -> dict:

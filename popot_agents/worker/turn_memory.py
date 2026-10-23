@@ -142,8 +142,22 @@ class TurnMemory:
             # recall may log in, resolve the dataset, then search (three requests).
             self.client.timeout = min(RUNTIME["timeouts"]["memory_request_seconds"], seconds / 3)
             result = self.client.recall(self.task[:RUNTIME["memory"]["query_chars"]], self.dataset, top_k=RUNTIME["memory"]["recall_top_k"])
-            chunks = [scrub(item['text'])[:RUNTIME["memory"]["chunk_chars"]] for item in result
-                      if isinstance(item, dict) and isinstance(item.get('text'), str)] if isinstance(result, list) else []
+            chunks = []
+            for item in result if isinstance(result, list) else []:
+                if not isinstance(item, dict) or not isinstance(item.get('text'), str):
+                    continue
+                text = item['text']
+                raw = item.get('raw')
+                metadata = raw.get('external_metadata') if isinstance(raw, dict) else None
+                try:
+                    metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+                except ValueError:
+                    metadata = None
+                memory = metadata.get('popot_memory') if isinstance(metadata, dict) else None
+                record = memory.get('record') if isinstance(memory, dict) else None
+                if isinstance(record, dict):
+                    text = json.dumps({'text': text, 'provenance': record}, ensure_ascii=False)
+                chunks.append(scrub(text)[:RUNTIME["memory"]["chunk_chars"]])
             self.tools.append({'name': 'cognee.recall', 'status': 'success', 'output_chars': len(json.dumps(result))})
             trace('memory_recalled', dataset=self.dataset, chunks=len(chunks))
             if chunks:
@@ -217,7 +231,8 @@ class TurnMemory:
             accepted.append({'kind': kind, 'text': clean_text, 'source': source,
                              'evidence_quote': clean_quote})
         if accepted:
-            references = re.findall(r'https://github\.com/[^\s)\]"<>]+', self.task)
+            references = list(dict.fromkeys(ref.rstrip('.,;:!?') for ref in
+                re.findall(r'https://github\.com/[^\s)\]"<>]+', self.task)))
             record = {'project': self.dataset, 'recorded_at': datetime.now(timezone.utc).isoformat(),
                       'agent_model': os.getenv('HARNESS_MODEL', ''), 'references': references,
                       'trust': 'agent-derived historical notes; verify current sources', 'memories': accepted}

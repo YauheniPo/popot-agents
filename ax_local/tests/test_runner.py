@@ -6,13 +6,28 @@ import socket
 import unittest
 from unittest.mock import patch
 
-from popot_agents.runtime_config import AX_CONFIG
+from ax_local.config import AX_CONFIG
 from ax_local.api.ax_runner import AxAgentRunner, AxChat
 from popot_agents.orchestrator.main import AgentRunError
 from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_chunked_restore_uses_one_deadline_and_stops_before_consuming_on_timeout(self):
+        payload = {'action': 'restore', 'messages': ['x' * 100000]}
+        with patch('ax_local.api.ax_runner.time.monotonic', side_effect=[0, 1, 3, 11]), \
+             patch.object(self.runner, '_remote_command', return_value={'status': 'ok'}) as command:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.runner.remote('task', payload, timeout=10)
+        self.assertEqual([c.kwargs['timeout'] for c in command.call_args_list], [9, 7])
+        self.assertFalse(any('--consume' in c.args for c in command.call_args_list))
+
+    def test_oversized_request_is_rejected_before_any_remote_side_effect(self):
+        with patch.object(self.runner, '_remote_command') as command:
+            with self.assertRaisesRegex(AgentRunError, 'too large'):
+                self.runner.remote('task', {'messages': ['я' * RUNTIME['limits']['socket_message_bytes']]})
+        command.assert_not_called()
+
     def test_metrics_role_is_task_identity_and_defaults_to_unassigned(self):
         from ax_local.worker.process_metrics import ProcessMetrics, make_payload
         sample = dict(pid=41, name='python', start_ticks=900, cpu_seconds=2.5,
@@ -135,10 +150,13 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["spec"]["resources"], ax["task_resources"])
         self.assertEqual(manifest["spec"]["debug"], ax["task_debug"])
 
-    def test_task_requests_full_session_snapshots(self):
-        manifest = self.runner.task_manifest('0123456789abcdef')
-        env = {item['name']: item['value'] for item in manifest['spec']['env']}
-        self.assertEqual(env.get('POPOT_SESSION_SNAPSHOT'), 'full')
+    def test_task_uses_configured_snapshot_mode_and_pins_it_for_its_lifetime(self):
+        for mode in ('data', 'full'):
+            with self.subTest(mode=mode), patch.dict(AX_CONFIG, {'snapshot_mode': mode}):
+                runner = AxAgentRunner(image=self.runner.image, model='test', base_url=self.runner.base_url)
+            manifest = runner.task_manifest('0123456789abcdef')
+            env = {item['name']: item['value'] for item in manifest['spec']['env']}
+            self.assertEqual(env.get('POPOT_SESSION_SNAPSHOT'), mode)
 
     def test_requires_local_context_and_digest_image(self):
         with self.assertRaises(ValueError):

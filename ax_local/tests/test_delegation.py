@@ -187,6 +187,82 @@ class DelegationTests(unittest.TestCase):
             self.assertIn('activity', task['metadata'])
             self.assertNotIn('PRIVATE', json.dumps(task))
 
+    def test_large_progress_does_not_hide_completed_child_result_over_a2a(self):
+        from ax_local.worker.delegation import make_tools
+        from popot_agents.runtime_config import RUNTIME
+
+        server = start_a2a_server(self.service, '127.0.0.1', 0)
+        self.addCleanup(server.server_close)
+        env = self.service.worker_environment(self.parent, self.roles['tech_lead'])
+        env['AX_DELEGATION_POLL_SECONDS'] = '0.01'
+        delegate = make_tools(env)['delegate_task']['call']
+        received = []
+
+        def callback(*_):
+            for index in range(60):
+                emit_progress('assistant_reasoning', content='x' * 10000, index=index)
+            emit_progress('assistant_reasoning', content=('🔍\\"\n' * 100000))
+
+        self.runner.callback = callback
+        with self.service.turn(self.parent, 10), observe_progress(received.append):
+            result = json.loads(delegate({'role': 'backend_engineer', 'task': 'inspect'},
+                                         timeout_seconds=8, call_id='large-progress'))
+        self.assertEqual(result.get('state'), 'TASK_STATE_COMPLETED', result)
+        self.assertFalse(result.get('isError'), result)
+        self.assertEqual(result['answer'], 'child result: inspect')
+        self.assertTrue(any(json.loads(item).get('truncated') for item in received))
+        saved = self.store.get(result['sessionId'])
+        activity = saved['roleConfig']['_ax_delegation']['activity']
+        self.assertLessEqual(len(json.dumps(activity).encode()),
+                             min(65536, RUNTIME['limits']['history_bytes'] // 4))
+        self.assertTrue(all(len(json.dumps(item).encode()) <= 16384 for item in activity))
+        self.assertEqual(activity[-1]['seq'], 63)  # Start, 61 harness events, completion.
+        self.assertEqual([item['seq'] for item in activity], sorted({item['seq'] for item in activity}))
+
+    def test_persisted_progress_leaves_room_for_a_large_task_result(self):
+        from google.protobuf.json_format import MessageToDict, ParseDict
+        from a2a.types import a2a_pb2 as types
+        from popot_agents.runtime_config import RUNTIME
+
+        with self.service.turn(self.parent, 5):
+            task_id = self.wait_task(self.send()['id'])['id']
+            wait_for(lambda: not self.service.jobs)
+            saved = self.store.get(task_id)
+            meta = saved['roleConfig']['_ax_delegation']
+            # Simulate a stored Task from before byte limits, including JSON
+            # escaping and Unicode expansion beyond plain text length.
+            meta['activity'] = [{'seq': index, 'message': json.dumps({
+                'event': 'tool_result', 'agent_role': 'qa_engineer',
+                'output': '🧪\\"\n' * 5000}, ensure_ascii=False)} for index in range(1, 65)]
+            meta['answer'] = 'verified ' * 55000
+            self.store.save(task_id, saved['agent'], saved['messages'], saved['role'], saved['roleConfig'])
+            task = self.service.dispatch(self.token, 'backend_engineer', 'GetTask', {'id': task_id})
+            wire = MessageToDict(ParseDict(task, types.Task()))
+            payload = json.dumps({'jsonrpc': '2.0', 'id': 'response-id', 'result': {'task': wire}}).encode()
+            self.assertLessEqual(len(payload), RUNTIME['limits']['history_bytes'] + 4096)
+            self.assertEqual(task['artifacts'][0]['parts'][0]['text'], meta['answer'])
+            # Returned progress is reduced without changing the saved answer.
+            self.assertEqual(self.store.get(task_id)['roleConfig']['_ax_delegation']['answer'], meta['answer'])
+
+    def test_progress_with_unicode_and_escaping_obeys_a_custom_small_byte_budget(self):
+        from ax_local.api.delegation import Job, Run
+        from popot_agents.runtime_config import RUNTIME
+
+        run = Run(time.monotonic() + 5)
+        job = Job('f' * 16, {'_ax_role': 'backend_engineer'}, '', run, run.deadline)
+        with patch.dict(RUNTIME['limits'], {'history_bytes': 8192}):
+            for index in range(10):
+                self.service._record_progress(job, json.dumps({
+                    'event': 'assistant_reasoning', 'agent_role': 'qa_engineer',
+                    'reasoning_details': [{'text': '🧪\\"\n' * 5000}], 'index': index}, ensure_ascii=False))
+        self.assertTrue(job.activity)
+        self.assertLessEqual(len(json.dumps(list(job.activity)).encode()), 2048)
+        self.assertEqual(job.activity[-1]['seq'], 10)
+        event = json.loads(job.activity[-1]['message'])
+        self.assertEqual(event['agent_role'], 'qa_engineer')
+        self.assertTrue(event['truncated'])
+
+
     def test_denies_unavailable_role_even_if_request_claims_other_parent(self):
         with self.service.turn(self.parent, 5), self.assertRaisesRegex(A2AError, "not allowed"):
             self.send(role="qa_engineer")

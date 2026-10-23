@@ -15,13 +15,13 @@ if [[ ! -s "$LOCAL/kubeconfig" || ! -s "$LOCAL/kubeconfig-container" || \
   bash "$ROOT/ax_local/bootstrap.sh"
   python3 "$ROOT/ax_local/cluster/substrate_cleanup.py" --apply
   python3 "$ROOT/ax_local/cluster/router_timeout.py" \
-    "$LOCAL/kubeconfig" "$ROOT/config/runtime.json"
+    "$LOCAL/kubeconfig" "$ROOT/ax_local/config.json"
   python3 "$ROOT/ax_local/cluster/worker_health.py"
   bash "$ROOT/memory/up.sh"
   docker compose --env-file "$ROOT/.env" -f "$ROOT/ax_local/compose.yaml" \
     up --build -d --wait --wait-timeout 300 mcp-server
 else
-  CLUSTER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["ax"]["context"].removeprefix("kind-"))' "$ROOT/config/runtime.json")"
+  CLUSTER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["context"].removeprefix("kind-"))' "$ROOT/ax_local/config.json")"
   for container in kind-registry "${CLUSTER}-control-plane"; do
     if ! docker inspect "$container" >/dev/null 2>&1; then
       echo "Local AX container $container is missing; inspect ax_local/.local before restarting" >&2
@@ -33,7 +33,7 @@ else
   done
   python3 "$ROOT/ax_local/cluster/substrate_cleanup.py" --apply
   python3 "$ROOT/ax_local/cluster/router_timeout.py" \
-    "$LOCAL/kubeconfig" "$ROOT/config/runtime.json"
+    "$LOCAL/kubeconfig" "$ROOT/ax_local/config.json"
   bash "$ROOT/memory/up.sh"
   bash "$ROOT/ax_local/rebuild-worker.sh"
 fi

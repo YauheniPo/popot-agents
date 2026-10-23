@@ -2,7 +2,7 @@
 
 AX v0.3.1 has no Task securityContext. Its Substrate templates start as UID 0
 without SETUID/SETGID; our tool-enabled image needs those two to drop privileges.
-Its default DATA snapshots omit process memory; Popot sessions opt into FULL.
+Popot DATA sessions cold boot with durable files; FULL is an explicit opt-in.
 """
 
 import argparse
@@ -43,7 +43,19 @@ func popotSnapshotScope(image string, env map[string]string) ateapipb.SnapshotCo
 PAUSE = '\t\t\tOnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,'
 COMMIT = '\t\t\tOnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,'
 SNAPSHOT_SCOPE = 'popotSnapshotScope(image, envMap)'
-VERSION = hashlib.sha256((AX_COMMIT + HELPER + SECURITY + SNAPSHOT_HELPER + SNAPSHOT_SCOPE).encode()).hexdigest()
+RESUME_HELPER = '''// popotDataResumeSource avoids restoring a golden process for Popot DATA sessions.
+func popotDataResumeSource(image string, env map[string]string) ateapipb.ResumeSource {
+	if env["POPOT_SESSION_SNAPSHOT"] == "data" && strings.HasPrefix(image, "localhost:5001/popot-agent-ax@sha256:") {
+		return ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT
+	}
+	return ateapipb.ResumeSource_RESUME_SOURCE_GOLDEN
+}
+
+'''
+RESUME = 'FromData: ateapipb.ResumeSource_RESUME_SOURCE_GOLDEN'
+RESUME_PATCHED = 'FromData: popotDataResumeSource(image, envMap)'
+VERSION = hashlib.sha256((AX_COMMIT + HELPER + SECURITY + SNAPSHOT_HELPER + SNAPSHOT_SCOPE
+                          + RESUME_HELPER + RESUME_PATCHED).encode()).hexdigest()
 
 
 def patched_source(source: str) -> str:
@@ -57,12 +69,19 @@ def patched_source(source: str) -> str:
     if "func popotSnapshotScope(" in source:
         if source.count(SNAPSHOT_HELPER) != 1 or source.count(SNAPSHOT_SCOPE) != 2:
             raise ValueError("Local AX snapshot patch has unexpected changes; inspect the checkout")
-        return source
-    if source.count(MARKER) != 1 or source.count(PAUSE) != 1 or source.count(COMMIT) != 1:
-        raise ValueError("Local AX snapshot source differs from the pinned version; inspect the checkout")
-    return (source.replace(MARKER, SNAPSHOT_HELPER + MARKER, 1)
+    else:
+        if source.count(MARKER) != 1 or source.count(PAUSE) != 1 or source.count(COMMIT) != 1:
+            raise ValueError("Local AX snapshot source differs from the pinned version; inspect the checkout")
+        source = (source.replace(MARKER, SNAPSHOT_HELPER + MARKER, 1)
             .replace(PAUSE, PAUSE.replace('ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA', SNAPSHOT_SCOPE), 1)
             .replace(COMMIT, COMMIT.replace('ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA', SNAPSHOT_SCOPE), 1))
+    if 'func popotDataResumeSource(' in source:
+        if source.count(RESUME_HELPER) != 1 or source.count(RESUME_PATCHED) != 1:
+            raise ValueError('Local AX DATA resume patch has unexpected changes; inspect the checkout')
+        return source
+    if source.count(MARKER) != 1 or source.count(RESUME) != 1:
+        raise ValueError('Local AX DATA resume source differs from the pinned version; inspect the checkout')
+    return source.replace(MARKER, RESUME_HELPER + MARKER, 1).replace(RESUME, RESUME_PATCHED, 1)
 
 
 def main() -> None:

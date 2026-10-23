@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from ax_local.api.ax_runner import AxAgentRunner
 from ax_local.api.worker_queue import WorkerQueue
-from popot_agents.runtime_config import AX_CONFIG
+from ax_local.config import AX_CONFIG
 from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
 from tests.test_chat import FakeRunner
 from tests import test_chat as chat_tests
@@ -289,15 +289,12 @@ class AxWorkerCapacityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             server = create_server({'test': runner}, port=0, session_dir=directory)
             try:
-                for _ in range(3):
-                    self.assertTrue(server.task_slots.acquire(blocking=False))
+                self.assertIsNone(server.task_slots)
                 status, result = chat_tests.TaskSessionTests._post_to_handler(
                     server.RequestHandlerClass, server, {'agent': 'test', 'message': 'hello'})
                 self.assertEqual(status, 200, result)
                 self.assertEqual(len(runner.chats), 1)
             finally:
-                for _ in range(3):
-                    server.task_slots.release()
                 server.server_close()
 
     def test_unrelated_sessions_never_share_a_lock_during_queue_wait(self):

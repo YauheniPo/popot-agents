@@ -7,10 +7,12 @@ import re
 import socket
 import sys
 from popot_agents.progress import is_progress_message
+from popot_agents.runtime_config import RUNTIME
 
 RESPONSE_PREFIX = "POPOT_AX_RESPONSE:"
 PROGRESS_PREFIX = "POPOT_AX_PROGRESS:"
-MAX_ENCODED_REQUEST_BYTES = 200000
+MAX_ENCODED_REQUEST_BYTES = 4 * ((RUNTIME['limits']['socket_message_bytes'] + 2) // 3)
+REQUEST_DIRECTORY = '/tmp'
 
 
 def call(encoded: str) -> dict:
@@ -42,7 +44,8 @@ def main(args: list[str]) -> None:
         request_id = args[1]
         if not re.fullmatch(r"[0-9a-f]{32}", request_id):
             raise ValueError("invalid AX request ID")
-        path = f"/workspace/.ax-local-request-{request_id}"
+        # Transport fragments are temporary, not part of the durable workspace.
+        path = os.path.join(REQUEST_DIRECTORY, f'.ax-local-request-{request_id}')
         if args[0] == "--chunk" and len(args) == 3:
             if not re.fullmatch(r"[A-Za-z0-9_=-]{1,48000}", args[2]):
                 raise ValueError("invalid AX request chunk")
@@ -57,7 +60,8 @@ def main(args: list[str]) -> None:
             result = {"status": "ok"}
         elif args[0] == "--consume" and len(args) == 2:
             try:
-                with open(path, encoding="ascii") as file:
+                fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+                with os.fdopen(fd, encoding="ascii") as file:
                     encoded = file.read(MAX_ENCODED_REQUEST_BYTES + 1)
                 if len(encoded) > MAX_ENCODED_REQUEST_BYTES:
                     raise ValueError("AX request is too large")

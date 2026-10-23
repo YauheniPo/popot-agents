@@ -84,7 +84,7 @@ def main():
     root = Path(__file__).resolve().parents[2]
     local = root / 'ax_local/.local'
     checkout = local / 'src/substrate'
-    config = json.loads((root / 'config/runtime.json').read_text())['ax']
+    config = json.loads((root / 'ax_local/config.json').read_text())
     context = config['context']
     if not re.fullmatch(r'kind-[a-z0-9-]+', context):
         raise ValueError('Cleanup fix requires a local kind context')

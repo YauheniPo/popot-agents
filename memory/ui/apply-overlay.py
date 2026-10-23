@@ -6,7 +6,7 @@ from pathlib import Path
 source = Path(sys.argv[1])
 overlay = Path(__file__).parent
 business = source / 'src/modules/business'
-for name in ('linkedKnowledge.ts', 'KnowledgePanel.tsx'):
+for name in ('linkedKnowledge.ts', 'KnowledgePanel.tsx', 'knowledgeLabels.ts'):
     shutil.copyfile(overlay / name, business / name)
 
 
@@ -26,3 +26,9 @@ replace(panel, '      {/* The shortest-path trace', '      <KnowledgePanel recor
 view = source / 'src/app/(app)/business/BusinessView.tsx'
 replace(view, 'const WHAT_IF_SPOTLIGHT_MS', 'import { linkedKnowledge } from "@/modules/business/linkedKnowledge";\n\nconst WHAT_IF_SPOTLIGHT_MS')
 replace(view, '          entity={selection.selectedEntity}', '          entity={selection.selectedEntity}\n          knowledge={linkedKnowledge(selection.selectedEntity.id, scene.layerData[CONTENT_LAYER_ID])}')
+
+layer = business / 'layers/contentLayer.ts'
+replace(layer, 'import { useBrainGraph }', 'import { useMemo } from "react";\nimport { knowledgeLabels } from "../knowledgeLabels";\nimport { useBrainGraph }')
+replace(layer, '    return { data: data ?? null, isLoading, error: error ?? null };',
+        '    const labeled = useMemo(() => data ? knowledgeLabels(data) : null, [data]);\n'
+        '    return { data: labeled, isLoading, error: error ?? null };')

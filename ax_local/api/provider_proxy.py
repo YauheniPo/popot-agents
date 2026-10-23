@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import error, request
 
-from popot_agents.runtime_config import AX_CONFIG, RUNTIME
+from ax_local.config import AX_CONFIG
+from popot_agents.runtime_config import RUNTIME
 
 
 @dataclass(frozen=True)

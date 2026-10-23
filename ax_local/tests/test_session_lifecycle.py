@@ -11,8 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ax_local.api.ax_runner import AxAgentRunner, AxChat
-from popot_agents.runtime_config import AX_CONFIG
+from ax_local.config import AX_CONFIG
 from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
+from popot_agents.orchestrator import main as orchestrator
 from popot_agents.orchestrator.session_store import SessionStore
 from tests.test_chat import FakeChat
 from tests import test_chat as chat_tests
@@ -143,6 +144,23 @@ class SessionLifecycleTests(unittest.TestCase):
             {'role': 'assistant', 'content': 'turn 2'},
         ])
 
+    def test_recoverable_snapshot_failure_keeps_worker_and_never_runs_a_turn(self):
+        _, first = self.post({'agent': 'test_agent', 'message': 'first task'})
+        sid = first['sessionId']
+        original = self.chats[0]
+        with patch.object(original, 'resume', side_effect=orchestrator.AgentResumeError('retry later')), \
+             patch.object(original, 'send', wraps=original.send) as send:
+            status, result = self.post({'sessionId': sid, 'message': 'continue'})
+        self.assertEqual(status, 503, result)
+        self.assertIs(self.server.live[sid].worker, original)
+        self.assertFalse(original.closed)
+        send.assert_not_called()
+        self.assertEqual(len(self.chats), 1)
+        self.assertEqual(len(self.store.get(sid)['messages']), 2)
+        status, result = self.post({'sessionId': sid, 'message': 'continue'})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['answer'], 'turn 2')
+
     def test_ax_history_remains_available_after_default_retention(self):
         _, first = self.post({'agent': 'test_agent', 'message': 'first task'})
         sid = first['sessionId']
@@ -215,6 +233,54 @@ class AxLifecycleTests(unittest.TestCase):
             model='test', base_url='http://localhost:1/v1',
         )
         self.chat = AxChat(self.runner, 'popot-chat-0123456789abcdef', 12)
+        self.runner.snapshot_mode = 'full'
+
+    def test_data_resume_restores_conversation_before_the_next_model_turn(self):
+        self.runner.snapshot_mode = 'data'
+        history = [{'role': 'user', 'content': 'first'},
+                   {'role': 'assistant', 'content': 'answer 1'}]
+        with patch.object(self.runner, 'remote', return_value={'status': 'ok'}):
+            self.chat.restore(history)
+        history[0]['content'] = 'caller changed its copy'
+        self.chat.suspended = True
+        calls = []
+        def remote(task, payload, **kwargs):
+            calls.append(payload)
+            return {'answer': 'answer 2'} if payload['action'] == 'message' else {'status': 'ok'}
+        with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'remote', side_effect=remote):
+            self.assertEqual(self.chat.send('second'), {'answer': 'answer 2'})
+            self.assertEqual([p['action'] for p in calls], ['ping', 'restore', 'message'])
+            self.assertEqual(calls[1]['messages'][0]['content'], 'first')
+            self.chat.suspended = True
+            calls.clear()
+            self.chat.resume()
+        self.assertEqual(calls[1]['messages'], [
+            {'role': 'user', 'content': 'first'}, {'role': 'assistant', 'content': 'answer 1'},
+            {'role': 'user', 'content': 'second'}, {'role': 'assistant', 'content': 'answer 2'},
+        ])
+
+    def test_data_resume_waits_for_a_restarted_chat_socket(self):
+        self.runner.snapshot_mode = 'data'
+        self.chat.suspended = True
+        with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'task_status', return_value=('Running', None)), \
+             patch.object(self.runner, 'remote', side_effect=[
+                 AgentRunError('ConnectionRefusedError'), {'status': 'ok'}, {'status': 'ok'}]) as remote, \
+             patch('ax_local.api.ax_runner.time.sleep') as sleep:
+            self.chat.resume()
+        self.assertFalse(self.chat.closed)
+        self.assertEqual(remote.call_count, 3)
+        sleep.assert_called_once()
+
+    def test_data_resume_does_not_send_next_turn_when_history_restore_fails(self):
+        self.runner.snapshot_mode = 'data'
+        self.chat.suspended = True
+        with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'remote', side_effect=[{'status': 'ok'}, {'error': 'restore failed'}]) as remote:
+            with self.assertRaises(AgentRunError):
+                self.chat.send('must not run')
+        self.assertNotIn('message', [call.args[1]['action'] for call in remote.call_args_list])
 
     def test_suspend_waits_for_confirmed_phase_and_probe_does_not_wake_worker(self):
         with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
@@ -236,27 +302,35 @@ class AxLifecycleTests(unittest.TestCase):
         self.assertEqual(remote.call_args_list[0].args[1], {'action': 'ping'})
         self.assertEqual(remote.call_args_list[1].args[1]['message'], 'continue')
 
-    def test_suspend_failure_keeps_successful_answer_and_closes_worker(self):
+    def test_suspend_failure_keeps_worker_and_answer_and_checks_it_on_next_message(self):
         with patch.object(self.runner, '_run', side_effect=[
                 subprocess.TimeoutExpired(['ax', 'private-value'], 1),
                 subprocess.CompletedProcess([], 0)]) as run, \
              patch('sys.stderr', new_callable=io.StringIO) as log:
             self.chat.after_turn()
-        self.assertTrue(self.chat.closed)
+        self.assertFalse(self.chat.closed)
+        self.assertEqual(self.chat.status, 'snapshot_unconfirmed')
         self.assertIn('AX suspension not confirmed', log.getvalue())
         self.assertNotIn('private-value', log.getvalue())
-        self.assertEqual(run.call_args_list[-1].args[0], 'delete')
+        self.assertEqual(run.call_count, 1)
+        with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)) as run, \
+             patch.object(self.runner, 'remote', return_value={'status': 'ok'}):
+            self.chat.resume()
+        self.assertEqual(run.call_args.args[0], 'resume')
+        self.assertEqual(self.chat.status, 'running')
 
-    def test_failed_resume_never_sends_model_turn_and_allows_history_restore(self):
+    def test_failed_resume_never_sends_model_turn_and_preserves_checkpoint_for_retry(self):
         self.chat.suspended = True
         with patch.object(self.runner, '_run', side_effect=[
                 subprocess.TimeoutExpired(['ax', 'private-value'], 1),
                 subprocess.CompletedProcess([], 0)]), \
              patch.object(self.runner, 'remote') as remote:
-            with self.assertRaisesRegex(Exception, 'restore saved history') as caught:
+            with self.assertRaisesRegex(Exception, 'checkpoint retained') as caught:
                 self.chat.send('continue')
         self.assertNotIn('private-value', str(caught.exception))
-        self.assertTrue(self.chat.closed)
+        self.assertFalse(self.chat.closed)
+        self.assertEqual(self.chat.status, 'resume_failed')
+        self.assertTrue(self.chat.is_alive())  # Listing cannot erase the saved actor.
         remote.assert_not_called()
 
     def test_resumed_task_with_missing_chat_socket_fails_without_full_startup_wait(self):
@@ -268,7 +342,8 @@ class AxLifecycleTests(unittest.TestCase):
              patch('ax_local.api.ax_runner.time.sleep', side_effect=AssertionError('must fail promptly')):
             with self.assertRaises(AgentRunError):
                 self.chat.resume()
-        self.assertTrue(self.chat.closed)
+        self.assertFalse(self.chat.closed)
+        self.assertEqual(self.chat.status, 'resume_failed')
         self.assertEqual(remote.call_count, 1)
 
 

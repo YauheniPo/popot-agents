@@ -104,7 +104,7 @@ def cleanup_docker(root: Path, *, run=subprocess.run) -> None:
 
 def main() -> None:
     root = Path(__file__).resolve().parents[2]
-    config = json.loads((root / 'config/runtime.json').read_text())['ax']
+    config = json.loads((root / 'ax_local/config.json').read_text())
     cleanup_cluster(root / 'ax_local/.local/kubeconfig', config['context'],
                     ['ate-system', 'ax-system', config['atespace']])
     cleanup_docker(root)

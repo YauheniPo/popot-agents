@@ -55,9 +55,9 @@ class ResourceMonitoringTests(unittest.TestCase):
         self.assertEqual(updated, extend_prometheus_config(updated))
 
     def test_context_guard_rejects_remote_clusters(self):
-        self.assertEqual(local_context({'ax': {'context': 'kind-popot-ax'}}), 'kind-popot-ax')
+        self.assertEqual(local_context({'context': 'kind-popot-ax'}), 'kind-popot-ax')
         with self.assertRaises(ValueError):
-            local_context({'ax': {'context': 'production'}})
+            local_context({'context': 'production'})
 
     def test_failed_history_copy_resumes_writer_and_removes_helper(self):
         cluster = MagicMock(command=['kubectl'])

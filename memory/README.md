@@ -44,7 +44,10 @@ verified, and the overlay fails if the upstream component contract changes.
 In **Mindmap**, select an entity to open **Saved knowledge**. The panel follows
 its graph links to source chunks and their documents in the selected brain,
 showing the complete excerpt, source, recorded/ingested date and expandable
-extracted summaries. JSON memory retains its evidence quotes and references.
+extracted summaries. **Evidence and record metadata** retains the original
+record, including evidence quotes, dates, model and references. Document,
+fragment and summary labels use the note's readable title; graph IDs remain
+unchanged. The existing **Records** view exposes technical provenance nodes.
 Semantic neighbors are not treated as supporting evidence. Summaries are
 automatically extracted and should be checked against the source excerpt.
 The panel uses the already loaded, bounded graph: an empty panel means no
@@ -54,10 +57,15 @@ Run its provenance tests with Node 22.18+:
 
 ```bash
 node --test tests/test_graph_knowledge.mjs
+node --test tests/test_knowledge_labels.mjs
 ```
 
 The default runs GLiNER graph extraction and local embeddings without a paid
 model key. Models download on first ingestion, so that first graph takes longer.
+`project-ontology.ttl` supplies its closed engineering vocabulary: projects,
+software, files, pull requests, named configuration and engineering concepts.
+Dates and anonymous quantities are not entity types. Actual numbers remain in
+the statements (for example, “PR #70 retries after 60 seconds”).
 This is Cognee's demo extractor; it may miss domain-specific entities or
 relationships. Its model cache, source documents, relational data, vectors and
 graph survive container recreation in named volumes. `docker compose down`
@@ -82,10 +90,32 @@ tool logs are not persisted. Known credentials are redacted before extraction;
 items containing redactions are rejected. This does not make notes infallible:
 agents must still verify historical claims against current sources.
 
+The adapter sends statement text as the document and stores the original record
+in Cognee's native `external_metadata.popot_memory` (format version 2). The
+native `labels` field supplies a readable title. Provenance is excluded from
+entity extraction, and is included again when the worker recalls the text.
+Both Docker and AX use this adapter; rebuild their worker images after changes.
+
+To migrate old `memory_*` documents, keep agents idle, copy the migration into
+the running Cognee container, and first run it without `--apply`:
+
+```bash
+docker compose --env-file .env -f memory/compose.yaml cp memory/reindex.py cognee:/app/popot-sync/reindex.py
+docker compose --env-file .env -f memory/compose.yaml exec -T cognee python /app/popot-sync/reindex.py --dataset popot-agents --dataset github-yauhenipo-popot-bot-2-0 --backup /cognee-storage/system/popot-backups/knowledge-v2.json
+```
+
+Append `--apply` to the second command to reindex. The private backup contains
+original documents, graph snapshots and migration progress. Reusing its path
+resumes a failed run; use a new path for a later migration. Only legacy Popot
+memory documents are replaced; datasets and native Skill nodes are retained.
+To recover an original note, read its `text` field from the backup and submit
+it through `CogneeMemory.remember`; it will use the current ingestion format.
+
 GitHub tasks use a separate brain named `github-<owner>-<repo>-<hash>`, where
 the hash comes from the canonical owner/repository pair and prevents names with
 punctuation or different owner/repository boundaries from sharing a brain.
-Follow-up turns inherit the most recently identified repository. For other projects, include
+Follow-up turns inherit the most recently identified repository. For other
+projects, include
 `[project: my-project]` in the task. Ambiguous multi-repository tasks and tasks
 without a project skip memory rather than sharing a global brain. Additional
 model-driven recall is restricted to that same project, and direct model-driven
@@ -122,7 +152,7 @@ requires login, and the gateway is published only on host loopback.
 
 ```bash
 bash memory/up.sh
-docker compose up --build -d worker-image orchestrator mcp-server
+docker compose --env-file .env -f popot_agents/compose.yaml up --build -d worker-image orchestrator mcp-server
 ```
 
 The orchestrator supplies `COGNEE_PASSWORD` from `.env` and
