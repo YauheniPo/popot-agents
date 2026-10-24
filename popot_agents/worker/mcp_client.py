@@ -61,23 +61,21 @@ def _error_text(config: dict, exc: Exception) -> str:
 
 
 async def _discover_one(alias: str, config: dict) -> dict:
-    async with _streams(config) as (read, write):
-        from mcp import ClientSession, types
+    from mcp import Client
 
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            listed, cursors = {}, set()
-            cursor = None
-            while True:
-                page = await session.list_tools(params=types.PaginatedRequestParams(
-                    cursor=cursor)) if cursor else await session.list_tools()
-                listed.update({tool.name: tool for tool in page.tools})
-                cursor = page.next_cursor
-                if not cursor:
-                    break
-                if cursor in cursors:
-                    raise RuntimeError("MCP server repeated a tools cursor")
-                cursors.add(cursor)
+    # The SDK negotiates modern MCP and falls back for older tool servers.
+    async with Client(_streams(config)) as client:
+        listed, cursors = {}, set()
+        cursor = None
+        while True:
+            page = await client.list_tools(cursor=cursor)
+            listed.update({tool.name: tool for tool in page.tools})
+            cursor = page.next_cursor
+            if not cursor:
+                break
+            if cursor in cursors:
+                raise RuntimeError("MCP server repeated a tools cursor")
+            cursors.add(cursor)
     missing = set(config["tools"]) - listed.keys()
     if missing:
         raise RuntimeError(f"MCP server {alias} does not expose: {', '.join(sorted(missing))}")
@@ -118,12 +116,10 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> di
 
 
 async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
-    async with _streams(config) as (read, write):
-        from mcp import ClientSession
+    from mcp import Client
 
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(native_name, arguments=arguments)
+    async with Client(_streams(config)) as client:
+        result = await client.call_tool(native_name, arguments=arguments)
     parts = []
     for item in result.content:
         kind = getattr(item, "type", None)

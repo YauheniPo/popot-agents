@@ -54,14 +54,16 @@ class RemoteMCPTests(unittest.TestCase):
             self.assertEqual(http_client, 'http')
             yield ('read', 'write')
         class Session:
-            def __init__(self, *args): pass
-            async def __aenter__(self): return self
-            async def __aexit__(self, *args): pass
-            async def initialize(self): events.append('initialize')
-            async def list_tools(self, *, params=None):
-                if params is None:
+            def __init__(self, transport): self.transport = transport
+            async def __aenter__(self):
+                await self.transport.__aenter__()
+                return self
+            async def __aexit__(self, *args):
+                await self.transport.__aexit__(*args)
+            async def list_tools(self, *, cursor=None):
+                if cursor is None:
                     return SimpleNamespace(tools=[], next_cursor='page2')
-                outer.assertEqual(params.cursor, 'page2')
+                outer.assertEqual(cursor, 'page2')
                 return SimpleNamespace(tools=[SimpleNamespace(name='get_file_contents',
                     description='Read a file', input_schema={'type': 'object'})], next_cursor=None)
             async def call_tool(self, name, arguments):
@@ -71,8 +73,7 @@ class RemoteMCPTests(unittest.TestCase):
                     SimpleNamespace(type='resource', resource=SimpleNamespace(
                         uri='repo://owner/repo/README.md', text='# README contents'))], is_error=False)
         modules = {'httpx2': SimpleNamespace(AsyncClient=http_client),
-                   'mcp': SimpleNamespace(ClientSession=Session, types=SimpleNamespace(
-                       PaginatedRequestParams=lambda **kwargs: SimpleNamespace(**kwargs))),
+                   'mcp': SimpleNamespace(Client=Session),
                    'mcp.client': SimpleNamespace(),
                    'mcp.client.streamable_http': SimpleNamespace(streamable_http_client=transport)}
         with patch.dict(sys.modules, modules), patch.dict(os.environ, {

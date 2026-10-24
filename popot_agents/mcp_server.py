@@ -3,6 +3,7 @@
 import json
 import asyncio
 from collections import deque
+from dataclasses import replace
 import os
 import sys
 import uuid
@@ -211,7 +212,7 @@ class OrchestratorClient:
 
 
 async def stream_call(client, path, payload, context):
-    """Stream short actions using HTTPX, already supplied by the MCP SDK.
+    """Stream short actions using HTTPX2, already supplied by the MCP SDK.
 
     Cancelling the MCP call closes its HTTP stream; agent work follows the
     orchestrator's existing disconnect policy and is never automatically retried.
@@ -274,6 +275,16 @@ async def stream_call(client, path, payload, context):
         raise RuntimeError('orchestrator returned invalid progress stream') from exc
 
 
+async def _omit_null_progress_token(ctx, call_next):
+    """Preserve the gateway's null = no progress contract before SDK validation."""
+    if ctx.method == "tools/call" and ctx.params is not None:
+        meta = ctx.params.get("_meta")
+        if isinstance(meta, dict) and "progressToken" in meta and meta["progressToken"] is None:
+            meta = {key: value for key, value in meta.items() if key != "progressToken"}
+            ctx = replace(ctx, params={**ctx.params, "_meta": meta})
+    return await call_next(ctx)
+
+
 def main() -> None:
     from mcp.server.mcpserver import MCPServer, Context
     from mcp.server.transport_security import TransportSecuritySettings
@@ -297,7 +308,7 @@ def main() -> None:
         os.getenv("MCP_ORCHESTRATOR_URL", "http://127.0.0.1:8000"),
         int(os.getenv("MCP_UPSTREAM_TIMEOUT_SECONDS", str(RUNTIME["timeouts"]["mcp_upstream_seconds"]))),
     )
-    server = LoggedMCPServer("popot-agents")
+    server = LoggedMCPServer("popot-agents", middleware=[_omit_null_progress_token])
 
     @server.tool()
     async def run_task(task: str, role: str | None = None, agent: str | None = None,

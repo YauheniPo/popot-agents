@@ -28,6 +28,7 @@ services:
           path: ..
           include:
             - popot_agents/docker/worker.Dockerfile
+            - pyproject.toml
             - .dockerignore
             - popot_agents/__init__.py
             - popot_agents/runtime_config.py
@@ -113,6 +114,7 @@ services:
           path: ..
           include:
             - docker/mcp.Dockerfile
+            - pyproject.toml
             - .dockerignore
             - popot_agents/__init__.py
             - popot_agents/runtime_config.py

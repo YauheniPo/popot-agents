@@ -160,8 +160,9 @@ class GatewayTests(unittest.TestCase):
         class FakeMCPServer:
             instance = None
 
-            def __init__(self, name):
+            def __init__(self, name, **settings):
                 self.name = name
+                self.settings = settings
                 self.tools = {}
                 FakeMCPServer.instance = self
 
@@ -179,7 +180,7 @@ class GatewayTests(unittest.TestCase):
 
             def run(self, transport, **settings):
                 self.transport = transport
-                self.settings = settings
+                self.transport_settings = settings
 
             def streamable_http_app(self, **settings):
                 return "upstream-asgi-app"
@@ -239,7 +240,9 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(server.name, "popot-agents")
         self.assertEqual(server.transport, "streamable-http")
         self.assertEqual(set(server.tools), {"run_task", "send_message", "list_chats", "get_chat"})
-        self.assertTrue(server.settings["stateless_http"])
+        self.assertTrue(server.transport_settings["stateless_http"])
+        self.assertFalse(server.transport_settings["json_response"])
+        self.assertTrue(server.transport_settings["transport_security"]["enable_dns_rebinding_protection"])
         from popot_agents.mcp_server import MCPHTTPLoggingMiddleware
         logged_app = server.streamable_http_app(stateless_http=True, json_response=False)
         self.assertIsInstance(logged_app, MCPHTTPLoggingMiddleware)

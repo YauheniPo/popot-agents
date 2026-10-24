@@ -299,11 +299,13 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIn('mcp__gateway__list_chats', discovered)
                         output = await mcp_client._call_one(remote, 'list_chats', {})
                         self.assertEqual(json.loads(output), {'chats': []})
-                    for mode in ('legacy', '2026-07-28'):
+                    for mode in ('auto', 'legacy', '2026-07-28'):
                         with self.subTest(protocol=mode):
                             finish.clear()
                             received.clear()
                             async with Client(url, mode=mode) as session:
+                                if mode != "legacy":
+                                    self.assertEqual(session.session.protocol_version, "2026-07-28")
                                 tools = await session.list_tools()
                                 tool = next(t for t in tools.tools if t.name == 'run_task')
                                 self.assertNotIn('ctx', tool.input_schema['properties'])
@@ -323,42 +325,48 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                     # Raw HTTP preserves the exact token; ClientSession normally
                     # replaces it with its generated request ID.
                     async with httpx2.AsyncClient(trust_env=False, timeout=10) as http:
-                        for tool_name, argument in [('run_task', 'task'), ('send_message', 'message')]:
-                            for meta in (None, {}, {'progressToken': ''}, {'progressToken': None},
-                                         {'progressToken': 0}, {'progressToken': 'review-70'}):
-                                with self.subTest(tool=tool_name, meta=meta):
-                                    params = {'name': tool_name, 'arguments': {'agent': 'test', argument: 'work'}}
-                                    if meta is not None:
-                                        params['_meta'] = meta
-                                    response = await http.post(url, headers={
-                                        'Accept': 'application/json, text/event-stream',
-                                        'MCP-Protocol-Version': '2025-11-25',
-                                    }, json={'jsonrpc': '2.0', 'id': 99, 'method': 'tools/call', 'params': params})
-                                    response.raise_for_status()
-                                    events = [json.loads(line[6:]) for line in response.text.splitlines()
-                                              if line.startswith('data: ')]
-                                    updates = [event for event in events
-                                               if event.get('method') == 'notifications/progress']
-                                    if meta == {'progressToken': None}:
-                                        self.assertEqual(updates, [])
-                                        errors = [event['error'] for event in events if event.get('id') == 99]
-                                        self.assertEqual(len(errors), 1)
-                                        self.assertEqual(errors[0]['code'], -32602)
-                                        continue  # SDK 2.x rejects null progress tokens before calling the tool.
-                                    token = meta.get('progressToken') if meta is not None else None
-                                    if token is None or token == '':
-                                        self.assertEqual(updates, [])
-                                    else:
-                                        self.assertTrue(updates)
-                                        self.assertTrue(all(event['params']['progressToken'] == token
-                                                            for event in updates))
-                                        self.assertEqual(events[-1]['id'], 99)
-                                    replies = [event['result'] for event in events if event.get('id') == 99]
-                                    self.assertEqual(len(replies), 1)
-                                    self.assertFalse(replies[0].get('isError'), replies[0])
-                                    data = replies[0].get('structuredContent') or json.loads(
-                                        next(item['text'] for item in replies[0]['content'] if item['type'] == 'text'))
-                                    self.assertEqual(data['answer'], 'done')
+                        for version in ('2025-11-25', '2026-07-28'):
+                            for tool_name, argument in [('run_task', 'task'), ('send_message', 'message')]:
+                                for meta in (None, {}, {'progressToken': ''}, {'progressToken': None},
+                                             {'progressToken': 0}, {'progressToken': 'review-70'}):
+                                    with self.subTest(version=version, tool=tool_name, meta=meta):
+                                        params = {'name': tool_name, 'arguments': {'agent': 'test', argument: 'work'}}
+                                        if meta is not None:
+                                            params['_meta'] = dict(meta)
+                                        if version == '2026-07-28':
+                                            params.setdefault('_meta', {}).update({
+                                                'io.modelcontextprotocol/protocolVersion': version,
+                                                'io.modelcontextprotocol/clientCapabilities': {},
+                                            })
+                                        response = await http.post(url, headers={
+                                            'Accept': 'application/json, text/event-stream',
+                                            'MCP-Protocol-Version': version,
+                                            'Mcp-Method': 'tools/call',
+                                            'Mcp-Name': tool_name,
+                                        }, json={'jsonrpc': '2.0', 'id': 99, 'method': 'tools/call', 'params': params})
+                                        self.assertEqual(response.status_code, 200, response.text)
+                                        if response.headers['content-type'].startswith('application/json'):
+                                            events = [response.json()]
+                                        else:
+                                            events = [json.loads(line[6:]) for line in response.text.splitlines()
+                                                      if line.startswith('data: ')]
+                                        self.assertTrue(all('error' not in event for event in events), events)
+                                        updates = [event for event in events
+                                                   if event.get('method') == 'notifications/progress']
+                                        token = meta.get('progressToken') if meta is not None else None
+                                        if token is None or token == '':
+                                            self.assertEqual(updates, [])
+                                        else:
+                                            self.assertTrue(updates)
+                                            self.assertTrue(all(event['params']['progressToken'] == token
+                                                                for event in updates))
+                                            self.assertEqual(events[-1]['id'], 99)
+                                        replies = [event['result'] for event in events if event.get('id') == 99]
+                                        self.assertEqual(len(replies), 1)
+                                        self.assertFalse(replies[0].get('isError'), replies[0])
+                                        data = replies[0].get('structuredContent') or json.loads(
+                                            next(item['text'] for item in replies[0]['content'] if item['type'] == 'text'))
+                                        self.assertEqual(data['answer'], 'done')
                 finally:
                     finish.set()
                     process.terminate()

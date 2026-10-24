@@ -588,6 +588,24 @@ through stdio. Only the listed server tools are exposed to the model: `fetch`,
 worker image if the new server package is not installed. MCP commands are
 operator configuration; API requests cannot supply them.
 
+MCP package versions are defined once in the root `pyproject.toml`:
+the `mcp` dependency group supplies the SDK for the gateway, worker client and
+Cognee adapter. Both Docker and AX images install this group. The worker client
+uses the SDK's automatic protocol negotiation: modern servers use `2026-07-28`,
+and older servers use the supported initialize handshake. The gateway accepts
+both `2026-07-28` and the existing `2025-11-25` curl requests.
+
+The `worker` dependency group includes the SDK and compatible Fetch/Git servers.
+After changing versions, rebuild the worker and MCP images
+(`bash ax_local/up.sh` for AX).
+
+For local SDK development, run from the repository root with Python 3.10+:
+
+```bash
+python -m pip install --upgrade 'pip>=25.1'
+python -m pip install --group mcp
+```
+
 `backend_engineer` also connects to the [official remote GitHub MCP server](https://github.com/github/github-mcp-server#remote-github-mcp-server)
 using Streamable HTTP. Its config contains only the token variable name:
 
