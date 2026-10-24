@@ -1,4 +1,5 @@
 import json
+import asyncio
 import threading
 import unittest
 from email.parser import BytesParser
@@ -158,6 +159,14 @@ class CogneeMemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.memory.recall('query', 'project-a', top_k=0)
         self.assertEqual(self.calls, [])
+
+    def test_memory_mcp_server_registers_tools_with_the_installed_sdk(self):
+        from popot_agents.worker.cognee_memory import create_server
+
+        tools = asyncio.run(create_server().list_tools())
+        self.assertEqual({tool.name for tool in tools}, {'remember', 'recall', 'memory_status'})
+        recall = next(tool for tool in tools if tool.name == 'recall')
+        self.assertIn('query', recall.input_schema['properties'])
 
 
 if __name__ == '__main__':

@@ -40,6 +40,7 @@ class RemoteMCPTests(unittest.TestCase):
 
     def test_remote_discovery_paginates_and_call_uses_env_auth(self):
         events = []
+        outer = self
         @asynccontextmanager
         async def http_client(**kwargs):
             self.assertEqual(kwargs['headers'], {'Authorization': 'Bearer test-secret'})
@@ -62,7 +63,7 @@ class RemoteMCPTests(unittest.TestCase):
             async def list_tools(self, *, cursor=None):
                 if cursor is None:
                     return SimpleNamespace(tools=[], next_cursor='page2')
-                assert cursor == 'page2'
+                outer.assertEqual(cursor, 'page2')
                 return SimpleNamespace(tools=[SimpleNamespace(name='get_file_contents',
                     description='Read a file', input_schema={'type': 'object'})], next_cursor=None)
             async def call_tool(self, name, arguments):
