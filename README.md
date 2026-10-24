@@ -594,6 +594,8 @@ Cognee adapter. Both Docker and AX images install this group. The worker client
 uses the SDK's automatic protocol negotiation: modern servers use `2026-07-28`,
 and older servers use the supported initialize handshake. The gateway accepts
 both `2026-07-28` and the existing `2025-11-25` curl requests.
+The same file's `[tool.popot.build]` section pins AX, Substrate and ko for
+AX image builds and local cluster scripts. Those host scripts require Python 3.11+.
 
 The `worker` dependency group includes the SDK and compatible Fetch/Git servers.
 After changing versions, rebuild the worker and MCP images

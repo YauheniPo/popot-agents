@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOCAL="${ROOT}/ax_local/.local"
-source "$ROOT/ax_local/docker/versions.env"
 REGISTRY="localhost:5001"
 
 for program in docker git go kubectl python3; do
@@ -12,6 +11,8 @@ for program in docker git go kubectl python3; do
     exit 1
   fi
 done
+BUILD_VERSIONS="$(python3 "$ROOT/ax_local/cluster/build_versions.py")"
+eval "$BUILD_VERSIONS"
 CLUSTER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["context"].removeprefix("kind-"))' "$ROOT/ax_local/config.json")"
 ATESPACE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["atespace"])' "$ROOT/ax_local/config.json")"
 docker info >/dev/null

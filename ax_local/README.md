@@ -615,15 +615,21 @@ Docker-образы устанавливают SDK автоматически. �
 ## Подготовка
 
 Версии исходников AX, Substrate и `ko` задаются в одном файле
-`ax_local/docker/versions.env`. Его читают оба AX Dockerfile, bootstrap и
-проверки локальных патчей; Compose и обычный `docker build` используют те же
-значения без передачи build args. При обновлении AX меняйте `AX_VERSION` и
+`pyproject.toml`, в секции `[tool.popot.build]`. Её читает
+`ax_local/cluster/build_versions.py`; bootstrap и оба AX Dockerfile получают
+от него проверенные shell-переменные, а проверки локальных патчей — словарь.
+Compose и обычный `docker build` используют те же значения без передачи build args.
+При обновлении AX меняйте `AX_VERSION` и
 `AX_COMMIT` вместе и проверяйте совместимость Substrate и наших патчей.
 
-Нужны работающий Docker Desktop, `git`, Go 1.27.1+, `kubectl` и Python 3.10+.
+Нужны работающий Docker Desktop, `git`, Go 1.27.1+, `kubectl` и Python 3.11+.
+Команда `python3` в текущем окружении должна запускать Python 3.11 или новее:
+AX-скрипты используют встроенный `tomllib`. `up.sh` проверяет версию Python и
+настройки сборки до запуска контейнеров. В Docker версии читает отдельный
+этап сборки на Python 3.12; дополнительных Python-зависимостей для этого нет.
 Для выбранного провайдера подготовьте его ключ в `.env`, если он требуется.
-При отсутствии `ko` bootstrap установит
-v0.19.1 в `ax_local/.local/bin`; `kind` ставит скрипт Agent Substrate.
+При отсутствии `ko` bootstrap установит версию из `KO_VERSION`
+в `ax_local/.local/bin`; `kind` ставит скрипт Agent Substrate.
 Первый запуск скачивает исходники и контейнерные образы и может занять время.
 
 Из корня репозитория:
