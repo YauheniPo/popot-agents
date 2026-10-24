@@ -51,6 +51,35 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(data, {"answer": "done: check the build"})
         self.assertEqual(self.received, ["check the build"])
 
+    def test_json_responses_preserve_markup_as_data_and_disable_sniffing(self):
+        task = '<script>alert("Привет")</script>&'
+        for accept in ("application/json", "application/x-ndjson"):
+            with self.subTest(accept=accept):
+                connection = HTTPConnection("127.0.0.1", self.server.server_port)
+                try:
+                    connection.request(
+                        "POST", "/tasks",
+                        body=json.dumps({"agent": "test_agent", "task": task}),
+                        headers={"Content-Type": "application/json", "Accept": accept},
+                    )
+                    response = connection.getresponse()
+                    body = response.read()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.getheader("Content-Type"), accept + "; charset=utf-8")
+                    if accept == "application/x-ndjson":
+                        frames = [json.loads(line) for line in body.splitlines()]
+                        self.assertEqual(frames[0]["type"], "progress")
+                        self.assertEqual(frames[-1]["type"], "result")
+                        self.assertEqual(frames[-1]["status"], 200)
+                        data = frames[-1]["result"]
+                    else:
+                        self.assertEqual(int(response.getheader("Content-Length")), len(body))
+                        data = json.loads(body)
+                    self.assertEqual(data, {"answer": "done: " + task})
+                    self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
+                finally:
+                    connection.close()
+
     def test_task_requires_agent_or_role(self):
         status, data = self.request({"task": "check the build"})
         self.assertEqual(status, 400)

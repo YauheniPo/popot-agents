@@ -46,13 +46,17 @@ def required_specialist(messages: list[dict], role_config: dict) -> str | None:
     if (NO_DELEGATION.search(intent) or re.search(
             r'\bhow (?:do|to|can)\b|как\s+(?:мне\s+)?(?:сделать|оставить|опубликовать)', intent, re.I)):
         return None
+    # Implementation requests need the parent's coordination loop, including
+    # work requested after an explicitly delegated review.
+    if implementation_requested(intent):
+        return None
     if EXPLICIT.search(intent):
         named = [role for role in allowed if re.search(r'\b' + re.escape(role) + r'\b', intent)]
         if len(named) == 1:
             return named[0]
     if role_config.get('name', role_config.get('_ax_role')) == 'code_reviewer':
         return None
-    if 'code_reviewer' not in allowed or implementation_requested(intent):
+    if 'code_reviewer' not in allowed:
         return None
     has_pr = any(PR_URL.search(text) for text in users)
     if has_pr and (REVIEW.search(intent)

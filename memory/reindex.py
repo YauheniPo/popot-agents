@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from urllib import error, request
 
@@ -14,6 +15,12 @@ try:
     from cognee_memory import CogneeMemory, memory_document
 except ImportError:
     from popot_agents.worker.cognee_memory import CogneeMemory, memory_document
+
+
+def api_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', value):
+        raise ValueError('Invalid Cognee API identifier')
+    return value
 
 
 def save_archive(path, archive):
@@ -29,7 +36,9 @@ def save_archive(path, archive):
 
 def apply_archive(archive, path, client, delete):
     for dataset in archive['datasets']:
+        api_id(dataset['id'])
         for doc in dataset['documents']:
+            api_id(doc['row']['id'])
             memory_document(doc['text'], dataset['name'])
     # Persist every source before the first destructive API call.
     save_archive(path, archive)
@@ -89,17 +98,18 @@ def main():
         for dataset in datasets:
             if dataset['name'] not in names:
                 continue
+            dataset_id = api_id(dataset['id'])
             entry = {**dataset, 'documents': [], 'graph': client._request(
-                '/api/v1/datasets/' + dataset['id'] + '/graph')}
+                '/api/v1/datasets/' + dataset_id + '/graph')}
             offset = 0
             while True:
-                rows = client._request(f"/api/v1/datasets/{dataset['id']}/data?limit=100&offset={offset}")
+                rows = client._request(f"/api/v1/datasets/{dataset_id}/data?limit=100&offset={offset}")
                 for row in rows:
                     meta = row.get('externalMetadata') or {}
                     if (row['name'] != 'memory' and not row['name'].startswith('memory_')) or (
                             isinstance(meta, dict) and meta.get('popot_memory', {}).get('version') == 2):
                         continue
-                    text = raw(f"/api/v1/datasets/{dataset['id']}/data/{row['id']}/raw")
+                    text = raw(f"/api/v1/datasets/{dataset_id}/data/{api_id(row['id'])}/raw")
                     memory_document(text, dataset['name'])
                     entry['documents'].append({'row': row, 'text': text})
                 if len(rows) < 100:
@@ -111,7 +121,7 @@ def main():
     print(f'Backup: {args.backup}; legacy documents: {count}', flush=True)
     if args.apply:
         apply_archive(archive, args.backup, client, lambda d, item:
-                      raw(f'/api/v1/datasets/{d}/data/{item}', 'DELETE'))
+                      raw(f'/api/v1/datasets/{api_id(d)}/data/{api_id(item)}', 'DELETE'))
         print('Reindex completed', flush=True)
 
 

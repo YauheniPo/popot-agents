@@ -476,8 +476,10 @@ class ChatApiTests(unittest.TestCase):
     def test_idle_worker_stops_but_session_remains_resumable(self):
         _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         session_id = first["sessionId"]
-        self.server.live[session_id].last_used = time.monotonic() - 1900
-        self.server.service_actions()
+        # The response can arrive before its handler releases the session lock.
+        with self.server.session_lock(session_id):
+            self.server.live[session_id].last_used = time.monotonic() - 1900
+            self.server.service_actions()
         self.assertTrue(self.runner.chats[0].closed)
         status, info = self.request("GET", f"/chats/{session_id}")
         self.assertEqual(status, 200)
