@@ -289,7 +289,6 @@ class AxWorkerCapacityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             server = create_server({'test': runner}, port=0, session_dir=directory)
             try:
-                self.assertIsNone(server.task_slots)
                 status, result = chat_tests.TaskSessionTests._post_to_handler(
                     server.RequestHandlerClass, server, {'agent': 'test', 'message': 'hello'})
                 self.assertEqual(status, 200, result)

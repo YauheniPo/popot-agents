@@ -4,12 +4,10 @@ import os
 import subprocess
 import unittest
 from contextlib import redirect_stderr
-from pathlib import Path
 from unittest.mock import patch
 
 from popot_agents import tools
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.orchestrator.main import DockerAgentRunner
 from popot_agents.worker.agent_worker import run_harness
 from popot_agents.worker.http_harness import run_http
 
@@ -96,12 +94,6 @@ class CliLoopBudgetTests(unittest.TestCase):
             self.assertEqual(run_harness('task'), 'done')
             self.assertEqual(run.call_args.args[0][-1], '7')
 
-    def test_configured_claude_profiles_bound_the_native_loop(self):
-        config = json.loads((Path(__file__).resolve().parents[1] / 'config/agents.json').read_text())
-        for name in ('ollama_claude', 'ollama_claude_local'):
-            self.assertIn('--max-turns', config[name]['command'])
-            self.assertIn('{max_turns}', config[name]['command'])
-
     def test_cli_gets_role_round_budget_and_turn_timeout(self):
         with patch.dict(os.environ, {
             'HARNESS_COMMAND_JSON': '["claude", "--print", "--max-turns", "{max_turns}", "{task}"]',
@@ -119,9 +111,3 @@ class CliLoopBudgetTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'CLI harness turn timed out'):
                 run_harness('task')
             run.assert_called_once()
-
-    def test_docker_passes_cli_turn_budget(self):
-        runner = DockerAgentRunner(image='example', session_mode='cli', timeout_seconds=180)
-        command = runner._docker_command('popot-chat-test', True)
-        from popot_agents.runtime_config import RUNTIME
-        self.assertIn(f"HARNESS_TURN_TIMEOUT_SECONDS={180 - RUNTIME['timeouts']['turn_response_margin_seconds']}", command)

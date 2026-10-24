@@ -1,4 +1,4 @@
-"""PostgreSQL storage for Docker orchestrator chat sessions."""
+"""PostgreSQL storage for AX API chat sessions."""
 
 import json
 import re

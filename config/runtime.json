@@ -40,9 +40,7 @@
     "skill_prompt_bytes": 262144
   },
   "logging": {
-    "mcp_body_max_bytes": 65536,
-    "worker_log_tail_lines": 200,
-    "worker_log_max_bytes": 1048576
+    "mcp_body_max_bytes": 65536
   },
   "model": {
     "default_max_tool_rounds": 40,

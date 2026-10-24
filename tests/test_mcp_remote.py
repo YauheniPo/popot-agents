@@ -1,3 +1,5 @@
+"""Offline checks of MCP authentication and errors; no real token validation."""
+
 import asyncio
 import json
 import os
@@ -18,6 +20,20 @@ REMOTE = {"url": "https://api.githubcopilot.com/mcp/",
 
 
 class RemoteMCPTests(unittest.TestCase):
+    def setUp(self):
+        environment = patch.dict(os.environ, {
+            'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]',
+            'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret',
+        }, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for target in ('socket.getaddrinfo', 'socket.socket.connect', 'socket.socket.connect_ex'):
+            network = patch(target, side_effect=AssertionError('Network is forbidden in unit tests'))
+            blocked = network.start()
+            self.addCleanup(network.stop)
+            # A transport may catch the exception; still fail if it tried the network.
+            self.addCleanup(blocked.assert_not_called)
+
     def test_remote_config_requires_https_and_role_selected_token(self):
         roles = json.loads((ROOT / 'config/roles.json').read_text())
         role = roles['backend_engineer']
@@ -76,9 +92,7 @@ class RemoteMCPTests(unittest.TestCase):
                    'mcp': SimpleNamespace(Client=Session),
                    'mcp.client': SimpleNamespace(),
                    'mcp.client.streamable_http': SimpleNamespace(streamable_http_client=transport)}
-        with patch.dict(sys.modules, modules), patch.dict(os.environ, {
-                'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]',
-                'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret'}):
+        with patch.dict(sys.modules, modules):
             discovered = mcp_client.discover_tools({'github': REMOTE})
             self.assertEqual(set(discovered), {'mcp__github__get_file_contents'})
             output = mcp_client.call_tool(REMOTE, 'get_file_contents', {'repo': 'example'})
@@ -89,23 +103,36 @@ class RemoteMCPTests(unittest.TestCase):
         self.assertIn(('get_file_contents', {'repo': 'example'}), events)
         self.assertNotIn('test-secret', json.dumps(discovered))
 
-    def test_missing_or_unselected_token_fails_before_connect(self):
-        with patch.dict(os.environ, {'HARNESS_TOOL_ENV_NAMES_JSON': '[]',
-                                     'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret'}):
-            with self.assertRaisesRegex(RuntimeError, 'GITHUB_PERSONAL_ACCESS_TOKEN'):
-                mcp_client.discover_tools({'github': REMOTE})
+    def test_missing_empty_or_unselected_token_fails_before_connect(self):
+        async def connect():
+            async with mcp_client._streams(REMOTE):
+                self.fail('An unauthorized connection must not open')
 
-    def test_remote_error_redacts_token(self):
-        async def fail(*args):
-            raise RuntimeError('upstream echoed test-secret')
-        with patch.dict(os.environ, {
-                'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]',
-                'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret'}), \
-             patch.object(mcp_client, '_call_one', side_effect=fail):
-            with self.assertRaisesRegex(RuntimeError, r'\[REDACTED\]') as raised:
-                mcp_client.call_tool(REMOTE, 'get_file_contents', {})
-            self.assertNotIn('test-secret', str(raised.exception))
-            self.assertTrue(raised.exception.__suppress_context__)
+        for environment in (
+                {'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]'},
+                {'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]',
+                 'GITHUB_PERSONAL_ACCESS_TOKEN': ''},
+                {'HARNESS_TOOL_ENV_NAMES_JSON': '[]',
+                 'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret'}):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True):
+                with self.assertRaisesRegex(ValueError, 'GITHUB_PERSONAL_ACCESS_TOKEN'):
+                    asyncio.run(connect())
+
+    def test_auth_errors_keep_status_and_redact_token(self):
+        for status in (401, 403):
+            async def fail(*args):
+                raise RuntimeError(f'HTTP {status}, Authorization: Bearer test-secret')
+
+            for operation, target in (
+                    (lambda: mcp_client.discover_tools({'github': REMOTE}), '_discover_one'),
+                    (lambda: mcp_client.call_tool(REMOTE, 'get_file_contents', {}), '_call_one')):
+                with self.subTest(status=status, target=target), \
+                     patch.object(mcp_client, target, side_effect=fail):
+                    with self.assertRaisesRegex(RuntimeError, f'HTTP {status}') as raised:
+                        operation()
+                    self.assertIn('[REDACTED]', str(raised.exception))
+                    self.assertNotIn('test-secret', str(raised.exception))
+                    self.assertTrue(raised.exception.__suppress_context__)
 
     def test_nested_transport_errors_expose_cause_without_token(self):
         # anyio's TaskGroup wraps HTTP transport failures, including on Python 3.10.
@@ -118,18 +145,15 @@ class RemoteMCPTests(unittest.TestCase):
             raise TransportGroup(TransportGroup(RuntimeError(
                 'HTTP 503 from upstream, Authorization: Bearer test-secret')))
 
-        with patch.dict(os.environ, {
-                'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]',
-                'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret'}):
-            for operation, target in (
-                    (lambda: mcp_client.discover_tools({'github': REMOTE}), '_discover_one'),
-                    (lambda: mcp_client.call_tool(REMOTE, 'get_file_contents', {}), '_call_one')):
-                with self.subTest(target=target), patch.object(mcp_client, target, side_effect=fail):
-                    with self.assertRaisesRegex(RuntimeError, 'HTTP 503') as raised:
-                        operation()
-                    self.assertIn('[REDACTED]', str(raised.exception))
-                    self.assertNotIn('test-secret', str(raised.exception))
-                    self.assertTrue(raised.exception.__suppress_context__)
+        for operation, target in (
+                (lambda: mcp_client.discover_tools({'github': REMOTE}), '_discover_one'),
+                (lambda: mcp_client.call_tool(REMOTE, 'get_file_contents', {}), '_call_one')):
+            with self.subTest(target=target), patch.object(mcp_client, target, side_effect=fail):
+                with self.assertRaisesRegex(RuntimeError, 'HTTP 503') as raised:
+                    operation()
+                self.assertIn('[REDACTED]', str(raised.exception))
+                self.assertNotIn('test-secret', str(raised.exception))
+                self.assertTrue(raised.exception.__suppress_context__)
 
     def test_remote_call_honors_remaining_deadline(self):
         closed = []

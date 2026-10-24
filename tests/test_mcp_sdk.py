@@ -41,3 +41,15 @@ class BundledMCPTests(unittest.TestCase):
         tools = mcp_client.discover_tools({'cognee': config}, timeout_seconds=15)
         self.assertEqual(set(tools), {'mcp__cognee__remember', 'mcp__cognee__recall',
                                      'mcp__cognee__memory_status'})
+
+    def test_cognee_stdio_discovery_and_validation_without_memory_service(self):
+        adapter = Path(mcp_client.__file__).with_name('cognee_memory.py')
+        config = {'command': [sys.executable, str(adapter)],
+                  'tools': ['recall', 'memory_status']}
+        tools = mcp_client.discover_tools({'cognee': config}, timeout_seconds=10)
+        self.assertEqual(set(tools), {'mcp__cognee__recall', 'mcp__cognee__memory_status'})
+        schema = tools['mcp__cognee__recall']['schema']['function']['parameters']
+        self.assertIn('query', schema['required'])
+        # Missing required input must remain a tool error, without calling Cognee.
+        with self.assertRaises(mcp_client.MCPToolError):
+            mcp_client.call_tool(config, 'recall', {}, timeout_seconds=10)

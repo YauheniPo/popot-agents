@@ -8,14 +8,36 @@ from pathlib import Path
 
 
 class ProjectLayoutTests(unittest.TestCase):
+    def test_profiles_are_configuration_without_a_standalone_runner(self):
+        from popot_agents.orchestrator.main import load_agents
+
+        profiles = load_agents(Path(__file__).resolve().parents[1] / 'config/agents.json')
+        for name, profile in profiles.items():
+            with self.subTest(profile=name):
+                self.assertFalse(callable(profile))
+                self.assertFalse(hasattr(profile, 'start_chat'))
+                self.assertFalse(hasattr(profile, 'network'))
+                self.assertFalse(hasattr(profile, 'image'))
+                self.assertEqual(profile.session_mode, 'http')
+                self.assertIn('HARNESS_BASE_URL', profile.environment)
+
+    def test_standalone_docker_deployment_is_removed(self):
+        root = Path(__file__).resolve().parents[1]
+        for path in ('popot_agents/compose.yaml', 'popot_agents/config.json',
+                     'popot_agents/docker/worker.Dockerfile',
+                     'popot_agents/docker/orchestrator.Dockerfile',
+                     'popot_agents/orchestrator/docker_config.py'):
+            with self.subTest(path=path):
+                self.assertFalse((root / path).exists())
+
     @unittest.skipUnless(shutil.which('docker'), 'Docker Compose is required')
-    def test_docker_compose_keeps_shared_paths_and_existing_project_identity(self):
+    def test_ax_compose_uses_shared_paths_without_docker_socket(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             project_root = Path(directory).resolve() / 'project'
-            (project_root / 'popot_agents').mkdir(parents=True)
-            compose_file = project_root / 'popot_agents/compose.yaml'
-            shutil.copyfile(root / 'popot_agents/compose.yaml', compose_file)
+            (project_root / 'ax_local').mkdir(parents=True)
+            compose_file = project_root / 'ax_local/compose.yaml'
+            shutil.copyfile(root / 'ax_local/compose.yaml', compose_file)
             env_file = project_root / '.env'
             env_file.write_text('POPOT_DB_PASSWORD=layout-test\n')
             result = subprocess.run(
@@ -27,23 +49,22 @@ class ProjectLayoutTests(unittest.TestCase):
                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)
-        self.assertEqual(config['name'], 'popot-agents')
+        self.assertEqual(config['name'], 'popot-ax-local')
         services = config['services']
+        self.assertEqual(set(services), {'db', 'api', 'mcp-server'})
         for name, dockerfile in {
-            'worker-image': 'popot_agents/docker/worker.Dockerfile',
-            'orchestrator': 'popot_agents/docker/orchestrator.Dockerfile',
+            'api': 'ax_local/docker/api.Dockerfile',
             'mcp-server': 'docker/mcp.Dockerfile',
         }.items():
             with self.subTest(service=name):
                 self.assertEqual(services[name]['build']['context'], str(project_root))
                 self.assertEqual(services[name]['build']['dockerfile'], dockerfile)
                 self.assertTrue((root / dockerfile).is_file())
-                self.assertEqual(services[name]['develop']['watch'][0]['path'], str(project_root))
-        orchestrator = services['orchestrator']
-        self.assertEqual(orchestrator['environment']['POPOT_DB_PASSWORD'], 'layout-test')
-        mounts = {item['target']: item['source'] for item in orchestrator['volumes']}
-        self.assertEqual(mounts['/data/legacy-sessions'], str(project_root / '.sessions'))
-        self.assertFalse((root / 'compose.yaml').exists())
+        self.assertEqual(services['api']['environment']['POPOT_DB_PASSWORD'], 'layout-test')
+        for service in services.values():
+            for mount in service.get('volumes', []):
+                self.assertNotIn('docker.sock', mount.get('source', ''))
+                self.assertNotIn('docker.sock', mount['target'])
 
     def test_orchestrator_loads_profiles_and_roles_from_config_directory(self):
         from popot_agents.orchestrator.main import load_agents, load_roles

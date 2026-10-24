@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from popot_agents.progress import observe_progress, emit_progress, forward_progress, format_progress
 from popot_agents.mcp_server import OrchestratorClient, stream_call
-from popot_agents.orchestrator.main import create_server, AgentRunError, DockerChat
+from popot_agents.orchestrator.main import create_server, AgentRunError
 
 
 class ProgressTests(unittest.TestCase):
@@ -127,85 +127,7 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(json.loads(second[0]), {'event': 'assistant_message', 'content': 'Проверяю изменения'})
 
 
-class DockerProgressTests(unittest.TestCase):
-    def test_docker_forwards_progress_before_the_worker_returns_its_answer(self):
-        with tempfile.TemporaryDirectory() as directory:
-            received_file = Path(directory) / 'received'
-            message = format_progress('tool_call', name='read_file')
-            script = f'''import json,pathlib,sys,time
-payload=json.load(sys.stdin)
-if payload.get('progress') is not True: raise SystemExit(1)
-print(json.dumps({{'progress': {message!r}}}), flush=True)
-deadline=time.monotonic()+2
-while not pathlib.Path({str(received_file)!r}).exists() and time.monotonic()<deadline: time.sleep(.01)
-print(json.dumps({{'answer': 'done'}}), flush=True)
-'''
-            process = subprocess.Popen([sys.executable, '-u', '-c', script], stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                       start_new_session=True)
-            received = []
-            def notify(event):
-                received.append(event)
-                received_file.touch()
-            try:
-                with patch('popot_agents.orchestrator.main.subprocess.Popen', return_value=process), \
-                     patch('popot_agents.orchestrator.main.subprocess.run', return_value=
-                           subprocess.CompletedProcess([], 0, '{"answer":"done"}', '')), \
-                     patch.object(DockerChat, '_capture_logs'), observe_progress(notify):
-                    result = DockerChat('test-worker', 3).send('read a file')
-                self.assertEqual(received, [message])
-                self.assertEqual(result, {'answer': 'done'})
-                self.assertEqual(process.returncode, 0)
-                self.assertTrue(process.stdin.closed and process.stdout.closed)
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                process.wait(timeout=3)
-                process.stdin.close()
-                process.stdout.close()
-
-    def test_docker_stream_timeout_kills_and_reaps_the_client(self):
-        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
-        started = time.monotonic()
-        try:
-            with patch('popot_agents.orchestrator.main.subprocess.Popen', return_value=process), \
-                 patch('popot_agents.orchestrator.main.subprocess.run', return_value=
-                       subprocess.CompletedProcess([], 0, '{"answer":"done"}', '')), \
-                 patch.object(DockerChat, '_capture_logs'), observe_progress(lambda _: None):
-                with self.assertRaises(subprocess.TimeoutExpired) as caught:
-                    DockerChat('test-worker', .15).send('PRIVATE' + '🔒' * 29993)
-            self.assertLess(time.monotonic() - started, 2)
-            self.assertNotIn('PRIVATE', str(caught.exception))
-            self.assertIsNotNone(process.poll())
-            self.assertTrue(process.stdin.closed and process.stdout.closed)
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=3)
-            process.stdin.close()
-            process.stdout.close()
-
-    def test_docker_preserves_worker_error_when_the_worker_closes_stdin_early(self):
-        process = subprocess.Popen([sys.executable, '-u', '-c',
-                                    'import os; os.close(0); print(\'{"error":"provider failed"}\')'],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
-        try:
-            with patch('popot_agents.orchestrator.main.subprocess.Popen', return_value=process), \
-                 patch.object(DockerChat, '_capture_logs'), observe_progress(lambda _: None):
-                with self.assertRaisesRegex(AgentRunError, 'provider failed'):
-                    DockerChat('test-worker', 3).send('🔒' * 30000)
-            self.assertIsNotNone(process.poll())
-            self.assertTrue(process.stdin.closed and process.stdout.closed)
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=3)
-            process.stdin.close()
-            process.stdout.close()
-
+class SessionWorkerProgressTests(unittest.TestCase):
     def test_docker_socket_client_reads_progress_and_fragmented_final_answer(self):
         from popot_agents.worker import session_worker
         from contextlib import redirect_stdout

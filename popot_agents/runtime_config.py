@@ -21,7 +21,7 @@ FIELDS = {
                  "memory_skill_import_seconds"},
     "limits": {"request_bytes", "message_chars", "history_bytes", "socket_message_bytes", "tool_output_chars",
                "write_file_bytes", "download_bytes", "skill_prompt_bytes"},
-    "logging": {"mcp_body_max_bytes", "worker_log_tail_lines", "worker_log_max_bytes"},
+    "logging": {"mcp_body_max_bytes"},
     "model": {"default_max_tool_rounds", "request_retries", "temperature", "max_tokens", "final_answer_reserve_seconds", "final_answer_reserve_divisor", "max_tool_rounds"},
     "memory": {"summary_attempts", "summary_max_tokens", "summary_retry_max_tokens", "recall_top_k",
                "task_chars", "query_chars", "chunk_chars", "context_chars", "tool_evidence_chars",

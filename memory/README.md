@@ -94,7 +94,7 @@ The adapter sends statement text as the document and stores the original record
 in Cognee's native `external_metadata.popot_memory` (format version 2). The
 native `labels` field supplies a readable title. Provenance is excluded from
 entity extraction, and is included again when the worker recalls the text.
-Both Docker and AX use this adapter; rebuild their worker images after changes.
+AX workers use this adapter; rebuild the worker image after changes.
 
 To migrate old `memory_*` documents, keep agents idle, copy the migration into
 the running Cognee container, and first run it without `--apply`:
@@ -148,18 +148,6 @@ existing worker MCP SDK. Cognee's heavy dependencies stay in the memory service.
 Generic remote MCP servers still require authenticated HTTPS. The memory API
 requires login, and the gateway is published only on host loopback.
 
-### Standard Docker stack
-
-```bash
-bash memory/up.sh
-docker compose --env-file .env -f popot_agents/compose.yaml up --build -d worker-image orchestrator mcp-server
-```
-
-The orchestrator supplies `COGNEE_PASSWORD` from `.env` and
-`COGNEE_API_URL=http://host.docker.internal:3001`. Create a new agent session
-after rebuilding. For a direct local Python run, export the selected environment
-variables and set `COGNEE_API_URL=http://localhost:3001`.
-
 ### AX / kind stack
 
 ```bash
@@ -169,8 +157,8 @@ bash ax_local/up.sh
 The AX launcher also starts memory. When `kind` exists, `memory/up.sh` selects
 `compose.ax.yaml`, connecting the same Cognee service to that network. The AX
 API resolves `cognee` to its kind-network IP before creating a task; the worker
-does not rely on Docker DNS. The regular stack and AX share the `popot-memory`
-project and its data. Start a new session after rebuilding the AX worker.
+does not rely on Docker DNS. The `popot-memory` project keeps its data independently
+of AX Task lifecycle. Start a new session after rebuilding the AX worker.
 
 ## Operations
 
@@ -188,8 +176,7 @@ Upstream: [Cognee](https://github.com/topoteretes/cognee),
 
 ## Sessions
 
-`/sessions` shows new project-scoped HTTP agent turns, including Docker and AX
-workers. Each turn has its own `popot-<chat-id>-<turn-id>` so follow-ups can
+`/sessions` shows new project-scoped HTTP agent turns from AX workers. Each turn has its own `popot-<chat-id>-<turn-id>` so follow-ups can
 finish independently; the chat ID matches the MCP `sessionId`. The journal
 records role, project, tool names, success/error metadata, memory count and
 provider-reported token usage/cost, without raw questions, answers, commands or
