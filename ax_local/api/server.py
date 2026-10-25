@@ -9,7 +9,7 @@ import signal
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from popot_agents.orchestrator.main import DockerAgentRunner, create_server, load_dotenv, load_roles
+from popot_agents.orchestrator.main import AgentProfile, create_server, load_dotenv, load_roles
 from ax_local.config import AX_CONFIG
 from popot_agents.runtime_config import RUNTIME
 from .provider_proxy import network_address_toward, resolve_provider, start_proxy
@@ -31,9 +31,8 @@ def kind_control_plane_host(context: str) -> str:
 def make_server():
     image = os.environ["AX_LOCAL_WORKER_IMAGE"]
     profiles = json.loads((ROOT / "config" / "agents.json").read_text(encoding="utf-8"))
-    # Reuse profile/role validation without starting Docker workers.
     roles = load_roles(ROOT / "config" / "roles.json",
-                       {name: DockerAgentRunner(**profile) for name, profile in profiles.items()})
+                       {name: AgentProfile(**profile) for name, profile in profiles.items()})
     if not roles:
         raise ValueError("AX requires at least one configured role")
     queue = WorkerQueue(AX_CONFIG['max_workers'], AX_CONFIG['worker_queue_timeout_seconds'])
@@ -146,7 +145,7 @@ def main() -> None:
 
     previous_handler = signal.signal(signal.SIGTERM, stop_on_sigterm)
     try:
-        print(f"AX comparison API: http://{server.server_address[0]}:{server.server_port} "
+        print(f"AX API: http://{server.server_address[0]}:{server.server_port} "
               f"profiles={','.join(provider.name for provider in server.provider_routes.values())}",
               flush=True)
         server.serve_forever()

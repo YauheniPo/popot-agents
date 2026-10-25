@@ -11,8 +11,7 @@ from unittest.mock import patch
 
 from popot_agents import tools as harness_tools
 from popot_agents.tools import execute_tool
-from popot_agents.orchestrator.main import DockerAgentRunner, load_agents, load_roles
-from popot_agents.runtime_config import RUNTIME
+from popot_agents.orchestrator.main import load_agents, load_roles
 
 
 BACKEND_TOOLS = [
@@ -33,23 +32,6 @@ class BackendRoleTests(unittest.TestCase):
         with patch.dict(os.environ, {"HARNESS_TOOL_ENV_NAMES_JSON": "[]",
                                      "GITHUB_TOKEN": "selected-secret"}):
             self.assertNotIn("GITHUB_TOKEN", harness_tools.safe_tool_env())
-
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_docker_role_adds_only_selected_env_names(self, run):
-        run.return_value = subprocess.CompletedProcess(["docker", "run"], 0, '{"answer":"ok"}', "")
-        runner = DockerAgentRunner(image="example:local", network="bridge",
-                                   env_names=["OPENROUTER_API_KEY"])
-        with patch.dict(RUNTIME, {"role_env_names": ["GITHUB_TOKEN"]}), \
-             patch.dict(os.environ, {"OPENROUTER_API_KEY": "model-secret",
-                                  "GITHUB_TOKEN": "selected-secret", "OTHER_TOKEN": "other-secret"}):
-            runner("task", {"agent": "openrouter", "instructions": "x", "tools": [],
-                            "env_names": ["GITHUB_TOKEN"]})
-        args = run.call_args.args[0]
-        self.assertIn("OPENROUTER_API_KEY", args)
-        self.assertIn("GITHUB_TOKEN", args)
-        self.assertNotIn("OTHER_TOKEN", args)
-        self.assertNotIn("selected-secret", args)
-        self.assertIn('HARNESS_TOOL_ENV_NAMES_JSON=["GITHUB_TOKEN"]', args)
 
     def test_mcp_launcher_resolves_command_before_dropping_privileges(self):
         launcher = Path(harness_tools.__file__).parent / "worker" / "tool_launcher.py"
@@ -129,33 +111,6 @@ class BackendRoleTests(unittest.TestCase):
         self.assertEqual(backend["mcpServers"]["git"]["tools"],
                          ["git_status", "git_diff_unstaged"])
         self.assertIn("search_repositories", backend["mcpServers"]["github"]["tools"])
-
-    def test_backend_chat_gets_a_durable_private_workspace(self):
-        with tempfile.TemporaryDirectory() as directory:
-            role = {"permissions": {"workspace": "persistent", "shell": True,
-                                    "internet": True}, "tools": BACKEND_TOOLS}
-            with patch.dict(os.environ, {"AGENT_WORKSPACE_DIR": directory}):
-                args = DockerAgentRunner(network="bridge")._docker_command(
-                    "popot-chat-1234", detached=True, role_config=role)
-            workspace = Path(directory).resolve() / "popot-chat-1234"
-            self.assertTrue(workspace.is_dir())
-            self.assertIn(f"type=bind,src={workspace},dst=/workspace", args)
-            self.assertNotIn("/workspace:rw,uid=10001,gid=10001,size=256m", args)
-            self.assertIn("--user", args)
-            self.assertIn("0:10001", args)
-            self.assertIn("HARNESS_SOCKET_PATH=/run/chat.sock", args)
-
-    def test_existing_persistent_workspace_is_writable_by_tool_group(self):
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory) / "popot-chat-1234"
-            workspace.mkdir(mode=0o700)
-            role = {"permissions": {"workspace": "persistent"}}
-            with patch.dict(os.environ, {"AGENT_WORKSPACE_DIR": directory}), \
-                 patch("popot_agents.orchestrator.main.os.geteuid", return_value=0), \
-                 patch("popot_agents.orchestrator.main.os.chown") as chown:
-                DockerAgentRunner.workspace_path("popot-chat-1234", role, create=True)
-            chown.assert_called_once_with(workspace.resolve(), -1, 10001)
-            self.assertEqual(workspace.stat().st_mode & 0o777, 0o770)
 
     def test_file_and_shell_tools_work_only_with_allowlist_and_hide_model_key(self):
         with tempfile.TemporaryDirectory() as directory:

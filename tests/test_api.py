@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from popot_agents.worker.agent_worker import run_harness
-from popot_agents.orchestrator.main import AgentConfigurationError, DockerAgentRunner, create_server, load_agents, load_dotenv
+from popot_agents.orchestrator.main import AgentConfigurationError, create_server, load_agents, load_dotenv
 
 
 class ApiTests(unittest.TestCase):
@@ -151,7 +151,7 @@ class RequestLoggingTests(unittest.TestCase):
         handler.path = "/tasks"
         handler.request_version = "HTTP/1.1"
         handler.requestline = "POST /tasks HTTP/1.1"
-        handler.server = SimpleNamespace(task_slots=threading.BoundedSemaphore(1))
+        handler.server = SimpleNamespace()
         handler.headers = Message()
         body = json.dumps({"agent": "test_agent", "task": "проверить каталог",
                            "api_key": "private-value",
@@ -188,124 +188,26 @@ class RequestLoggingTests(unittest.TestCase):
         self.assertNotIn("private-header", output.getvalue())
 
 
-class DockerRunnerTests(unittest.TestCase):
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_launches_isolated_container_and_reads_result(self, run):
-        run.return_value.returncode = 0
-        run.return_value.stdout = '{"answer":"finished"}\n'
-        run.return_value.stderr = ""
-        runner = DockerAgentRunner(image="popot-agent-worker:local", timeout_seconds=20)
-
-        self.assertEqual(runner("summarize this"), {"answer": "finished"})
-
-        args = run.call_args.args[0]
-        self.assertEqual(args[:3], ["docker", "run", "--rm"])
-        self.assertIn("--memory", args)
-        self.assertIn("--cpus", args)
-        self.assertIn("HOME=/workspace", args)
-        self.assertIn("popot-agent-worker:local", args)
-        self.assertNotIn("sh", args)
-        self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"task": "summarize this"})
-        self.assertEqual(run.call_args.kwargs["timeout"], 20)
-
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_timeout_removes_container(self, run):
-        run.side_effect = [
-            subprocess.TimeoutExpired(["docker", "run"], 20),
-            subprocess.CompletedProcess(["docker", "rm"], 0),
-        ]
-        runner = DockerAgentRunner(image="popot-agent-worker:local", timeout_seconds=20)
-
-        with self.assertRaises(subprocess.TimeoutExpired):
-            runner("slow task")
-
-        self.assertEqual(run.call_count, 2)
-        launch = run.call_args_list[0].args[0]
-        cleanup = run.call_args_list[1].args[0]
-        self.assertIn("--name", launch)
-        self.assertEqual(cleanup[:3], ["docker", "rm", "-f"])
-        self.assertEqual(cleanup[3], launch[launch.index("--name") + 1])
-
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_timeout_logs_worker_progress_without_task_or_key(self, run):
-        run.side_effect = [
-            subprocess.TimeoutExpired(["docker", "run"], 20),
-            subprocess.CompletedProcess(["docker", "rm"], 0),
-        ]
-        runner = DockerAgentRunner(image="popot-agent-worker:local", timeout_seconds=20,
-                                   env_names=["OPENROUTER_API_KEY"], model_env="OPENROUTER_MODEL")
-        output = io.StringIO()
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "private-value",
-                                  "OPENROUTER_MODEL": "openrouter/free"}), redirect_stderr(output):
-            with self.assertRaises(subprocess.TimeoutExpired):
-                runner("private prompt")
-        logs = output.getvalue()
-        self.assertIn("OPENROUTER_MODEL", logs)
-        self.assertIn("timed out", logs)
-        self.assertNotIn("openrouter/free", logs)
-        self.assertNotIn("private-value", logs)
-        self.assertNotIn("private prompt", logs)
-
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_operator_can_enable_network_and_forward_named_credential(self, run):
-        run.return_value = subprocess.CompletedProcess(["docker", "run"], 0, '{"answer":"ok"}', "")
-        with patch.dict(os.environ, {"EXAMPLE_API_KEY": "private-value"}):
-            runner = DockerAgentRunner(
-                image="example:local", network="bridge", env_names=["EXAMPLE_API_KEY"]
-            )
-            runner("task")
-
-        args = run.call_args.args[0]
-        self.assertEqual(args[args.index("--network") + 1], "bridge")
-        self.assertIn("EXAMPLE_API_KEY", args)
-        self.assertNotIn("private-value", args)
-
-    @patch("popot_agents.orchestrator.main.subprocess.run")
-    def test_configured_command_and_model_are_passed_to_worker(self, run):
-        run.return_value = subprocess.CompletedProcess(["docker", "run"], 0, '{"answer":"ok"}', "")
-        with patch.dict(os.environ, {"OPENROUTER_MODEL": "example/model", "OPENROUTER_API_KEY": "secret"}):
-            runner = DockerAgentRunner(
-                network="bridge", command=["python", "-m", "popot_agents.worker.http_harness"],
-                environment={"HARNESS_BASE_URL": "https://example.test/v1", "HARNESS_API_KEY_ENV": "OPENROUTER_API_KEY"},
-                env_names=["OPENROUTER_API_KEY"], model_env="OPENROUTER_MODEL",
-            )
-            runner("work")
-        args = run.call_args.args[0]
-        self.assertIn("HARNESS_MODEL=example/model", args)
-        self.assertIn('HARNESS_COMMAND_JSON=["python", "-m", "popot_agents.worker.http_harness"]', args)
-        self.assertIn("OPENROUTER_API_KEY", args)
-        self.assertNotIn("secret", args)
-
-    def test_missing_required_model_fails_when_profile_is_used(self):
-        with patch.dict(os.environ, {}, clear=True):
-            runner = DockerAgentRunner(model_env="MISSING_MODEL")
-            with self.assertRaisesRegex(AgentConfigurationError, "MISSING_MODEL"):
-                runner("work")
-
-    def test_profiles_file_loads_named_runners(self):
+class AgentProfileTests(unittest.TestCase):
+    def test_profiles_file_loads_named_settings(self):
         agents = load_agents(Path(__file__).resolve().parents[1] / "config" / "agents.json")
         self.assertIn("openrouter", agents)
         self.assertIn("ollama", agents)
         self.assertIn("ollama_cloud", agents)
-        self.assertIn("ollama_claude", agents)
-        self.assertIn("ollama_claude_local", agents)
         self.assertIn("nous", agents)
         self.assertEqual(agents["nous"].env_names, ["NOUS_API_KEY"])
         self.assertEqual(agents["nous"].environment["HARNESS_API_KEY_ENV"], "NOUS_API_KEY")
         self.assertEqual(agents["nous"].session_mode, "http")
         self.assertIn("nvidia_nim", agents)
-        self.assertEqual(agents["ollama_claude"].environment["ANTHROPIC_BASE_URL"], "https://ollama.com")
-        self.assertEqual(agents["ollama_claude"].env_names, ["OLLAMA_API_KEY"])
-        self.assertEqual(agents["ollama_claude"].env_aliases, {"ANTHROPIC_AUTH_TOKEN": "OLLAMA_API_KEY"})
         self.assertEqual(agents["ollama"].environment["HARNESS_BASE_URL"], "http://host.docker.internal:11434/v1")
         self.assertEqual(agents["ollama_cloud"].env_names, ["OLLAMA_API_KEY"])
 
     def test_profiles_file_does_not_require_a_special_profile(self):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as file:
-            json.dump({"custom": {"image": "custom:local"}}, file)
+            json.dump({"custom": {"model_env": "CUSTOM_MODEL"}}, file)
             path = file.name
         try:
-            self.assertEqual(load_agents(path)["custom"].image, "custom:local")
+            self.assertEqual(load_agents(path)["custom"].model_env, "CUSTOM_MODEL")
         finally:
             os.unlink(path)
 

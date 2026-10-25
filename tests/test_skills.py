@@ -68,24 +68,18 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(body["messages"][1], {"role": "user", "content": "hello"})
         self.assertEqual(self.role["instructions"], "Base role instruction.")
 
-    def test_docker_and_ax_forward_selection_to_worker_startup(self):
+    def test_ax_forwards_selection_to_worker_startup(self):
         from ax_local.api.ax_runner import AxAgentRunner
-        from popot_agents.orchestrator.main import DockerAgentRunner
         from popot_agents.skills import prepare_role_config
 
-        docker = DockerAgentRunner()
-        command = docker._docker_command("popot-chat-test", True, self.role)
-        docker_json = next(value.split("=", 1)[1] for value in command
-                           if value.startswith("HARNESS_ROLE_JSON="))
         ax = AxAgentRunner(image="localhost:5001/popot-agent-ax@sha256:" + "a" * 64,
                            model="test", base_url="http://localhost:11434/v1",
                            context="kind-popot-ax")
         manifest = ax.task_manifest("0123456789abcdef", self.role)
         ax_json = next(item["value"] for item in manifest["spec"]["env"]
                        if item["name"] == "HARNESS_ROLE_JSON")
-        for value in (docker_json, ax_json):
-            self.assertEqual(json.loads(value), self.role)
-            self.assert_instructions(prepare_role_config(json.loads(value))["instructions"])
+        self.assertEqual(json.loads(ax_json), self.role)
+        self.assert_instructions(prepare_role_config(json.loads(ax_json))["instructions"])
 
     def test_session_snapshots_skills_at_start_for_http_and_cli(self):
         for mode in ("http", "cli"):

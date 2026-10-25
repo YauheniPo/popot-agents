@@ -24,7 +24,8 @@ WORKDIR /app
 COPY pyproject.toml ./
 RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
     && python -m pip install --no-cache-dir --only-binary=:all: --group build --group worker --group ax
-RUN useradd --create-home --uid 10001 agent && mkdir /workspace
+RUN useradd --create-home --uid 10001 agent && mkdir /workspace \
+    && mkdir -m 0700 /run/popot
 COPY --from=ax-runner /ax-task-runner /usr/local/bin/ax-task-runner
 COPY --from=ax-runner /src/ax/cmd/ax-task-runner/antigravity_bootstrap.py /usr/local/bin/antigravity_bootstrap.py
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/

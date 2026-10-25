@@ -63,7 +63,7 @@ class SessionLifecycleTests(unittest.TestCase):
         self.server = SimpleNamespace(
             store=self.store, live={}, live_lock=threading.RLock(),
             session_lock=lambda sid: self.locks.setdefault(sid, threading.RLock()),
-            task_slots=threading.BoundedSemaphore(3), pending_expired=set(),
+            pending_expired=set(),
             idle_seconds=900, last_prune=time.monotonic(),
         )
 

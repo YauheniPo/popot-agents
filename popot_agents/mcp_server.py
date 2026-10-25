@@ -305,7 +305,7 @@ def main() -> None:
             return tools
 
     client = OrchestratorClient(
-        os.getenv("MCP_ORCHESTRATOR_URL", "http://127.0.0.1:8000"),
+        os.getenv("MCP_ORCHESTRATOR_URL", "http://127.0.0.1:8002"),
         int(os.getenv("MCP_UPSTREAM_TIMEOUT_SECONDS", str(RUNTIME["timeouts"]["mcp_upstream_seconds"]))),
     )
     server = LoggedMCPServer("popot-agents", middleware=[_omit_null_progress_token])
