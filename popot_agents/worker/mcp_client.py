@@ -32,10 +32,10 @@ async def _streams(config: dict):
         token = safe_tool_env().get(token_name)
         if not token:
             raise ValueError(f"required MCP environment variable is missing or not selected: {token_name}")
-        import httpx2 as httpx
+        import httpx2
         from mcp.client.streamable_http import streamable_http_client
 
-        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"},
+        async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"},
                                      follow_redirects=False) as client:
             async with streamable_http_client(config["url"], http_client=client) as (read, write):
                 yield read, write
@@ -132,7 +132,7 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
         elif kind == "resource_link":
             parts.append(f"Resource link (content not loaded): {item.uri}")
     output = "\n".join(parts) or json.dumps(
-        result.structured_content or {}, ensure_ascii=False)
+        getattr(result, "structured_content", None) or {}, ensure_ascii=False)
     if result.is_error:
         raise MCPToolError(output)
     return output[:MAX_TOOL_OUTPUT] + ("\n[output truncated]" if len(output) > MAX_TOOL_OUTPUT else "")

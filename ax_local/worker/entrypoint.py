@@ -28,7 +28,7 @@ def prepare_socket(path: str) -> None:
 
 
 def main() -> None:
-    os.makedirs("/workspace", exist_ok=True)
+    os.makedirs("/workspace", mode=0o700, exist_ok=True)
     if os.geteuid() == 0:
         # Substrate creates the private overlay root as 0700. UID 10001 needs
         # search permission on / to reach Python and its stdlib after the drop.
@@ -36,10 +36,15 @@ def main() -> None:
         root_mode = os.stat("/").st_mode & 0o7777
         if root_mode & 0o111 != 0o111:
             os.chmod("/", root_mode | 0o111)
-        # AX's gVisor workspace mount denies chown even to container root.
-        # This workspace belongs to one actor; the sticky bit lets UID 10001
-        # create files without letting it remove files owned by root.
-        os.chmod("/workspace", 0o1777)
+        # Pin the mount rather than following a replacement path or symlink.
+        descriptor = os.open("/workspace", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            tool_user = os.getenv("POPOT_TOOLS_UID") == "10001"
+            os.fchmod(descriptor, 0o700)
+            if tool_user:
+                os.fchown(descriptor, 10001, 10001)
+        finally:
+            os.close(descriptor)
     prepare_socket(SOCKET_PATH)
     tools = make_tools()
     with ProcessMetrics.from_env():
