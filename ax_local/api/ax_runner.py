@@ -91,7 +91,7 @@ class AxAgentRunner:
             "HARNESS_ROLE_JSON": json.dumps(role_config, ensure_ascii=False),
             "HARNESS_SESSION_MODE": "http",
             "HARNESS_CHAT_ID": chat_id,
-            "HARNESS_SOCKET_PATH": "/workspace/chat.sock",
+            "HARNESS_SOCKET_PATH": "/run/popot/chat.sock",
             "POPOT_SESSION_SNAPSHOT": self.snapshot_mode,
             "POPOT_RESOURCE_METRICS_URL": "http://opentelemetry-collector.otel-system.svc:4318/v1/metrics",
             "POPOT_RESOURCE_METRICS_TASK": f"popot-chat-{chat_id}",

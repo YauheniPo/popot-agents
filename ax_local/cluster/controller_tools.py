@@ -1,7 +1,8 @@
 """Adapt pinned local AX templates for Popot tool isolation and session snapshots.
 
 AX v0.3.1 has no Task securityContext. Its Substrate templates start as UID 0
-without SETUID/SETGID; our tool-enabled image needs those two to drop privileges.
+without workspace ownership capabilities. Our tool-enabled image needs CHOWN,
+DAC_OVERRIDE and FOWNER for its private workspace, plus SETUID/SETGID to drop tool privileges.
 Popot DATA sessions cold boot with durable files; FULL is an explicit opt-in.
 """
 
@@ -26,11 +27,12 @@ func popotToolSecurityContext(image string, env map[string]string) *ateapipb.Sec
 		return nil
 	}
 	return &ateapipb.SecurityContext{
-		Capabilities: &ateapipb.Capabilities{Add: []string{"SETUID", "SETGID"}},
+		Capabilities: &ateapipb.Capabilities{Add: []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"}},
 	}
 }
 
 '''
+LEGACY_HELPER = HELPER.replace('"CHOWN", "DAC_OVERRIDE", "FOWNER", ', '')
 SNAPSHOT_HELPER = '''// popotSnapshotScope preserves live session memory only for opted-in Popot images.
 func popotSnapshotScope(image string, env map[string]string) ateapipb.SnapshotContentScope {
 	if env["POPOT_SESSION_SNAPSHOT"] == "full" && strings.HasPrefix(image, "localhost:5001/popot-agent-ax@sha256:") {
@@ -59,6 +61,8 @@ VERSION = hashlib.sha256((AX_COMMIT + HELPER + SECURITY + SNAPSHOT_HELPER + SNAP
 
 
 def patched_source(source: str) -> str:
+    if source.count(LEGACY_HELPER) == 1:
+        source = source.replace(LEGACY_HELPER, HELPER, 1)
     if "func popotToolSecurityContext(" in source:
         if source.count(HELPER) != 1 or source.count(SECURITY) != 1:
             raise ValueError("Local AX tool-user patch has unexpected changes; inspect the checkout")

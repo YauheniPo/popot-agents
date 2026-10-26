@@ -34,12 +34,16 @@ class ProjectLayoutTests(unittest.TestCase):
     def test_ax_compose_uses_shared_paths_without_docker_socket(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
-            env_file = Path(directory) / '.env'
+            project_root = Path(directory).resolve() / 'project'
+            (project_root / 'ax_local').mkdir(parents=True)
+            compose_file = project_root / 'ax_local/compose.yaml'
+            shutil.copyfile(root / 'ax_local/compose.yaml', compose_file)
+            env_file = project_root / '.env'
             env_file.write_text('POPOT_DB_PASSWORD=layout-test\n')
             result = subprocess.run(
                 ['bash', str(root / 'compose.sh'), '--env-file', str(env_file), '-f',
-                 str(root / 'ax_local/compose.yaml'), 'config',
-                 '--format', 'json', '--no-env-resolution'], cwd=directory,
+                 str(compose_file), 'config',
+                 '--format', 'json'], cwd=directory,
                 env={key: value for key, value in os.environ.items()
                      if not key.startswith('COMPOSE_')},
                 text=True, capture_output=True)
@@ -53,10 +57,9 @@ class ProjectLayoutTests(unittest.TestCase):
             'mcp-server': 'docker/mcp.Dockerfile',
         }.items():
             with self.subTest(service=name):
-                self.assertEqual(services[name]['build']['context'], str(root))
+                self.assertEqual(services[name]['build']['context'], str(project_root))
                 self.assertEqual(services[name]['build']['dockerfile'], dockerfile)
                 self.assertTrue((root / dockerfile).is_file())
-        self.assertEqual(services['api']['env_file'][0]['path'], str(root / '.env'))
         from ax_local.cluster.build_versions import BUILD_VERSIONS
         self.assertEqual(services['db']['image'], 'postgres:' + BUILD_VERSIONS['POSTGRES_VERSION'])
         self.assertEqual(services['db'].get('restart'), 'unless-stopped')
@@ -65,6 +68,7 @@ class ProjectLayoutTests(unittest.TestCase):
             'go-base': 'docker-image://' + BUILD_VERSIONS['GO_IMAGE']})
         self.assertEqual(services['mcp-server']['build']['additional_contexts'], {
             'python-base': 'docker-image://' + BUILD_VERSIONS['PYTHON_IMAGE']})
+        self.assertEqual(services['api']['environment']['POPOT_DB_PASSWORD'], 'layout-test')
         for service in services.values():
             for mount in service.get('volumes', []):
                 self.assertNotIn('docker.sock', mount.get('source', ''))
