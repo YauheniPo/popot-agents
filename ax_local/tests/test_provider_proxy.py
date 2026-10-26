@@ -101,7 +101,7 @@ class ProviderProxyTests(unittest.TestCase):
                     "HARNESS_API_KEY_ENV": "OPENROUTER_API_KEY",
                 },
             },
-            "ollama": {
+            "ollama_local": {
                 "session_mode": "http",
                 "environment": {"HARNESS_BASE_URL": "http://host.docker.internal:11434/v1"},
             },
@@ -143,7 +143,7 @@ class ProviderProxyTests(unittest.TestCase):
         self.assertEqual(request.data, body)
 
     def test_proxy_rejects_another_model(self):
-        selected = resolve_provider("ollama", "local-model", self.profiles, {})
+        selected = resolve_provider("ollama_local", "local-model", self.profiles, {})
         with self.assertRaises(ValueError):
             make_upstream_request(selected, b'{"model":"other","messages":[]}')
 
@@ -193,7 +193,7 @@ class ProviderProxyTests(unittest.TestCase):
                              "Bearer private-key")
 
     def test_proxy_enforces_configured_request_limit(self):
-        selected = resolve_provider("ollama", "local-model", self.profiles, {})
+        selected = resolve_provider("ollama_local", "local-model", self.profiles, {})
         with patch.dict(AX_CONFIG["proxy"], {"max_request_bytes": 8}):
             status, _ = dispatch_request({"task-capability": selected}, "/v1/chat/completions",
                                          "Bearer task-capability", b"123456789")

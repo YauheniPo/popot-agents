@@ -66,8 +66,8 @@ class PlannerRoleTests(unittest.TestCase):
                 env = service.worker_environment('0123456789abcdef', planner)
                 tool = make_tools(env)['delegate_task']['schema']['function']
                 self.assertEqual(set(tool['parameters']['properties']['role']['enum']), {
-                    'product_manager', 'product_designer', 'tech_lead', 'backend_engineer',
-                    'frontend_engineer', 'qa_engineer', 'code_reviewer', 'data_analyst', 'analyst'})
+                    'tech_lead', 'backend_engineer', 'frontend_engineer', 'qa_engineer',
+                    'code_reviewer', 'analyst'})
                 self.assertIn(roles['code_reviewer']['description'], tool['description'])
                 with service.turn('0123456789abcdef', 5), self.assertRaises(A2AError):
                     service.dispatch(env['AX_DELEGATION_TOKEN'], 'cron_demo', 'SendMessage', {})

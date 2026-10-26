@@ -165,8 +165,9 @@ Cognee и совместимые Fetch/Git используют SDK 2.x. Пос�
 задано `"model_parameters": {"reasoning": {"enabled": true, "exclude": false}}`.
 Каталоги провайдеров подтверждают поддержку для `openrouter/free` и
 `inclusionai/ling-3.0-flash-fin:free` (проверено 2026-10-10). OpenRouter вернул
-reasoning в проверочном запросе; Nous возвращает HTTP 404 и с параметром, и без
-него, поэтому работа его chat endpoint пока не подтверждена.
+reasoning в проверочном запросе; старая модель Nous возвращала HTTP 404 и с
+параметром, и без него. На 2026-10-18 `NOUS_MODEL` заменён локально на
+`upstage/solar-mini4:free`, которая прошла два хода с инструментами через OmniRoute.
 Настройка применяется к ролям с `agent: "openrouter"` или `agent: "nous"`
 соответственно. Дочерняя задача выбирает профиль своей роли. Для выбора глубины
 можно заменить `enabled` на `"effort": "medium"`
@@ -181,8 +182,8 @@ thinking явно включён его нативным параметром
 reasoning. Чтобы выбрать этот профиль, задайте `"agent": "nvidia_nim"` нужной
 роли в `config/roles.json`, настройте `NVIDIA_MODEL` и `NVIDIA_API_KEY` в `.env`,
 затем выполните `bash ax_local/up.sh`.
-У локального `qwen2.5-coder:14b` thinking-режим не заявлен; у профилей
-`ollama_cloud`, `ollama_claude` и `ollama_claude_local` модель не выбрана.
+У локального `qwen2.5-coder:14b` thinking-режим не заявлен; профили Ollama
+сейчас не назначены ролям.
 Это настройка профиля; в аргументы MCP `run_task` её добавлять не нужно.
 
 `run_task` и `send_message` передают исходные события HTTP harness через
@@ -299,13 +300,14 @@ Compose API/MCP. Уже запущенные контейнеры Compose при
 Роль выбирает профиль через `agent` в `config/roles.json`. Профиль из
 `config/agents.json` задаёт endpoint, имя переменной модели (`model_env`) и
 параметры модели. Значение модели берётся из `.env`: например,
-`backend_engineer → openrouter → OPENROUTER_MODEL`,
-`local_analyst → ollama → OLLAMA_MODEL`. Общего провайдера или модели AX нет.
+`backend_engineer → omniroute_code → OMNIROUTE_CODE_MODEL`,
+`analyst → omniroute → OMNIROUTE_MODEL`,
+`chat → openrouter → OPENROUTER_MODEL`. Общего провайдера или модели AX нет.
 Дочерние A2A-задачи и cron также используют профиль своей роли. Все профили
 делят одну очередь с общим лимитом `max_workers`.
 
-Поддерживаются профили с OpenAI-совместимым HTTP API: `openrouter`, `ollama`,
-`ollama_cloud`, `nous` и `nvidia_nim`. CLI-профили `ollama_claude` и
+Поддерживаются профили с OpenAI-совместимым HTTP API: `openrouter`, `ollama_local`,
+`ollama_cloud`, `nous`, `nvidia_nim`, `omniroute` и `omniroute_code`. CLI-профили `ollama_claude` и
 `ollama_claude_local` удалены: AX использует HTTP harness. API при старте проверяет
 модели и необходимые ключи только для профилей, используемых ролями; отсутствие
 этих настроек приводит к явной ошибке. Неиспользуемым профилям ключи не нужны.
@@ -338,6 +340,98 @@ AX v0.3.1 сохраняет переданные значения как лит
 При запуске через Compose после правки конфига повторите команду запуска ниже. При смене AX context
 нужен отдельный локальный кластер; для другого atespace заранее нужен
 WorkerPool в соответствующем пространстве.
+
+## OmniRoute для AX
+
+Необязательный профиль `omniroute` использует цепочку
+`AX worker → AX API proxy → OmniRoute → провайдер`.
+Docker-сервис закреплён на `diegosouzapw/omniroute:3.8.51`, панель доступна только
+на `http://127.0.0.1:20128`. Настройки, ключи провайдеров и история шлюза хранятся
+в volume `omniroute-data`. Это один экземпляр без Redis: rate limiter использует
+in-memory fallback, его локальное состояние сбрасывается при перезапуске.
+Квоты самих провайдеров от этого не увеличиваются.
+
+Текущие маршруты выбраны по отчёту
+`reports/vps-models-20261018T122551Z/recommendations.json` и проверены локально
+на двух сообщениях с вызовами `calculate`. Порядок целей в `priority`:
+
+| Комбо | Роли | Порядок моделей |
+| --- | --- | --- |
+| `ax-free` | `analyst` | NVIDIA Nemotron Super → OpenRouter Nemotron Super `:free` → OpenRouter North Mini Code `:free` → Nous Solar Mini 4 `:free` |
+| `ax-code-free` | `backend_engineer`, `frontend_engineer`, `code_reviewer` | OpenRouter North Mini Code `:free` → NVIDIA Nemotron Super → OpenRouter Nemotron Super `:free` → Nous Solar Mini 4 `:free` |
+
+Точные model IDs: `nvidia/nemotron-3-super-120b-a12b` у NVIDIA,
+`nvidia/nemotron-3-super-120b-a12b:free` и `cohere/north-mini-code:free` у
+OpenRouter, `upstage/solar-mini4:free` у Nous (`nous-research` в OmniRoute).
+Solar стоит последним: короткая локальная проверка не заменяет статистику
+надёжности. Обязательные reasoning-модели из списка кандидатов пока не включены.
+Hosted-доступ NVIDIA здесь используется для локальной разработки в рамках
+[Developer Program](https://docs.api.nvidia.com/nim/docs/product), с лимитами
+аккаунта; это не обещание бесплатного production-развёртывания.
+Переключение модели внутри OpenRouter не создаёт отдельную аккаунтную квоту.
+
+1. В корневом `.env` задайте стойкий `OMNIROUTE_INITIAL_PASSWORD` для первого
+   входа в панель. В версии 3.8.51 пустое значение оставляет первичную настройку
+   незавершённой; пароль автоматически в логах не появляется.
+   Запустите только шлюз из корня репозитория:
+
+   ```bash
+   docker compose --env-file .env -f ax_local/compose.yaml up -d --wait --wait-timeout 180 omniroute
+   ```
+
+2. Откройте панель. В **Providers** добавьте свои ключи провайдеров, а в
+   **Combos** создайте `ax-free` и `ax-code-free` со стратегией `priority`. Добавьте
+   конкретные модели, доступные бесплатно вашим аккаунтам, в порядке предпочтения:
+   сильную модель первой, затем бесплатные запасные у других провайдеров.
+   Для ролей с инструментами все targets должны поддерживать tool calling.
+   Локальная Ollama из контейнера доступна по `http://host.docker.internal:11434/v1`.
+   В **Endpoints** создайте ключ самого OmniRoute и сохраните его в `.env`:
+
+   ```dotenv
+   OMNIROUTE_API_KEY=<gateway-key-from-OmniRoute>
+   OMNIROUTE_MODEL=ax-free
+   OMNIROUTE_CODE_MODEL=ax-code-free
+   ```
+
+   Для этого ключа включите ограниченный доступ к моделям: разрешите только
+   бесплатные targets и комбо `ax-free`/`ax-code-free`, привяжите разрешённые подключения.
+   Отключите Auto Combos. Сжатие контекста для начальной проверки отключите,
+   чтобы шлюз передавал историю инструментов без преобразований.
+
+   AX не проверяет стоимость моделей. В `ax-free` должны быть только явно
+   выбранные бесплатные targets: без `auto`, платных моделей и платных
+   fallback-targets. Если аккаунт допускает платный перерасход бесплатной квоты,
+   запретите его у провайдера. `auto/...:free` не даёт строгой гарантии:
+   [фильтрация OmniRoute работает fail-open](https://github.com/diegosouzapw/OmniRoute/blob/v3.8.51/docs/routing/AUTO-COMBO.md).
+   При недоступности всех бесплатных targets задача может завершиться ошибкой.
+
+3. В `config/roles.json` роль `analyst` уже выбирает `"agent": "omniroute"`.
+   `backend_engineer`, `frontend_engineer` и `code_reviewer` выбирают
+   `"agent": "omniroute_code"`. Примените конфигурацию
+   через `bash ax_local/up.sh` и начните новую сессию. Проверочный MCP-вызов:
+
+   ```json
+   {"name":"run_task","arguments":{"role":"analyst","task":"Используй calculate для 17 * 19 и сообщи результат."}}
+   ```
+
+Ключ шлюза и обе модели-комбо обязательны для запуска AX, пока роли выбирают
+`omniroute` и `omniroute_code`. Чтобы запустить AX без шлюза, назначьте этим
+ролям другой настроенный профиль, например `openrouter`. `up.sh` сам не запускает
+необязательный шлюз; запускайте его командой из шага 1. Его ключ остаётся в AX API,
+worker получает только токен прокси. Ключи upstream-провайдеров добавляются в
+панели OmniRoute отдельно: переменные `OPENROUTER_API_KEY`, `NVIDIA_API_KEY` и
+другие из `.env` автоматически в шлюз не импортируются.
+
+В панели **Combos**, **Providers** и **Quota** проверяйте выбранные модели,
+ошибки, переключения и использование квот. Python-прокси AX передаёт тело ответа,
+но не пробрасывает `X-OmniRoute-*` заголовки; метрики шлюза в Grafana этим
+подключением не добавляются.
+
+Офлайн-проверка профиля, tool loop и изоляции ключа:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest ax_local.tests.test_omniroute
+```
 
 ## Планировщик и спецификации
 
@@ -664,9 +758,8 @@ bash ax_local/up.sh
 bash ax_local/up.sh
 ```
 
-Для локальной роли `local_analyst` используются `OLLAMA_MODEL` и доступный
-Ollama на `host.docker.internal:11434`. Python-пакет на хосте устанавливать не
-нужно. Команда запуска сама готовит kubeconfig для API-контейнера при первом
+Python-пакет на хосте устанавливать не нужно. Команда запуска сама готовит
+kubeconfig для API-контейнера при первом
 старте.
 
 Ранее запущенный на хосте `python3 -m ax_local.server` можно остановить через
@@ -694,7 +787,7 @@ curl --fail-with-body -sS http://127.0.0.1:8003/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H 'MCP-Protocol-Version: 2025-11-25' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_task","arguments":{"role":"local_analyst","task":"Сколько будет 17 * 19?"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_task","arguments":{"role":"analyst","task":"Вычисли 17 * 19 через calculate."}}}'
 ```
 
 Логи API и MCP при проверке:

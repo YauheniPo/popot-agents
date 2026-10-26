@@ -192,14 +192,15 @@ class AgentProfileTests(unittest.TestCase):
     def test_profiles_file_loads_named_settings(self):
         agents = load_agents(Path(__file__).resolve().parents[1] / "config" / "agents.json")
         self.assertIn("openrouter", agents)
-        self.assertIn("ollama", agents)
+        self.assertIn("ollama_local", agents)
         self.assertIn("ollama_cloud", agents)
         self.assertIn("nous", agents)
         self.assertEqual(agents["nous"].env_names, ["NOUS_API_KEY"])
         self.assertEqual(agents["nous"].environment["HARNESS_API_KEY_ENV"], "NOUS_API_KEY")
         self.assertEqual(agents["nous"].session_mode, "http")
         self.assertIn("nvidia_nim", agents)
-        self.assertEqual(agents["ollama"].environment["HARNESS_BASE_URL"], "http://host.docker.internal:11434/v1")
+        self.assertEqual(agents["ollama_local"].environment["HARNESS_BASE_URL"], "http://host.docker.internal:11434/v1")
+        self.assertEqual(agents["ollama_local"].model_env, "OLLAMA_LOCAL_MODEL")
         self.assertEqual(agents["ollama_cloud"].env_names, ["OLLAMA_API_KEY"])
 
     def test_profiles_file_does_not_require_a_special_profile(self):
@@ -213,13 +214,13 @@ class AgentProfileTests(unittest.TestCase):
 
     def test_dotenv_loads_values_without_overwriting_process_environment(self):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as file:
-            file.write('OPENROUTER_API_KEY="from-file"\nexport OLLAMA_MODEL=qwen2.5-coder:14b\n# ignored\n')
+            file.write('OPENROUTER_API_KEY="from-file"\nexport OLLAMA_LOCAL_MODEL=qwen2.5-coder:14b\n# ignored\n')
             path = file.name
         try:
             with patch.dict(os.environ, {"OPENROUTER_API_KEY": "from-process"}, clear=True):
                 load_dotenv(path)
                 self.assertEqual(os.environ["OPENROUTER_API_KEY"], "from-process")
-                self.assertEqual(os.environ["OLLAMA_MODEL"], "qwen2.5-coder:14b")
+                self.assertEqual(os.environ["OLLAMA_LOCAL_MODEL"], "qwen2.5-coder:14b")
         finally:
             os.unlink(path)
 
