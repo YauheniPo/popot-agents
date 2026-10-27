@@ -36,10 +36,15 @@ separate from agent memory request budgets. Healthy containers do not mean skill
 indexing has finished. If an import fails, the services remain running; rerun
 `bash memory/up.sh` to update the same nodes.
 
-The API and UI sources are pinned to upstream commit `b32d8afc59e1064d9291b9828a8a147be9cc8bab`.
+The API and UI versions are pinned in `[tool.popot.build]` in the root
+`pyproject.toml`: `COGNEE_VERSION`, `COGNEE_COMMIT` and `COGNEE_SOURCE_SHA256`.
+Update all three together; the loader checks that the image tag matches the commit.
 The UI image is built locally with the small React extension in `memory/ui`;
 the launcher rebuilds it using Docker's cache. The source archive checksum is
 verified, and the overlay fails if the upstream component contract changes.
+nginx and the Node base image also use the shared pins. The launcher and
+`bash compose.sh --env-file .env -f memory/compose.yaml ...` load these values
+automatically and require Python 3.11+.
 
 In **Mindmap**, select an entity to open **Saved knowledge**. The panel follows
 its graph links to source chunks and their documents in the selected brain,
@@ -100,8 +105,8 @@ To migrate old `memory_*` documents, keep agents idle, copy the migration into
 the running Cognee container, and first run it without `--apply`:
 
 ```bash
-docker compose --env-file .env -f memory/compose.yaml cp memory/reindex.py cognee:/app/popot-sync/reindex.py
-docker compose --env-file .env -f memory/compose.yaml exec -T cognee python /app/popot-sync/reindex.py --dataset popot-agents --dataset github-yauhenipo-popot-bot-2-0 --backup /cognee-storage/system/popot-backups/knowledge-v2.json
+bash compose.sh --env-file .env -f memory/compose.yaml cp memory/reindex.py cognee:/app/popot-sync/reindex.py
+bash compose.sh --env-file .env -f memory/compose.yaml exec -T cognee python /app/popot-sync/reindex.py --dataset popot-agents --dataset github-yauhenipo-popot-bot-2-0 --backup /cognee-storage/system/popot-backups/knowledge-v2.json
 ```
 
 Append `--apply` to the second command to reindex. The private backup contains
@@ -163,9 +168,9 @@ of AX Task lifecycle. Start a new session after rebuilding the AX worker.
 ## Operations
 
 ```bash
-docker compose --env-file .env -f memory/compose.yaml ps
-docker compose --env-file .env -f memory/compose.yaml logs --tail=100 cognee
-docker compose --env-file .env -f memory/compose.yaml stop
+bash compose.sh --env-file .env -f memory/compose.yaml ps
+bash compose.sh --env-file .env -f memory/compose.yaml logs --tail=100 cognee
+bash compose.sh --env-file .env -f memory/compose.yaml stop
 ```
 
 Use `bash memory/up.sh` to start or update services so the kind overlay is

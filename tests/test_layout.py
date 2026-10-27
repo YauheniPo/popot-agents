@@ -41,7 +41,7 @@ class ProjectLayoutTests(unittest.TestCase):
             env_file = project_root / '.env'
             env_file.write_text('POPOT_DB_PASSWORD=layout-test\n')
             result = subprocess.run(
-                ['docker', 'compose', '--env-file', str(env_file), '-f',
+                ['bash', str(root / 'compose.sh'), '--env-file', str(env_file), '-f',
                  str(compose_file), 'config',
                  '--format', 'json'], cwd=directory,
                 env={key: value for key, value in os.environ.items()
@@ -60,11 +60,68 @@ class ProjectLayoutTests(unittest.TestCase):
                 self.assertEqual(services[name]['build']['context'], str(project_root))
                 self.assertEqual(services[name]['build']['dockerfile'], dockerfile)
                 self.assertTrue((root / dockerfile).is_file())
+        from ax_local.cluster.build_versions import BUILD_VERSIONS
+        self.assertEqual(services['db']['image'], 'postgres:' + BUILD_VERSIONS['POSTGRES_VERSION'])
+        self.assertEqual(services['db'].get('restart'), 'unless-stopped')
+        self.assertEqual(services['api']['build']['additional_contexts'], {
+            'python-base': 'docker-image://' + BUILD_VERSIONS['PYTHON_IMAGE'],
+            'go-base': 'docker-image://' + BUILD_VERSIONS['GO_IMAGE']})
+        self.assertEqual(services['mcp-server']['build']['additional_contexts'], {
+            'python-base': 'docker-image://' + BUILD_VERSIONS['PYTHON_IMAGE']})
         self.assertEqual(services['api']['environment']['POPOT_DB_PASSWORD'], 'layout-test')
         for service in services.values():
             for mount in service.get('volumes', []):
                 self.assertNotIn('docker.sock', mount.get('source', ''))
                 self.assertNotIn('docker.sock', mount['target'])
+
+    @unittest.skipUnless(shutil.which('docker'), 'Docker Compose is required')
+    def test_memory_and_omniroute_compose_use_shared_pins(self):
+        from ax_local.cluster.build_versions import BUILD_VERSIONS
+        root = Path(__file__).resolve().parents[1]
+        pins = {**BUILD_VERSIONS, 'OMNIROUTE_VERSION': '9.8.7',
+                'COGNEE_VERSION': 'main-ccccccc', 'COGNEE_COMMIT': 'c' * 40,
+                'COGNEE_SOURCE_SHA256': 'd' * 64, 'POSTGRES_VERSION': '18',
+                'NGINX_VERSION': '1.29-alpine', 'NODE_IMAGE': 'node:24-alpine',
+                'PYTHON_IMAGE': 'python:3.13-slim'}
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / 'project'
+            (fixture / 'ax_local/cluster').mkdir(parents=True)
+            (fixture / 'memory/ui').mkdir(parents=True)
+            for path in ('compose.sh', 'ax_local/cluster/build_versions.py',
+                         'ax_local/compose.yaml', 'memory/compose.yaml'):
+                shutil.copyfile(root / path, fixture / path)
+            (fixture / 'pyproject.toml').write_text('[tool.popot.build]\n' + ''.join(
+                f'{key} = "{value}"\n' for key, value in pins.items()))
+            env_file = fixture / '.env'
+            env_file.write_text('COGNEE_PASSWORD=layout-test\nPOPOT_DB_PASSWORD=layout-test\n')
+            configs = []
+            for path in ('memory/compose.yaml', 'ax_local/compose.yaml'):
+                result = subprocess.run(
+                    ['bash', str(fixture / 'compose.sh'), '--env-file', str(env_file),
+                     '-f', str(fixture / path), '--profile', 'omniroute', 'config',
+                     '--format', 'json'],
+                    env={key: value for key, value in os.environ.items()
+                         if not key.startswith('COMPOSE_')}, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                configs.append(json.loads(result.stdout)['services'])
+        memory, ax = configs
+        self.assertEqual(ax['api']['build']['additional_contexts']['python-base'],
+                         'docker-image://' + pins['PYTHON_IMAGE'])
+        self.assertEqual(ax['mcp-server']['build']['additional_contexts'], {
+            'python-base': 'docker-image://' + pins['PYTHON_IMAGE']})
+        self.assertEqual(ax['omniroute']['image'],
+                         'diegosouzapw/omniroute:' + pins['OMNIROUTE_VERSION'])
+        self.assertEqual(ax['db']['image'], 'postgres:' + pins['POSTGRES_VERSION'])
+        self.assertEqual(memory['cognee']['image'], 'cognee/cognee:' + pins['COGNEE_VERSION'])
+        self.assertEqual(memory['cognee-web']['image'], 'nginx:' + pins['NGINX_VERSION'])
+        self.assertEqual(memory['cognee-ui']['image'],
+                         'popot-cognee-ui:' + pins['COGNEE_VERSION'] + '-knowledge')
+        self.assertEqual(memory['cognee-ui']['build']['args'], {
+            key: pins[key] for key in
+            ('COGNEE_COMMIT', 'COGNEE_SOURCE_SHA256')})
+        self.assertEqual(memory['cognee-ui']['build']['additional_contexts'], {
+            'node-base': 'docker-image://' + pins['NODE_IMAGE'],
+            'cognee-ui-base': 'docker-image://cognee/cognee-ui:' + pins['COGNEE_VERSION']})
 
     def test_orchestrator_loads_profiles_and_roles_from_config_directory(self):
         from popot_agents.orchestrator.main import load_agents, load_roles

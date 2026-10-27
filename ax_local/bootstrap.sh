@@ -96,7 +96,10 @@ printf '%s\n' "$CONTROLLER_TOOLS_VERSION" > "$LOCAL/controller-tools-version"
 kubectl --context "kind-${CLUSTER}" rollout status deployment/ax-server -n ax-system --timeout=300s
 
 IMAGE="$REGISTRY/popot-agent-ax:local"
-docker build --platform "linux/$(go env GOARCH)" -f "$ROOT/ax_local/docker/worker.Dockerfile" -t "$IMAGE" "$ROOT"
+docker build --platform "linux/$(go env GOARCH)" \
+  --build-context "python-base=docker-image://$PYTHON_IMAGE" \
+  --build-context "go-base=docker-image://$GO_IMAGE" \
+  -f "$ROOT/ax_local/docker/worker.Dockerfile" -t "$IMAGE" "$ROOT"
 docker push "$IMAGE"
 IMAGE_DIGEST="$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')"
 if [[ ! "$IMAGE_DIGEST" =~ ^localhost:5001/popot-agent-ax@sha256:[0-9a-f]{64}$ ]]; then

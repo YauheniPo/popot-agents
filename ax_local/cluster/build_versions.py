@@ -1,6 +1,7 @@
-"""Read shared build pins from pyproject.toml; emit validated shell assignments."""
+"""Read shared pins from pyproject.toml; emit shell assignments or run Compose."""
 
 from pathlib import Path
+import os
 import re
 import shlex
 import sys
@@ -12,19 +13,32 @@ import tomllib
 
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / 'pyproject.toml'
+RELEASE = r'v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?'
+COMMIT = r'[0-9a-f]{40}'
+TAG = r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}'
+IMAGE = rf'[A-Za-z0-9][A-Za-z0-9._:/-]*:{TAG}(?:@sha256:[0-9a-f]{{64}})?'
+PATTERNS = {
+    'AX_VERSION': RELEASE, 'AX_COMMIT': COMMIT,
+    'SUBSTRATE_COMMIT': COMMIT, 'KO_VERSION': RELEASE,
+    'KUBECTL_VERSION': RELEASE, 'OMNIROUTE_VERSION': TAG, 'HOLMES_VERSION': TAG,
+    'COGNEE_VERSION': r'main-[0-9a-f]{7}', 'COGNEE_COMMIT': COMMIT,
+    'COGNEE_SOURCE_SHA256': r'[0-9a-f]{64}',
+    'POSTGRES_VERSION': TAG, 'NGINX_VERSION': TAG,
+    'PYTHON_IMAGE': IMAGE, 'GO_IMAGE': IMAGE, 'NODE_IMAGE': IMAGE,
+}
 
 
 def load_build_versions(path=None):
     with Path(path or DEFAULT_PATH).open('rb') as stream:
         config = tomllib.load(stream)
     versions = config.get('tool', {}).get('popot', {}).get('build', {})
-    expected = {'AX_VERSION', 'AX_COMMIT', 'SUBSTRATE_COMMIT', 'KO_VERSION'}
-    if not isinstance(versions, dict) or set(versions) != expected:
-        raise ValueError('[tool.popot.build] must define AX_VERSION, AX_COMMIT, SUBSTRATE_COMMIT and KO_VERSION')
+    if not isinstance(versions, dict) or set(versions) != set(PATTERNS):
+        raise ValueError('[tool.popot.build] must define exactly: ' + ', '.join(PATTERNS))
     for key, value in versions.items():
-        pattern = r'[0-9a-f]{40}' if key.endswith('_COMMIT') else r'v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?'
-        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+        if not isinstance(value, str) or not re.fullmatch(PATTERNS[key], value):
             raise ValueError(f'Invalid build version: {key}')
+    if versions['COGNEE_VERSION'] != 'main-' + versions['COGNEE_COMMIT'][:7]:
+        raise ValueError('COGNEE_VERSION must match COGNEE_COMMIT')
     return versions
 
 
@@ -32,5 +46,9 @@ BUILD_VERSIONS = load_build_versions()
 
 
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['compose']:
+        os.execvpe('docker', ['docker', *sys.argv[1:]], {**os.environ, **BUILD_VERSIONS})
+    if len(sys.argv) != 1:
+        raise SystemExit('Usage: build_versions.py [compose <docker compose arguments>]')
     for key, value in BUILD_VERSIONS.items():
         print(f'{key}={shlex.quote(value)}')

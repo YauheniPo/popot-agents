@@ -2,7 +2,7 @@ name: popot-memory
 
 services:
   cognee:
-    image: cognee/cognee:main-b32d8af
+    image: cognee/cognee:${COGNEE_VERSION:?Use bash compose.sh to load pyproject.toml versions}
     restart: unless-stopped
     stop_grace_period: 30s
     entrypoint: ["gunicorn", "--chdir", "/app/popot-sync", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-t", "30000", "--bind", "0.0.0.0:8000", "--log-level", "error", "session_api:app"]
@@ -43,7 +43,7 @@ services:
       start_period: 60s
 
   cognee-web:
-    image: nginx:1.28-alpine
+    image: nginx:${NGINX_VERSION:?Use bash compose.sh to load pyproject.toml versions}
     restart: unless-stopped
     depends_on:
       cognee:
@@ -54,9 +54,15 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
 
   cognee-ui:
-    image: popot-cognee-ui:main-b32d8af-knowledge
+    image: popot-cognee-ui:${COGNEE_VERSION:?Use bash compose.sh to load pyproject.toml versions}-knowledge
     build:
       context: ./ui
+      additional_contexts:
+        node-base: docker-image://${NODE_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
+        cognee-ui-base: docker-image://cognee/cognee-ui:${COGNEE_VERSION:?Use bash compose.sh to load pyproject.toml versions}
+      args:
+        COGNEE_COMMIT: ${COGNEE_COMMIT:?Use bash compose.sh to load pyproject.toml versions}
+        COGNEE_SOURCE_SHA256: ${COGNEE_SOURCE_SHA256:?Use bash compose.sh to load pyproject.toml versions}
     restart: unless-stopped
     # Share the gateway's network namespace: both browser and UI server-side
     # graph routes can reach the same authenticated API at localhost:3001.
