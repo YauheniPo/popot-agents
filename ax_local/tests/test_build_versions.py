@@ -30,7 +30,7 @@ class BuildVersionTests(unittest.TestCase):
     def test_service_versions_are_loaded_and_validated(self):
         from ax_local.cluster.build_versions import load_build_versions
         versions = load_build_versions()
-        self.assertTrue(SERVICE_PINS.keys() <= versions.keys())
+        self.assertLessEqual(SERVICE_PINS.keys(), versions.keys())
 
     def test_compose_receives_changed_pins_and_preserves_arguments_and_exit_code(self):
         with tempfile.TemporaryDirectory() as directory:

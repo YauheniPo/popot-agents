@@ -14,13 +14,14 @@ import tomllib
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / 'pyproject.toml'
 RELEASE = r'v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?'
+COMMIT = r'[0-9a-f]{40}'
 TAG = r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}'
 IMAGE = rf'[A-Za-z0-9][A-Za-z0-9._:/-]*:{TAG}(?:@sha256:[0-9a-f]{{64}})?'
 PATTERNS = {
-    'AX_VERSION': RELEASE, 'AX_COMMIT': r'[0-9a-f]{40}',
-    'SUBSTRATE_COMMIT': r'[0-9a-f]{40}', 'KO_VERSION': RELEASE,
+    'AX_VERSION': RELEASE, 'AX_COMMIT': COMMIT,
+    'SUBSTRATE_COMMIT': COMMIT, 'KO_VERSION': RELEASE,
     'KUBECTL_VERSION': RELEASE, 'OMNIROUTE_VERSION': TAG, 'HOLMES_VERSION': TAG,
-    'COGNEE_VERSION': r'main-[0-9a-f]{7}', 'COGNEE_COMMIT': r'[0-9a-f]{40}',
+    'COGNEE_VERSION': r'main-[0-9a-f]{7}', 'COGNEE_COMMIT': COMMIT,
     'COGNEE_SOURCE_SHA256': r'[0-9a-f]{64}',
     'POSTGRES_VERSION': TAG, 'NGINX_VERSION': TAG,
     'PYTHON_IMAGE': IMAGE, 'GO_IMAGE': IMAGE, 'NODE_IMAGE': IMAGE,
