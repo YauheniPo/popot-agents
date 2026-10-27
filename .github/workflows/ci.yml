@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python, AX and graph tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: popot_test
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: popot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U popot_test -d popot_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      AGENT_TEST_POSTGRES: '1'
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGUSER: popot_test
+      PGPASSWORD: ci-only-password
+      PGDATABASE: popot_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install test and runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group ci
+      - name: Python and AX tests with coverage
+        id: python-tests
+        run: python -m coverage run -m pytest --junitxml=reports/python.xml
+      - name: Graph UI tests
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p reports
+          node --test --experimental-test-coverage --test-coverage-exclude='tests/**' \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=reports/node.xml \
+            --test-reporter=lcov --test-reporter-destination=reports/graph.lcov tests/*.mjs
+      - name: Coverage reports
+        if: ${{ !cancelled() && steps.python-tests.outcome != 'skipped' }}
+        run: |
+          python -m coverage xml
+          python -m coverage html
+          echo '## Python coverage' >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+      - name: Save test and coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: reports/
+          if-no-files-found: error
+          retention-days: 14
+
+  test-report:
+    name: Test results
+    needs: tests
+    # Forks and Dependabot have read-only tokens; their reports remain in artifacts.
+    if: >-
+      !cancelled() && needs.tests.result != 'skipped' &&
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-results
+          path: reports
+      - name: Python test report
+        uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a # v3.2.0
+        with:
+          name: Python and AX tests
+          path: reports/python.xml
+          reporter: python-xunit
+          list-tests: failed
+          use-actions-summary: 'true'
+      - name: Graph test report
+        if: ${{ !cancelled() }}
+        uses: dorny/test-reporter@d1b5dff021aa968b288b02285a8bf47471c5928a # v3.2.0
+        with:
+          name: Graph UI tests
+          path: reports/node.xml
+          reporter: java-junit
+          list-tests: failed
+          use-actions-summary: 'true'
+
+  sonar:
+    name: SonarQube Cloud Quality Gate
+    needs: tests
+    # The Cloud Free plan analyzes main and PRs targeting main, not branch pushes.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.base.ref == 'main') ||
+       (github.event_name != 'pull_request' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-results
+          path: reports
+      - name: Check Sonar token configuration
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo '::error::Set the repository secret SONAR_TOKEN to enable SonarQube Cloud analysis.'
+            exit 1
+          fi
+      - name: Analyze and wait for Quality Gate
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Sonar dashboard
+        if: ${{ !cancelled() }}
+        run: echo '[SonarQube Cloud dashboard](https://sonarcloud.io/dashboard?id=YauheniPo_popot-agents)' >> "$GITHUB_STEP_SUMMARY"

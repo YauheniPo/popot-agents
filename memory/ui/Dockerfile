@@ -22,3 +22,4 @@ FROM cognee-ui-base AS runner
 LABEL com.popot.project="popot-agents"
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone /app/
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static /app/.next/static
+USER nextjs

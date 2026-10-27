@@ -19,6 +19,7 @@ from ax_local.cluster.build_versions import BUILD_VERSIONS
 ROOT = Path(__file__).resolve().parents[2]
 NAMESPACE = 'ax-diagnostics'
 IMAGE = 'robustadev/holmes:' + BUILD_VERSIONS['HOLMES_VERSION']
+HOME_PATH = '/home/holmes'
 
 
 def scope(config):
@@ -114,7 +115,8 @@ def investigation_job(question, model):
                                  {'name': 'OPENAI_API_BASE', 'value': 'http://host.docker.internal:20128/v1'},
                                  {'name': 'OPENAI_API_KEY', 'valueFrom': {'secretKeyRef': {
                                      'name': 'holmes-omniroute', 'key': 'api-key'}}},
-                                 {'name': 'HOME', 'value': '/tmp'},
+                                 {'name': 'HOME', 'value': HOME_PATH},
+                                 {'name': 'TMPDIR', 'value': HOME_PATH},
                                  {'name': 'PYTHONDONTWRITEBYTECODE', 'value': '1'},
                                  {'name': 'PYTHONUNBUFFERED', 'value': '1'},
                                  {'name': 'PYTHONPATH', 'value': '/app'},
@@ -127,7 +129,7 @@ def investigation_job(question, model):
                                                  'readOnlyRootFilesystem': True,
                                                  'capabilities': {'drop': ['ALL']}},
                              'volumeMounts': [{'name': 'config', 'mountPath': '/etc/popot-holmes', 'readOnly': True},
-                                              {'name': 'tmp', 'mountPath': '/tmp'}],
+                                              {'name': 'tmp', 'mountPath': HOME_PATH}],
                          }],
                          'volumes': [{'name': 'config', 'configMap': {'name': 'holmes-ax'}},
                                      {'name': 'tmp', 'emptyDir': {'sizeLimit': '512Mi'}}],
