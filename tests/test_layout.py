@@ -92,14 +92,14 @@ class ProjectLayoutTests(unittest.TestCase):
                 shutil.copyfile(root / path, fixture / path)
             (fixture / 'pyproject.toml').write_text('[tool.popot.build]\n' + ''.join(
                 f'{key} = "{value}"\n' for key, value in pins.items()))
-            env_file = Path(directory) / '.env'
+            env_file = fixture / '.env'
             env_file.write_text('COGNEE_PASSWORD=layout-test\nPOPOT_DB_PASSWORD=layout-test\n')
             configs = []
             for path in ('memory/compose.yaml', 'ax_local/compose.yaml'):
                 result = subprocess.run(
                     ['bash', str(fixture / 'compose.sh'), '--env-file', str(env_file),
                      '-f', str(fixture / path), '--profile', 'omniroute', 'config',
-                     '--format', 'json', '--no-env-resolution'],
+                     '--format', 'json'],
                     env={key: value for key, value in os.environ.items()
                          if not key.startswith('COMPOSE_')}, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
