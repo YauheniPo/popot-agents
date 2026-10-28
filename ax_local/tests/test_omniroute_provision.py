@@ -1,10 +1,11 @@
 """Provisioning must preserve fallback order, secret boundaries and key policy."""
 
 import copy
-import hashlib
 import io
+from pathlib import Path
+import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 from unittest.mock import patch
@@ -175,9 +176,10 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(self.gateway.writes, [])
 
     def test_hashed_gateway_key_is_reused(self):
+        # OmniRoute SHA-256 fixture for 'test-gateway-secret', not an admin password.
         self.gateway.state['apiKeys'].append({
             'id': 'existing', 'name': 'popot-ax-free', 'key': 'masked',
-            'keyHash': hashlib.sha256(self.env['OMNIROUTE_API_KEY'].encode()).hexdigest()})
+            'keyHash': '5686319557f053a8c480deab360ac65ab8531b85c9280c19f318105eafa53f7e'})
         self.apply()
         self.assertEqual(len(self.gateway.state['apiKeys']), 1)
         self.assertEqual(self.gateway.state['apiKeys'][0]['id'], 'existing')
@@ -214,7 +216,49 @@ class ProvisionTests(unittest.TestCase):
             self.assertNotIn(secret, output.getvalue())
 
 
+class CliTests(unittest.TestCase):
+    def test_explicit_local_configuration_paths_are_supported(self):
+        from ax_local.omniroute import main
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Path(directory) / 'settings.json'
+            combos = Path(directory) / 'combos.json'
+            settings.write_text('{"settings":"custom"}')
+            combos.write_text('{"combos":"custom"}')
+            args = ['omniroute', '--config', str(settings), '--combos', str(combos)]
+            with patch('sys.argv', args), patch('ax_local.omniroute.provision', return_value={'apiKeys': 1}) as apply, \
+                 redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(), 0)
+            self.assertEqual(apply.call_args.args[1:3], ({'settings': 'custom'}, {'combos': 'custom'}))
+            self.assertIn('configuration verified', output.getvalue())
+            settings.write_text('not JSON')
+            with patch('sys.argv', args), patch('ax_local.omniroute.provision') as apply, \
+                 redirect_stderr(io.StringIO()) as output:
+                self.assertEqual(main(), 1)
+            apply.assert_not_called()
+            self.assertIn('check configuration files', output.getvalue())
+
+    def test_provisioning_failure_is_reported_as_a_failed_command(self):
+        from ax_local.omniroute import main
+        with patch('sys.argv', ['omniroute']), \
+             patch('ax_local.omniroute.provision', side_effect=ProvisionError('policy verification failed')), \
+             redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(main(), 1)
+        self.assertIn('policy verification failed', output.getvalue())
+
+
 class ApiTests(unittest.TestCase):
+    def test_connection_and_invalid_json_errors_do_not_echo_credentials(self):
+        api = Api('http://localhost:20128')
+        for failure in (OSError('private-key'), TimeoutError('private-key')):
+            with self.subTest(error=type(failure).__name__), \
+                 patch.object(api.opener, 'open', side_effect=failure):
+                with self.assertRaisesRegex(ProvisionError, 'connection unavailable') as result:
+                    api.request('GET', '/api/settings')
+                self.assertNotIn('private-key', str(result.exception))
+        with patch.object(api.opener, 'open', return_value=io.BytesIO(b'private-key')):
+            with self.assertRaisesRegex(ProvisionError, 'invalid JSON'):
+                api.request('GET', '/api/settings')
+
     def test_login_cookie_is_kept_and_credential_posts_are_not_redirected(self):
         seen = []
 

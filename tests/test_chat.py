@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
 from popot_agents.orchestrator.session_store import SessionStore
+from popot_agents.runtime_config import RUNTIME
 from popot_agents.worker.session_worker import Conversation
 
 
@@ -94,7 +95,8 @@ class TaskSessionTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             handler.do_GET()
 
-    def test_cleanup_does_not_wait_for_active_session(self):
+    @patch("popot_agents.orchestrator.main.time.monotonic", return_value=1.0)
+    def test_cleanup_does_not_wait_for_active_session(self, _clock):
         session_id = "a" * 16
         chat = FakeChat("worker-" + session_id)
         lock = threading.Lock()
@@ -105,7 +107,8 @@ class TaskSessionTests(unittest.TestCase):
             live={session_id: SimpleNamespace(worker=chat, role_config={"ttl_seconds": 0},
                                               last_used=time.monotonic())},
             live_lock=threading.RLock(), session_lock=lambda _session_id: lock,
-            pending_expired=set(), idle_seconds=300, last_prune=0,
+            pending_expired=set(), idle_seconds=300,
+            last_prune=time.monotonic() - RUNTIME["sessions"]["prune_interval_seconds"],
         )
         ChatServer.service_actions(server)
         self.assertFalse(chat.closed)
@@ -155,7 +158,8 @@ class TaskSessionTests(unittest.TestCase):
                 request.join(3)
             self.assertEqual(result[0][0], 200)
 
-    def test_expired_followup_is_not_pruned_during_active_turn(self):
+    @patch("popot_agents.orchestrator.main.time.monotonic", return_value=1.0)
+    def test_expired_followup_is_not_pruned_during_active_turn(self, _clock):
         entered, release = threading.Event(), threading.Event()
 
         class BlockingChat(FakeChat):
@@ -194,7 +198,7 @@ class TaskSessionTests(unittest.TestCase):
                 saved = json.loads(path.read_text())
                 saved["createdAt"] = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
                 path.write_text(json.dumps(saved))
-                server.last_prune = 0
+                server.last_prune = time.monotonic() - RUNTIME["sessions"]["prune_interval_seconds"]
                 ChatServer.service_actions(server)
                 self.assertTrue(path.exists())
             finally:
@@ -502,23 +506,27 @@ class ChatApiTests(unittest.TestCase):
         self.request("POST", "/messages", {"sessionId": session_id, "message": "later"})
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["createdAt"], created_at)
 
-    def test_session_expires_seven_days_after_creation_even_if_recently_used(self):
+    @patch("popot_agents.orchestrator.main.time.monotonic", return_value=1.0)
+    def test_session_expires_seven_days_after_creation_even_if_recently_used(self, _clock):
         _, first = self.request("POST", "/messages", {"agent": "test_agent", "message": "hello"})
         session_id = first["sessionId"]
         path = Path(self.directory.name) / f"{session_id}.json"
-        saved = json.loads(path.read_text(encoding="utf-8"))
-        saved["createdAt"] = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
-        saved["updatedAt"] = datetime.now(timezone.utc).isoformat()
-        replacement = path.with_suffix(".tmp")
-        replacement.write_text(json.dumps(saved), encoding="utf-8")
-        replacement.replace(path)
+        with self.server.session_lock(session_id):
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            saved["createdAt"] = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+            saved["updatedAt"] = datetime.now(timezone.utc).isoformat()
+            replacement = path.with_suffix(".tmp")
+            replacement.write_text(json.dumps(saved), encoding="utf-8")
+            replacement.replace(path)
 
         status, _ = self.request("POST", "/messages", {
             "sessionId": session_id, "message": "continue",
         })
         self.assertEqual(status, 404)
-        self.server.last_prune = 0
-        self.server.service_actions()
+        # Wait for the response handler to release this session before cleanup.
+        with self.server.session_lock(session_id):
+            self.server.last_prune = time.monotonic() - RUNTIME["sessions"]["prune_interval_seconds"]
+            self.server.service_actions()
         self.assertTrue(self.runner.chats[0].closed)
         self.assertFalse(path.exists())
         self.assertNotIn(session_id, [chat["sessionId"] for chat in self.request("GET", "/chats")[1]["chats"]])

@@ -50,20 +50,31 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(target.read_text(), 'keep this file')
 
     def test_root_overlay_allows_tool_uid_to_traverse_before_harness_starts(self):
-        modes = {"/": 0o700, "/workspace": 0o755}
+        modes = {"/": 0o700, "/workspace": 0o1777}
+        owner = [10001, 10001]
+
+        def chmod_workspace(fd, mode):
+            modes["/workspace"] = mode
 
         def start_harness():
             # UID 10001 must cross / to execute Python or read its stdlib.
             self.assertEqual(modes["/"], 0o711)
             self.assertEqual(modes["/"] & 0o022, 0)
-            self.assertEqual(modes["/workspace"], 0o1777)
+            self.assertEqual(modes["/workspace"], 0o700)
+            self.assertEqual(owner, [10001, 10001])
 
-        with patch("ax_local.worker.entrypoint.os.makedirs"), \
+        with patch.dict(os.environ, {"POPOT_TOOLS_UID": "10001"}), \
+             patch("ax_local.worker.entrypoint.os.makedirs"), \
+             patch("ax_local.worker.entrypoint.os.open", return_value=99), \
+             patch("ax_local.worker.entrypoint.os.close"), \
              patch("ax_local.worker.entrypoint.os.geteuid", return_value=0), \
              patch("ax_local.worker.entrypoint.os.stat",
                    side_effect=lambda path: SimpleNamespace(st_mode=modes[path])), \
              patch("ax_local.worker.entrypoint.os.chmod",
                    side_effect=lambda path, mode: modes.update({path: mode})), \
+             patch("ax_local.worker.entrypoint.os.fchown",
+                   side_effect=lambda fd, uid, gid: owner.__setitem__(slice(None), [uid, gid])), \
+             patch("ax_local.worker.entrypoint.os.fchmod", side_effect=chmod_workspace), \
              patch("ax_local.worker.entrypoint.make_tools", return_value={}), \
              patch("ax_local.worker.entrypoint.serve", side_effect=start_harness):
             main()
@@ -77,18 +88,38 @@ class EntrypointTests(unittest.TestCase):
             main()
         serve.assert_called_once_with(extra_tools=tools)
 
-    def test_workspace_setup_does_not_require_chown_capability(self):
-        with patch("ax_local.worker.entrypoint.os.makedirs"), \
-             patch("ax_local.worker.entrypoint.os.geteuid", return_value=0), \
-             patch("ax_local.worker.entrypoint.os.stat",
-                   return_value=SimpleNamespace(st_mode=0o755)), \
-             patch("ax_local.worker.entrypoint.os.chown",
-                   side_effect=PermissionError("Operation not permitted")), \
-             patch("ax_local.worker.entrypoint.os.chmod") as chmod, \
-             patch("ax_local.worker.entrypoint.serve") as serve:
+    def test_workspace_setup_fails_closed_without_required_capabilities(self):
+        with patch.dict(os.environ, {"POPOT_TOOLS_UID": "10001"}), \
+             patch.object(entrypoint.os, "makedirs"), \
+             patch.object(entrypoint.os, "geteuid", return_value=0), \
+             patch.object(entrypoint.os, "stat", return_value=SimpleNamespace(st_mode=0o755)), \
+             patch.object(entrypoint.os, "open", return_value=99), \
+             patch.object(entrypoint.os, "close") as close, \
+             patch.object(entrypoint.os, "fchmod"), \
+             patch.object(entrypoint.os, "fchown", side_effect=PermissionError("Operation not permitted")), \
+             patch.object(entrypoint.os, "chmod"), \
+             patch.object(entrypoint, "serve") as serve:
+            with self.assertRaises(PermissionError):
+                main()
+        close.assert_called_once_with(99)
+        serve.assert_not_called()
+
+    def test_role_without_local_tools_keeps_private_root_workspace(self):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(entrypoint.os, "makedirs"), \
+             patch.object(entrypoint.os, "geteuid", return_value=0), \
+             patch.object(entrypoint.os, "stat", return_value=SimpleNamespace(st_mode=0o755)), \
+             patch.object(entrypoint.os, "open", return_value=99), \
+             patch.object(entrypoint.os, "close"), \
+             patch.object(entrypoint.os, "fchown") as chown, \
+             patch.object(entrypoint.os, "fchmod") as chmod, \
+             patch.object(entrypoint.os, "chmod"), \
+             patch.object(entrypoint, "prepare_socket"), \
+             patch.object(entrypoint, "make_tools", return_value={}), \
+             patch.object(entrypoint, "serve"):
             main()
-        chmod.assert_called_once_with("/workspace", 0o1777)
-        serve.assert_called_once_with()
+        chown.assert_not_called()
+        chmod.assert_called_once_with(99, 0o700)
 
 
 if __name__ == "__main__":

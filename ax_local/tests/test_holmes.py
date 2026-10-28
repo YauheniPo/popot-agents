@@ -84,6 +84,20 @@ class HolmesTests(unittest.TestCase):
         env = {item['name']: item.get('value') for item in job['spec']['template']['spec']['containers'][0]['env']}
         self.assertEqual(env['HOLMES_MODEL'], TEST_MODEL)
 
+    def test_job_keeps_home_and_temporary_files_on_its_private_volume(self):
+        pod = investigation_job('Check AX', TEST_MODEL)['spec']['template']['spec']
+        container = pod['containers'][0]
+        env = {item['name']: item['value'] for item in container['env'] if 'value' in item}
+        self.assertEqual(env['HOME'], '/home/holmes')
+        self.assertEqual(env['TMPDIR'], env['HOME'])
+        mounts = {item['mountPath']: item['name'] for item in container['volumeMounts']}
+        self.assertNotIn('/tmp', mounts)
+        volume = next(item for item in pod['volumes'] if item['name'] == mounts[env['HOME']])
+        self.assertEqual(volume['emptyDir'], {'sizeLimit': '512Mi'})
+        self.assertEqual(pod['securityContext']['runAsUser'], 10001)
+        self.assertEqual(pod['securityContext']['fsGroup'], 10001)
+        self.assertTrue(container['securityContext']['readOnlyRootFilesystem'])
+
     def test_cached_kind_image_does_not_trigger_a_download(self):
         with patch('ax_local.cluster.holmes.subprocess.run') as run:
             run.return_value.stdout = 'docker.io/' + IMAGE + '\n'

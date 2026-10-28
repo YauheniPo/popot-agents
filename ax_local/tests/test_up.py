@@ -17,13 +17,21 @@ class ComposeProvisioningTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('docker'), 'Docker Compose CLI is required')
     def test_gateway_health_and_successful_provision_are_required_before_api(self):
         with tempfile.TemporaryDirectory() as temporary:
-            env_file = Path(temporary) / '.env'
-            env_file.write_text('')
+            project = Path(temporary) / 'project'
+            ax = project / 'ax_local'
+            ax.mkdir(parents=True)
+            for name in ('compose.yaml', 'compose.omniroute.yaml'):
+                shutil.copyfile(SOURCE.parent / name, ax / name)
+            env_file = project / '.env'
+            env_file.write_text('POPOT_DB_PASSWORD=compose-test\n')
             result = subprocess.run([
                 'bash', str(SOURCE.parent.parent / 'compose.sh'), '--env-file', str(env_file),
-                '-f', str(SOURCE.parent / 'compose.yaml'),
-                '-f', str(SOURCE.parent / 'compose.omniroute.yaml'),
+                '-f', str(ax / 'compose.yaml'),
+                '-f', str(ax / 'compose.omniroute.yaml'),
                 '--profile', 'omniroute', 'config', '--format', 'json'],
+                cwd=temporary,
+                env={key: value for key, value in os.environ.items()
+                     if not key.startswith('COMPOSE_')},
                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         services = json.loads(result.stdout)['services']

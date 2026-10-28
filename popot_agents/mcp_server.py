@@ -218,14 +218,14 @@ async def stream_call(client, path, payload, context):
     Cancelling the MCP call closes its HTTP stream; agent work follows the
     orchestrator's existing disconnect policy and is never automatically retried.
     """
-    import httpx2 as httpx
+    import httpx2
     meta = context.request_context.meta
     token = meta.get('progress_token') if meta is not None else None
     progress_enabled = token is not None and token != ''
     activity = deque(maxlen=20)
     counter = 0
     try:
-        async with httpx.AsyncClient(timeout=client.timeout_seconds, trust_env=False) as http:
+        async with httpx2.AsyncClient(timeout=client.timeout_seconds, trust_env=False) as http:
             async with http.stream('POST', client.base_url + path, json=payload,
                                    headers={'Accept': 'application/x-ndjson',
                                             'User-Agent': 'popot-agents-mcp/1'}) as response:
@@ -270,7 +270,7 @@ async def stream_call(client, path, payload, context):
                                 raise RuntimeError(f'orchestrator HTTP {status}: {result.get("error", "request failed")}')
                             return {**result, 'activity': list(activity)}
                 raise ValueError('stream ended without a result')
-    except (httpx.HTTPError, TimeoutError) as exc:
+    except (httpx2.HTTPError, TimeoutError) as exc:
         raise RuntimeError('orchestrator is unavailable or timed out') from exc
     except (ValueError, UnicodeDecodeError) as exc:
         raise RuntimeError('orchestrator returned invalid progress stream') from exc

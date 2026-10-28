@@ -197,7 +197,9 @@
     "mcpServers": {
       "fetch": {
         "command": [
-          "mcp-server-fetch"
+          "python",
+          "-m",
+          "mcp_server_fetch"
         ],
         "tools": [
           "fetch"
@@ -205,7 +207,9 @@
       },
       "git": {
         "command": [
-          "mcp-server-git"
+          "python",
+          "-m",
+          "mcp_server_git"
         ],
         "tools": [
           "git_status",

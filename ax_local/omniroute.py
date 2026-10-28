@@ -48,7 +48,7 @@ class Api:
             # Management responses can echo submitted credentials. Never log them.
             exc.close()
             raise ProvisionError(f'{method} {path} failed (HTTP {exc.code})') from None
-        except (error.URLError, TimeoutError, OSError):
+        except OSError:
             raise ProvisionError(f'{method} {path} failed: connection unavailable') from None
         except ValueError:
             raise ProvisionError(f'{method} {path} returned invalid JSON') from None
@@ -83,15 +83,7 @@ def key_matches(key, value):
                             hashlib.sha256(value.encode()).hexdigest())
 
 
-def provision(api, config, combos, environ):
-    # Resolve every reference and secret before the first remote mutation.
-    config, combos = copy.deepcopy(config), copy.deepcopy(combos)
-    providers = config['providers']
-    key_config = config['apiKey']
-    password = secret(environ, 'OMNIROUTE_INITIAL_PASSWORD')
-    gateway_key = secret(environ, key_config['keyEnv'])
-    credentials = {provider: secret(environ, item['apiKeyEnv'])
-                   for provider, item in providers.items()}
+def configured_models(providers, combos):
     if not combos or not providers:
         raise ProvisionError('At least one provider and combo are required')
     if len({item['name'] for item in providers.values()}) != len(providers):
@@ -110,17 +102,10 @@ def provision(api, config, combos, environ):
     if used_providers != set(providers):
         raise ProvisionError('Each configured provider must be used by a combo')
 
-    api.request('POST', '/api/auth/login', {'password': password})
-    # The native export is kept only in memory. It lets us match an existing
-    # gateway secret exactly, including legacy keys without a stored hash.
-    before = api.request('GET', '/api/settings/export-json')
-    key = named(before['apiKeys'], key_config['name'])
-    if key is not None and not key_matches(key, gateway_key):
-        raise ProvisionError('OMNIROUTE_API_KEY does not match the managed gateway key')
-    if key and (key.get('isActive') is False or key.get('revokedAt') or key.get('isBanned')):
-        raise ProvisionError('Managed gateway key is inactive, revoked or banned')
-    if key is None and any(key_matches(item, gateway_key) for item in before['apiKeys']):
-        raise ProvisionError('Gateway secret already belongs to another named API key')
+    return models
+
+
+def existing_connections(before, providers, credentials):
     existing_providers = {}
     for provider, item in providers.items():
         existing = named(before['providerConnections'], item['name'])
@@ -136,8 +121,10 @@ def provision(api, config, combos, environ):
                 existing = matches[0]
                 item['name'] = existing['name']
         existing_providers[provider] = existing
-    existing_combos = {name: named(before['combos'], name) for name in combos}
+    return existing_providers
 
+
+def apply_settings(api, before, config):
     settings = config['settings']
     if not contains(before['settings'], settings):
         # The ordinary settings PATCH strips some persisted fields (cloudEnabled
@@ -152,6 +139,8 @@ def provision(api, config, combos, environ):
         if not contains(api.request('GET', path), desired):
             raise ProvisionError(f'{section} verification failed')
 
+
+def apply_connections(api, providers, credentials, existing_providers):
     connections = {}
     for provider, item in providers.items():
         desired = {'provider': provider, 'name': item['name'], 'apiKey': credentials[provider]}
@@ -163,6 +152,10 @@ def provision(api, config, combos, environ):
                         {'name': item['name'], 'apiKey': credentials[provider]})
         connections[provider] = existing['id']
 
+    return connections
+
+
+def apply_combos(api, combos, connections, existing_combos):
     for name, combo in combos.items():
         for target in combo['models']:
             target['connectionId'] = connections[target['providerId']]
@@ -171,6 +164,36 @@ def provision(api, config, combos, environ):
             api.request('POST', '/api/combos', combo)
         elif not contains(existing, combo):
             api.request('PUT', '/api/combos/' + quote(existing['id'], safe=''), combo)
+
+
+def provision(api, config, combos, environ):
+    # Resolve every reference and secret before the first remote mutation.
+    config, combos = copy.deepcopy(config), copy.deepcopy(combos)
+    providers = config['providers']
+    key_config = config['apiKey']
+    password = secret(environ, 'OMNIROUTE_INITIAL_PASSWORD')
+    gateway_key = secret(environ, key_config['keyEnv'])
+    credentials = {provider: secret(environ, item['apiKeyEnv'])
+                   for provider, item in providers.items()}
+    models = configured_models(providers, combos)
+
+    api.request('POST', '/api/auth/login', {'password': password})
+    # The native export is kept only in memory. It lets us match an existing
+    # gateway secret exactly, including legacy keys without a stored hash.
+    before = api.request('GET', '/api/settings/export-json')
+    key = named(before['apiKeys'], key_config['name'])
+    if key is not None and not key_matches(key, gateway_key):
+        raise ProvisionError('OMNIROUTE_API_KEY does not match the managed gateway key')
+    if key and (key.get('isActive') is False or key.get('revokedAt') or key.get('isBanned')):
+        raise ProvisionError('Managed gateway key is inactive, revoked or banned')
+    if key is None and any(key_matches(item, gateway_key) for item in before['apiKeys']):
+        raise ProvisionError('Gateway secret already belongs to another named API key')
+    existing_providers = existing_connections(before, providers, credentials)
+    existing_combos = {name: named(before['combos'], name) for name in combos}
+
+    apply_settings(api, before, config)
+    connections = apply_connections(api, providers, credentials, existing_providers)
+    apply_combos(api, combos, connections, existing_combos)
 
     if key is None:
         # Native key creation generates its own secret. Import only the supplied
@@ -187,7 +210,7 @@ def provision(api, config, combos, environ):
         api.request('PATCH', '/api/keys/' + quote(key['id'], safe=''), permissions)
 
     after = api.request('GET', '/api/settings/export-json')
-    checks = [('settings', after['settings'], settings),
+    checks = [('settings', after['settings'], config['settings']),
               ('key permissions', named(after['apiKeys'], key_config['name']), permissions)]
     checks.extend(('combo ' + name, named(after['combos'], name), combo)
                   for name, combo in combos.items())
