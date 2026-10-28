@@ -4,7 +4,6 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import threading
@@ -177,7 +176,13 @@ class Harness2NativeTests(unittest.TestCase):
                                 'notes': 'The initial plan omitted source verification.'})}}]}
                     elif 'Choose using only' in system:
                         evidence = body['messages'][1]['content']
-                        candidates = re.findall(r'## candidates/([^/]+)\.md\n(.*?)(?=\n## |\Z)', evidence, re.S)
+                        candidates = []
+                        for section in ('\n' + evidence).split('\n## ')[1:]:
+                            heading, separator, text = section.partition('\n')
+                            if separator and heading.startswith('candidates/') and heading.endswith('.md'):
+                                label = heading.removeprefix('candidates/').removesuffix('.md')
+                                if label and '/' not in label:
+                                    candidates.append((label, text))
                         self_test.assertGreaterEqual(len(candidates), 2)
                         expected_plan = 'Plan without a source check.' if keep_base else 'Plan with source verification.'
                         chosen = next(name for name, text in candidates if expected_plan in text)

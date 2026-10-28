@@ -1,7 +1,6 @@
 """Provisioning must preserve fallback order, secret boundaries and key policy."""
 
 import copy
-import hashlib
 import io
 import unittest
 from contextlib import redirect_stdout
@@ -175,9 +174,10 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(self.gateway.writes, [])
 
     def test_hashed_gateway_key_is_reused(self):
+        # OmniRoute SHA-256 fixture for 'test-gateway-secret', not an admin password.
         self.gateway.state['apiKeys'].append({
             'id': 'existing', 'name': 'popot-ax-free', 'key': 'masked',
-            'keyHash': hashlib.sha256(self.env['OMNIROUTE_API_KEY'].encode()).hexdigest()})
+            'keyHash': '5686319557f053a8c480deab360ac65ab8531b85c9280c19f318105eafa53f7e'})
         self.apply()
         self.assertEqual(len(self.gateway.state['apiKeys']), 1)
         self.assertEqual(self.gateway.state['apiKeys'][0]['id'], 'existing')
