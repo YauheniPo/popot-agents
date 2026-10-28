@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from contextlib import nullcontext
 
 from popot_agents.orchestrator.main import load_roles
 from popot_agents.worker.http_harness import run_http
@@ -148,6 +149,55 @@ class Harness2RoleTests(unittest.TestCase):
         self.assertIn('Check source.', body['messages'][0]['content'])
 
 
+class PlanningClientTests(unittest.TestCase):
+    def setUp(self):
+        from popot_agents.worker.harness2 import PlanningClient
+        self.client = PlanningClient({
+            'base_url': 'http://model.test/v1', 'budget_seconds': 30,
+            'model': 'worker-model', 'improver_model': 'ax-harness-free',
+            'key': None, 'improver_key': 'planning-token',
+            'parameters': {}, 'improver_parameters': {},
+        })
+
+    def test_request_cap_and_expired_deadline_prevent_network_calls(self):
+        answer = b'{"choices":[{"message":{"content":"plan"}}]}'
+        with patch('urllib.request.urlopen', side_effect=lambda *a, **k: io.BytesIO(answer)) as upstream:
+            for _ in range(10):
+                self.assertEqual(self.client([]), {'content': 'plan'})
+            with self.assertRaisesRegex(RuntimeError, 'budget exhausted'):
+                self.client([])
+            self.assertEqual(upstream.call_count, 10)
+            self.client.count = 0
+            self.client.deadline = time.monotonic() - 1
+            with self.assertRaisesRegex(RuntimeError, 'budget exhausted'):
+                self.client([])
+            self.assertEqual(upstream.call_count, 10)
+
+    def test_oversized_truncated_and_invalid_responses_are_rejected(self):
+        for response, message in (
+                (b'x' * 262145, 'too large'),
+                (b'{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}', 'truncated'),
+                (b'not-json', 'Expecting value')):
+            with self.subTest(message=message), \
+                 patch('urllib.request.urlopen', return_value=io.BytesIO(response)):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.client([])
+
+    def test_proposals_use_improver_capability_and_only_the_prompt_tool(self):
+        answer = b'{"choices":[{"message":{"content":"plan"}}]}'
+        with patch('urllib.request.urlopen', return_value=io.BytesIO(answer)) as upstream:
+            self.client([{'role': 'user', 'content': 'Plan'}], improver=True, proposal=True)
+        call = upstream.call_args.args[0]
+        body = json.loads(call.data)
+        self.assertEqual(call.get_header('Authorization'), 'Bearer planning-token')
+        self.assertEqual(body['model'], 'ax-harness-free')
+        self.assertEqual(body['max_tokens'], 2048)
+        self.assertEqual([tool['function']['name'] for tool in body['tools']], ['propose_prompt'])
+        self.assertEqual(body['tool_choice']['function']['name'], 'propose_prompt')
+        self.assertGreater(upstream.call_args.kwargs['timeout'], 0)
+        self.assertLessEqual(upstream.call_args.kwargs['timeout'], 30)
+
+
 @unittest.skipUnless(importlib.util.find_spec('harness2'), 'Harness2 requires the Python 3.12 worker environment')
 class Harness2NativeTests(unittest.TestCase):
     def test_real_recursion_selection_and_worker_tools_execute_once(self):
@@ -159,7 +209,12 @@ class Harness2NativeTests(unittest.TestCase):
     def test_selector_can_keep_the_original_role(self):
         self.run_cycle(keep_base=True)
 
-    def run_cycle(self, *, empty_first=False, keep_base=False):
+    def test_optimizer_selects_from_real_sdk_plans_in_process(self):
+        for options in ({}, {'empty_first': True}, {'keep_base': True}):
+            with self.subTest(options=options):
+                self.run_cycle(in_process=True, **options)
+
+    def run_cycle(self, *, empty_first=False, keep_base=False, in_process=False):
         calls = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -224,7 +279,14 @@ class Harness2NativeTests(unittest.TestCase):
                 role = {'name': 'code_reviewer', 'instructions': 'Review evidence.', 'tools': ['calculate'],
                         'harness2': {'enabled': True, 'timeout_seconds': 10}}
                 from popot_agents.worker import http_harness
-                with patch.object(http_harness, 'execute_tool', wraps=http_harness.execute_tool) as tool:
+                def execute_planner(command, **kwargs):
+                    from popot_agents.worker.harness2 import optimize
+                    result = optimize(json.loads(kwargs['input']))
+                    return subprocess.CompletedProcess(command, 0, json.dumps(result), '')
+
+                planner = (patch('popot_agents.worker.harness2.subprocess.run', side_effect=execute_planner)
+                           if in_process else nullcontext())
+                with planner, patch.object(http_harness, 'execute_tool', wraps=http_harness.execute_tool) as tool:
                     self.assertEqual(run_http('Review the supplied change', role), 'Executed result: 4')
                 tool.assert_called_once()
                 state = json.loads((Path(directory) / 'harness2/code_reviewer/state.json').read_text())

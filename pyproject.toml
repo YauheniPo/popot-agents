@@ -16,6 +16,7 @@ worker = [
 orchestrator = ["psycopg[binary]==3.3.6"]
 ax = ["a2a-sdk[http-server]==1.2.3", "uvicorn==0.54.0"]
 ci = [
+    {include-group = "harness2"},
     {include-group = "build"},
     {include-group = "worker"},
     {include-group = "orchestrator"},
