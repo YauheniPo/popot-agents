@@ -13,6 +13,36 @@ from pathlib import Path
 SOURCE = Path(__file__).parents[1] / "up.sh"
 
 
+class ComposeProvisioningTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('docker'), 'Docker Compose CLI is required')
+    def test_gateway_health_and_successful_provision_are_required_before_api(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / 'project'
+            ax = project / 'ax_local'
+            ax.mkdir(parents=True)
+            for name in ('compose.yaml', 'compose.omniroute.yaml'):
+                shutil.copyfile(SOURCE.parent / name, ax / name)
+            env_file = project / '.env'
+            env_file.write_text('POPOT_DB_PASSWORD=compose-test\n')
+            result = subprocess.run([
+                'bash', str(SOURCE.parent.parent / 'compose.sh'), '--env-file', str(env_file),
+                '-f', str(ax / 'compose.yaml'),
+                '-f', str(ax / 'compose.omniroute.yaml'),
+                '--profile', 'omniroute', 'config', '--format', 'json'],
+                cwd=temporary,
+                env={key: value for key, value in os.environ.items()
+                     if not key.startswith('COMPOSE_')},
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        services = json.loads(result.stdout)['services']
+        gate = services['api']['depends_on']['omniroute-init']
+        self.assertEqual(gate, {'condition': 'service_completed_successfully', 'required': True})
+        self.assertEqual(services['omniroute-init']['depends_on']['omniroute']['condition'],
+                         'service_healthy')
+        self.assertTrue(all(mount['read_only'] for mount in services['omniroute-init']['volumes']))
+        self.assertNotIn('env_file', services['omniroute-init'])
+
+
 class UpScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -25,6 +55,10 @@ class UpScriptTests(unittest.TestCase):
         (memory / 'up.sh').write_text(
             '#!/usr/bin/env bash\nprintf "memory-up\\n" >> "$CALLS"\n')
         shutil.copyfile(SOURCE, self.ax / "up.sh")
+        shutil.copyfile(SOURCE.parent / 'compose.sh', self.ax / 'compose.sh')
+        config = self.root / 'config'
+        config.mkdir()
+        (config / 'roles.json').write_text(json.dumps({'analyst': {'agent': 'omniroute'}}))
         cluster = self.ax / "cluster"
         cluster.mkdir()
         shutil.copyfile(SOURCE.parent / 'cluster/build_versions.py', cluster / 'build_versions.py')
@@ -126,6 +160,26 @@ class UpScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
 
+    def test_omniroute_roles_select_provisioning_dependency(self):
+        result = self.run_up()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls.read_text()
+        self.assertIn('compose.omniroute.yaml --profile omniroute', calls)
+
+    def test_other_profiles_do_not_start_omniroute(self):
+        (self.root / 'config/roles.json').write_text(
+            json.dumps({'analyst': {'agent': 'openrouter'}}))
+        result = self.run_up()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('compose.omniroute.yaml', self.calls.read_text())
+
+    def test_compose_wrapper_selects_omniroute_provisioning(self):
+        self.prepare_local()
+        result = subprocess.run(['bash', str(self.ax / 'compose.sh'), 'config'],
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('compose.omniroute.yaml --profile omniroute config', self.calls.read_text())
+
     def test_failed_worker_recovery_prevents_api_start(self):
         self.env["HEALTH_FAIL"] = "1"
         result = self.run_up()
@@ -180,6 +234,7 @@ class UpScriptTests(unittest.TestCase):
         calls = self.calls.read_text().splitlines()
         self.assertIn("worker-health", calls)
         self.assertIn("up --build --force-recreate -d --wait --wait-timeout 300 mcp-server", calls[-3])
+        self.assertIn('compose.omniroute.yaml --profile omniroute', calls[-3])
         self.assertEqual(calls[-2:], ['deployment-cleanup', 'resource-monitoring'])
         self.calls.write_text("")
         self.env["HEALTH_FAIL"] = "1"

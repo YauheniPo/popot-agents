@@ -95,11 +95,19 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
              *, extra_tools: dict | None = None) -> str:
     messages = [{'role': 'user', 'content': task}] if isinstance(task, str) else list(task)
     role_config = prepare_role_config(role_config)
+    deadline = None
+    if role_config.get('harness2', {}).get('enabled'):
+        deadline = time.monotonic() + float(os.getenv('HARNESS_TURN_TIMEOUT_SECONDS',
+                                                     str(RUNTIME['timeouts']['turn_seconds'])))
     memory = TurnMemory(role_config, messages)
     memory.start_session()
     success = False
     try:
-        answer = _run_http(task, role_config, extra_tools=extra_tools, memory=memory)
+        if role_config.get('harness2', {}).get('enabled'):
+            from .harness2 import refine_role
+            role_config = refine_role(messages, role_config, deadline=deadline,
+                                      tool_names=list(extra_tools or {}))
+        answer = _run_http(task, role_config, extra_tools=extra_tools, memory=memory, deadline=deadline)
         success = memory.run_complete
         return answer
     finally:
@@ -107,7 +115,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
 
 def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
-             *, extra_tools: dict | None = None, memory=None) -> str:
+             *, extra_tools: dict | None = None, memory=None, deadline=None) -> str:
     base_url = os.environ.get("HARNESS_BASE_URL", "").rstrip("/")
     model = os.environ.get("HARNESS_MODEL", "")
     if not base_url.startswith(("http://", "https://")) or not model:
@@ -116,7 +124,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                    str(RUNTIME["timeouts"]["turn_seconds"])))
     if turn_timeout <= 0:
         raise ValueError("HARNESS_TURN_TIMEOUT_SECONDS must be positive")
-    deadline = time.monotonic() + turn_timeout
+    if deadline is None:
+        deadline = time.monotonic() + turn_timeout
 
     def remaining_seconds() -> float:
         remaining = deadline - time.monotonic()

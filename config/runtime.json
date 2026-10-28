@@ -44,7 +44,7 @@
   },
   "model": {
     "default_max_tool_rounds": 40,
-    "request_retries": 10,
+    "request_retries": 1,
     "temperature": null,
     "max_tokens": null,
     "final_answer_reserve_seconds": 120,

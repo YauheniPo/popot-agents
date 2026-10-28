@@ -4,19 +4,21 @@
     "environment": {"HARNESS_BASE_URL": "https://openrouter.ai/api/v1", "HARNESS_API_KEY_ENV": "OPENROUTER_API_KEY"},
     "env_names": ["OPENROUTER_API_KEY"],
     "model_env": "OPENROUTER_MODEL",
-    "model_parameters": {"reasoning": {"enabled": true, "exclude": false}}
+    "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}}
   },
   "omniroute": {
     "session_mode": "http",
     "environment": {"HARNESS_BASE_URL": "http://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
     "env_names": ["OMNIROUTE_API_KEY"],
-    "model_env": "OMNIROUTE_MODEL"
+    "model_env": "OMNIROUTE_MODEL",
+    "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}, "chat_template_kwargs": {"enable_thinking": false}}
   },
   "omniroute_code": {
     "session_mode": "http",
     "environment": {"HARNESS_BASE_URL": "http://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
     "env_names": ["OMNIROUTE_API_KEY"],
-    "model_env": "OMNIROUTE_CODE_MODEL"
+    "model_env": "OMNIROUTE_CODE_MODEL",
+    "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}, "chat_template_kwargs": {"enable_thinking": false}}
   },
   "ollama_local": {
     "session_mode": "http",
@@ -41,6 +43,6 @@
     "environment": {"HARNESS_BASE_URL": "https://integrate.api.nvidia.com/v1", "HARNESS_API_KEY_ENV": "NVIDIA_API_KEY"},
     "env_names": ["NVIDIA_API_KEY"],
     "model_env": "NVIDIA_MODEL",
-    "model_parameters": {"chat_template_kwargs": {"enable_thinking": true}}
+    "model_parameters": {"max_tokens": 8192, "chat_template_kwargs": {"enable_thinking": false}}
   }
 }

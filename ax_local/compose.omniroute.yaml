@@ -1,0 +1,6 @@
+# Selected by ax_local/compose.sh when a role uses an OmniRoute profile.
+services:
+  api:
+    depends_on:
+      omniroute-init:
+        condition: service_completed_successfully

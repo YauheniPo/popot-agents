@@ -22,7 +22,9 @@ def main():
     model = 'openai/' + os.environ['HOLMES_MODEL']
     llm = DefaultLLM(model=model, api_key=os.environ['OPENAI_API_KEY'],
                     api_base=os.environ['OPENAI_API_BASE'],
-                    args={'max_tokens': 4096,
+                    args={'max_tokens': 8192,
+                          'extra_body': {'reasoning': {'enabled': False},
+                                         'chat_template_kwargs': {'enable_thinking': False}},
                           'custom_args': {'max_context_size': 65536}})
     prompt = (
         'You diagnose AX pods in a local kind cluster using the provided read-only tools. '

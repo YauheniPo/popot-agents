@@ -5,6 +5,9 @@ requires-python = ">=3.10"
 [dependency-groups]
 build = ["pip==26.2.2"]
 mcp = ["mcp==2.3.0"]
+harness2 = [
+    "harness2 @ git+https://github.com/google-research/harness2@1cfe254e8d25b15f37048c3730134686abe60335",
+]
 worker = [
     {include-group = "mcp"},
     "mcp-server-fetch==2026.10.19",
@@ -13,6 +16,7 @@ worker = [
 orchestrator = ["psycopg[binary]==3.3.6"]
 ax = ["a2a-sdk[http-server]==1.2.3", "uvicorn==0.54.0"]
 ci = [
+    {include-group = "harness2"},
     {include-group = "build"},
     {include-group = "worker"},
     {include-group = "orchestrator"},

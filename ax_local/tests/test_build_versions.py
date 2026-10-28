@@ -92,7 +92,7 @@ class BuildVersionTests(unittest.TestCase):
                     'assert worker_health.SUBSTRATE_COMMIT == "b" * 40; '
                     'assert substrate_cleanup.PIN == "b" * 40; '
                     'assert holmes.IMAGE == "robustadev/holmes:0.99.0"; '
-                    'assert holmes.investigation_job("Check AX", holmes.MODEL)["spec"]'
+                    'assert holmes.investigation_job("Check AX", "test-model")["spec"]'
                     '["template"]["spec"]["containers"][0]["image"] == holmes.IMAGE')
             result = subprocess.run([sys.executable, '-c', code], cwd=root,
                                     text=True, capture_output=True)

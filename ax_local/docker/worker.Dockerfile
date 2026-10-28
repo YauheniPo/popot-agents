@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certifi
 WORKDIR /app
 COPY pyproject.toml ./
 RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
-    && python -m pip install --no-cache-dir --only-binary=:all: --group build --group worker --group ax
+    && python -m pip install --no-cache-dir --only-binary=:all: --group build --group worker --group ax --group harness2
 RUN useradd --create-home --uid 10001 agent && mkdir /workspace \
     && mkdir -m 0700 /run/popot
 COPY --from=ax-runner /ax-task-runner /usr/local/bin/ax-task-runner

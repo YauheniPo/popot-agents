@@ -115,7 +115,7 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
             raise ValueError(f"invalid role name: {name}")
         required = {"agent", "instructions", "tools"}
         optional = {"permissions", "mcpServers", "timeout_seconds", "max_tool_rounds",
-                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description", "name"}
+                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description", "name", "harness2"}
         if not isinstance(config, dict) or not required.issubset(config) \
                 or set(config) - required - optional:
             raise ValueError(f"role {name} must define agent, instructions and tools")
@@ -124,6 +124,16 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
         agent = config["agent"]
         if not isinstance(agent, str) or agent not in agents:
             raise ValueError(f"role {name} uses an unknown agent")
+        if 'harness2' in config:
+            settings = config['harness2']
+            if not isinstance(settings, dict) or set(settings) - {'enabled', 'timeout_seconds'} \
+                    or type(settings.get('enabled')) is not bool:
+                raise ValueError(f'role {name} harness2 must define enabled and optionally timeout_seconds')
+            budget = settings.get('timeout_seconds', 180)
+            if type(budget) is not int or not 1 <= budget <= 300:
+                raise ValueError(f'role {name} has invalid harness2.timeout_seconds (1..300)')
+            if settings['enabled'] and agents[agent].session_mode != 'http':
+                raise ValueError(f'role {name} needs an HTTP agent for harness2')
         if not isinstance(config["instructions"], str) or len(config["instructions"]) > 4000:
             raise ValueError(f"role {name} has invalid instructions")
         if "description" in config and (not isinstance(config["description"], str)

@@ -29,7 +29,7 @@ class PlannerRoleTests(unittest.TestCase):
         roles = configured_roles()
         runner = role_tests.FakeRunner()
         with tempfile.TemporaryDirectory() as directory:
-            server = create_server({'openrouter': runner}, roles=roles, port=0, session_dir=directory)
+            server = create_server({'omniroute': runner}, roles=roles, port=0, session_dir=directory)
             try:
                 status, first = chat_tests.TaskSessionTests._post_to_handler(
                     server.RequestHandlerClass, server,

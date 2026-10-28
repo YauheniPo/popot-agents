@@ -65,7 +65,10 @@ class HolmesRunnerTests(unittest.TestCase):
         self.llm.assert_called_once_with(
             model='openai/diagnostic-model', api_key='test-provider-secret',
             api_base='http://gateway/v1',
-            args={'max_tokens': 4096, 'custom_args': {'max_context_size': 65536}})
+            args={'max_tokens': 8192,
+                  'extra_body': {'reasoning': {'enabled': False},
+                                 'chat_template_kwargs': {'enable_thinking': False}},
+                  'custom_args': {'max_context_size': 65536}})
         options = self.agent.call_args.kwargs
         self.assertEqual(options['max_steps'], 12)
         self.assertEqual(options['tool_results_dir'], Path(directories[0]))
