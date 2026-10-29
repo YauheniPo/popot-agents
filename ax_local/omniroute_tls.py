@@ -78,12 +78,12 @@ def initialize(root):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(root / SERVER_CERT, root / SERVER_KEY)
-    os.chmod(root, 0o755)
+    os.chmod(root, 0o700)
     os.chmod(root / 'ca', 0o700)
     os.chmod(root / CA_KEY, 0o600)
-    os.chmod(root / 'trust', 0o755)
+    os.chmod(root / 'trust', 0o700)
     for name in (CA_CERT, CA_BUNDLE):
-        os.chmod(root / name, 0o644)
+        os.chmod(root / name, 0o600)
     for name in ('server', SERVER_KEY, SERVER_CERT, SERVER_CA):
         os.chown(root / name, 1000, 1000)  # The pinned OmniRoute image runs as node.
         os.chmod(root / name, 0o700 if name == 'server' else 0o400)

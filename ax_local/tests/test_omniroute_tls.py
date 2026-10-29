@@ -39,7 +39,11 @@ class OmniRouteTLSTests(unittest.TestCase):
         with patch('ax_local.omniroute_tls.os.chown'):
             initialize(self.root)
         self.assertEqual(before, (self.root / 'trust/ca.pem').read_bytes())
+        self.assertEqual(self.root.stat().st_mode & 0o777, 0o700)
         self.assertEqual((self.root / 'ca').stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.root / 'trust').stat().st_mode & 0o777, 0o700)
+        for name in ('ca.pem', 'ca-bundle.pem'):
+            self.assertEqual((self.root / 'trust' / name).stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.root / 'server').stat().st_mode & 0o777, 0o700)
         self.assertEqual((self.root / 'server/key.pem').stat().st_mode & 0o777, 0o400)
         self.assertEqual((self.root / 'ca/key.pem').stat().st_mode & 0o777, 0o600)
@@ -74,6 +78,7 @@ class OmniRouteTLSTests(unittest.TestCase):
 
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(self.root / 'server/cert.pem', self.root / 'server/key.pem')
         server.socket = context.wrap_socket(server.socket, server_side=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -84,11 +89,13 @@ class OmniRouteTLSTests(unittest.TestCase):
                 api = Api(url)
                 api.request('POST', '/api/auth/login', {'password': 'fixture-password'})
                 self.assertEqual(api.request('GET', '/api/combos')['cookie'], 'session=tls-test')
-            untrusted = request.build_opener(request.ProxyHandler({}), request.HTTPSHandler(
-                context=ssl.create_default_context(cafile=ssl.get_default_verify_paths().cafile)))
+            untrusted_context = ssl.create_default_context(cafile=ssl.get_default_verify_paths().cafile)
+            untrusted_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            untrusted = request.build_opener(request.ProxyHandler({}), request.HTTPSHandler(context=untrusted_context))
             with self.assertRaises(error.URLError):
                 untrusted.open(url + '/healthz', timeout=2)
             trusted = ssl.create_default_context(cafile=str(self.root / 'trust/ca.pem'))
+            trusted.minimum_version = ssl.TLSVersion.TLSv1_2
             with socket.create_connection(('127.0.0.1', server.server_port), timeout=2) as connection:
                 with self.assertRaises(ssl.SSLCertVerificationError):
                     trusted.wrap_socket(connection, server_hostname='unrelated.internal')
