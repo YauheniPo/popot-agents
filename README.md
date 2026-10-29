@@ -51,6 +51,10 @@ tests/            API, harness, MCP, roles, sessions and configuration tests
 `popot_agents` remains the Python package used by AX. It no longer launches
 worker containers through Docker or provides a separate API entrypoint.
 
+Run local tests with `python -m pytest`.
+Install test and runtime dependencies with `python -m pip install --group ci`
+(requires pip 25.1 or newer).
+
 ## CI and code quality
 
 [GitHub Actions CI](.github/workflows/ci.yml) runs on branch pushes, pull requests,
@@ -79,6 +83,12 @@ by CI. The scan runs after successful tests on `main` and on same-repository PRs
 targeting `main`, excluding Dependabot. This supports the Cloud Free plan; other
 branch pushes run tests only. The scanner imports Python and graph coverage and waits for
 the server's Quality Gate; a failed gate fails the job.
+
+In SonarCloud **Administration > New Code**, set **Number of days** to **30**
+for this project. This server-side setting defines the period evaluated by the
+`Sonar way` gate. Without a new-code definition, the API can return gate status
+`NONE`, which also fails the scanner's gate check. Keep the gate check enabled
+and configure the new-code period before rerunning the analysis.
 
 The SonarCloud project must use CI-based analysis (disable Automatic Analysis if
 enabled), with `main` analyzed before its first PR analysis. Link the project to
@@ -244,6 +254,13 @@ The memory limits for note count and trace count must stay within the pinned
 Cognee API contract; invalid values are rejected at startup.
 
 ## Connect through MCP
+
+Python dependency versions are defined only in [pyproject.toml](pyproject.toml).
+The `mcp` group selects the SDK, `worker` adds the compatible Fetch/Git servers,
+`orchestrator` supplies database access, and `ax` supplies A2A/HTTP dependencies.
+Dockerfiles install these groups directly; `ci` includes all runtime groups and
+test tools. The `build` group pins pip after bootstrapping group support in older
+base images. Rebuild the MCP and worker images together after SDK upgrades.
 
 Configure a Streamable HTTP client with `http://127.0.0.1:8003/mcp`.
 The gateway exposes `run_task`, `send_message`, `list_chats` and `get_chat`.
@@ -411,11 +428,9 @@ The wrapper requires Python 3.11+ and passes the pins to Docker Compose, which
 supplies Dockerfile build contexts and arguments. Versions in `pyproject.toml` take precedence
 over the shell and `.env`.
 
-The reference Fetch/Git servers still require SDK 1.x. Their `mcp-tools` group
-is installed separately in `/opt/mcp-tools` inside each worker image; roles call
-the `mcp-server-fetch` and `mcp-server-git` entrypoints. Do not install both
-groups into the same virtual environment. After changing versions, rebuild
-the worker and MCP images (`bash ax_local/up.sh` for AX).
+The `worker` dependency group includes the SDK and compatible Fetch/Git servers.
+After changing versions, rebuild the worker and MCP images
+(`bash ax_local/up.sh` for AX).
 
 For local SDK development, run from the repository root with Python 3.10+:
 

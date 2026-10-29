@@ -30,6 +30,7 @@ from ax_local.cluster.build_versions import BUILD_VERSIONS
 LOCAL = ROOT / 'ax_local/.local'
 NS = 'otel-system'
 BEGIN, END = '  # popot-resources begin', '  # popot-resources end'
+PROMETHEUS_CONFIG = 'prometheus.yml'
 
 
 def local_context(config: dict) -> str:
@@ -39,8 +40,7 @@ def local_context(config: dict) -> str:
     return context
 
 
-def extend_prometheus_config(original: str, node: str = 'popot-ax-control-plane',
-                             address: str = '172.24.0.2', *, scrape_interval: str = '15s') -> str:
+def extend_prometheus_config(original: str, node: str, address: str, *, scrape_interval: str = '15s') -> str:
     if BEGIN in original:
         start, end = original.index(BEGIN), original.index(END) + len(END)
         original = original[:start] + original[end:].lstrip('\n')
@@ -208,10 +208,10 @@ def install():
                        'ports': [{'port': 8080, 'targetPort': 8080}]})])
 
     config = cluster.get('configmap', 'prometheus-config')['data']
-    config['prometheus.yml'] = extend_prometheus_config(config['prometheus.yml'], expected, address,
+    config[PROMETHEUS_CONFIG] = extend_prometheus_config(config[PROMETHEUS_CONFIG], expected, address,
         scrape_interval=settings['prometheus']['scrape_interval'])
     cluster.run('-n', NS, 'exec', '-i', 'deployment/prometheus', '--', 'promtool', 'check',
-                'config', '--syntax-only', '/dev/stdin', input=config['prometheus.yml'])
+                'config', '--syntax-only', '/dev/stdin', input=config[PROMETHEUS_CONFIG])
     cluster.patch('configmap', 'prometheus-config', {'data': config})
     prom = cluster.get('deployment', 'prometheus')
     migrate_prometheus_storage(cluster, prom)

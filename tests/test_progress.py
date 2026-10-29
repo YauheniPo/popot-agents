@@ -8,9 +8,10 @@ import os
 import socket
 import subprocess
 import sys
+import time
 import importlib.util
-from contextlib import redirect_stderr
 from pathlib import Path
+from contextlib import redirect_stderr
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -126,11 +127,51 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(json.loads(second[0]), {'event': 'assistant_message', 'content': 'Проверяю изменения'})
 
 
+class SessionWorkerProgressTests(unittest.TestCase):
+    def test_docker_socket_client_reads_progress_and_fragmented_final_answer(self):
+        from popot_agents.worker import session_worker
+        from contextlib import redirect_stdout
+        message = format_progress('tool_call', name='read_file')
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'chat.sock')
+            progress_received = threading.Event()
+            class Output(io.StringIO):
+                def flush(self):
+                    if self.getvalue().endswith('\n'):
+                        progress_received.set()
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(path)
+                server.listen()
+                def respond():
+                    with server.accept()[0] as connection:
+                        connection.recv(8192)
+                        connection.sendall((json.dumps({'progress': message}) + '\n').encode())
+                        if not progress_received.wait(1):
+                            return
+                        body = (json.dumps({'answer': 'готово'}, ensure_ascii=False) + '\n').encode()
+                        try:
+                            connection.sendall(body[:-3])
+                            time.sleep(.02)
+                            connection.sendall(body[-3:])
+                        except OSError:
+                            pass  # The regression closes the socket after the first frame.
+                thread = threading.Thread(target=respond)
+                thread.start()
+                output = Output()
+                with patch.object(session_worker, 'SOCKET_PATH', path), \
+                     patch('sys.stdin', io.StringIO('{"message":"work","progress":true}')), \
+                     redirect_stdout(output):
+                    session_worker.client('message')
+                thread.join(timeout=2)
+        self.assertEqual([json.loads(line) for line in output.getvalue().splitlines()],
+                         [{'progress': message}, {'answer': 'готово'}])
+
+
 class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(importlib.util.find_spec('mcp'), 'requires the installed MCP SDK')
     async def test_real_mcp_transport_sends_progress_notifications_before_result(self):
         from mcp import Client
-        import httpx2 as httpx
+        import httpx2
         finish = threading.Event()
         received = []
         class Chat:
@@ -159,43 +200,59 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                 port = reservation.getsockname()[1]
             with open(os.path.join(directory, 'mcp.log'), 'wb') as log:
                 process = subprocess.Popen([sys.executable, '-u', '-m', 'popot_agents.mcp_server'],
-                    env={**os.environ, 'MCP_HOST':'127.0.0.1','MCP_PORT':str(port),
+                    env={**{name: os.environ[name] for name in
+                            ('PATH', 'PYTHONPATH', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'SYSTEMROOT')
+                            if name in os.environ},
+                         'MCP_HOST':'127.0.0.1','MCP_PORT':str(port),
                          'MCP_TEST_API_KEY': 'test-error-secret',
                          'MCP_ORCHESTRATOR_URL':f'http://127.0.0.1:{server.server_port}'},
                     stdout=subprocess.DEVNULL, stderr=log)
                 try:
                     url = f'http://127.0.0.1:{port}/mcp'
-                    async with httpx.AsyncClient(trust_env=False, timeout=.3) as http:
+                    async with httpx2.AsyncClient(trust_env=False, timeout=.3) as http:
                         for _ in range(60):
                             try:
-                                # GET /mcp can hold an SSE stream open in SDK 2.x.
-                                await http.get(f'http://127.0.0.1:{port}/')
+                                async with http.stream('GET', url):
+                                    pass  # SDK 2.x GET opens a persistent SSE stream.
                                 break
-                            except httpx.HTTPError: await asyncio.sleep(.1)
-                        else:
-                            log.flush()
-                            self.fail('MCP server did not start: ' + Path(log.name).read_text())
-                    async with Client(url) as session:
-                        self.assertEqual(session.session.protocol_version, '2026-07-28')
-                        tools = await session.list_tools()
-                        tool = next(t for t in tools.tools if t.name == 'run_task')
-                        self.assertNotIn('ctx', tool.input_schema['properties'])
-                        result = await session.call_tool('run_task', {'agent':'test','task':'work'},
-                            read_timeout_seconds=10, progress_callback=progress)
-                        self.assertFalse(result.is_error, result)
-                        data = result.structured_content or json.loads(next(c.text for c in result.content if c.type == 'text'))
-                        self.assertEqual(data['answer'], 'done')
-                        self.assertIn({'event': 'assistant_message', 'agent_role': 'code_reviewer', 'content': 'Проверяю PR'},
-                                      [json.loads(item) for item in data['activity']])
-                        self.assertIn({'event': 'assistant_reasoning', 'agent_role': 'code_reviewer',
-                                       'reasoning': 'Provider reasoning fixture.'},
-                                      [json.loads(item) for item in data['activity']])
-                    self.assertTrue(finish.is_set())
-                    self.assertEqual([r[0] for r in received], list(range(1,len(received)+1)))
-                    self.assertTrue(all(r[1] is None for r in received))
+                            except httpx2.HTTPError: await asyncio.sleep(.1)
+                        else: self.fail('MCP server did not start: ' + open(log.name).read())
+                    from popot_agents.worker import mcp_client
+                    remote = {'url': url, 'bearer_token_env': 'GITHUB_PERSONAL_ACCESS_TOKEN',
+                              'tools': ['list_chats']}
+                    with patch.dict(os.environ, {
+                            'HARNESS_TOOL_ENV_NAMES_JSON': '["GITHUB_PERSONAL_ACCESS_TOKEN"]',
+                            'GITHUB_PERSONAL_ACCESS_TOKEN': 'http-sdk-test-token'}):
+                        discovered = await mcp_client._discover_one('gateway', remote)
+                        self.assertIn('mcp__gateway__list_chats', discovered)
+                        output = await mcp_client._call_one(remote, 'list_chats', {})
+                        self.assertEqual(json.loads(output), {'chats': []})
+                    for mode in ('auto', 'legacy', '2026-07-28'):
+                        with self.subTest(protocol=mode):
+                            finish.clear()
+                            received.clear()
+                            async with Client(url, mode=mode) as session:
+                                if mode != "legacy":
+                                    self.assertEqual(session.session.protocol_version, "2026-07-28")
+                                tools = await session.list_tools()
+                                tool = next(t for t in tools.tools if t.name == 'run_task')
+                                self.assertNotIn('ctx', tool.input_schema['properties'])
+                                result = await session.call_tool('run_task', {'agent':'test','task':'work'},
+                                    read_timeout_seconds=10, progress_callback=progress)
+                                self.assertFalse(result.is_error, result)
+                                data = result.structured_content or json.loads(next(c.text for c in result.content if c.type == 'text'))
+                                self.assertEqual(data['answer'], 'done')
+                                self.assertIn({'event': 'assistant_message', 'agent_role': 'code_reviewer', 'content': 'Проверяю PR'},
+                                              [json.loads(item) for item in data['activity']])
+                                self.assertIn({'event': 'assistant_reasoning', 'agent_role': 'code_reviewer',
+                                               'reasoning': 'Provider reasoning fixture.'},
+                                              [json.loads(item) for item in data['activity']])
+                            self.assertTrue(finish.is_set())
+                            self.assertEqual([r[0] for r in received], list(range(1,len(received)+1)))
+                            self.assertTrue(all(r[1] is None for r in received))
                     # Raw HTTP preserves the exact token; ClientSession normally
                     # replaces it with its generated request ID.
-                    async with httpx.AsyncClient(trust_env=False, timeout=10) as http:
+                    async with httpx2.AsyncClient(trust_env=False, timeout=10) as http:
                         for version in ('2025-11-25', '2026-07-28'):
                             for tool_name, argument in [('run_task', 'task'), ('send_message', 'message')]:
                                 for meta in (None, {}, {'progressToken': ''}, {'progressToken': None},

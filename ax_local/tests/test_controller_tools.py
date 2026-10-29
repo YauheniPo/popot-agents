@@ -88,6 +88,13 @@ class ControllerSetupTests(unittest.TestCase):
         self.assertFalse((self.local / "controller-tools-version").exists())
         self.assertEqual(self.company.read_text(), "company config must stay unchanged")
 
+    def test_private_workspace_capabilities_and_legacy_patch_upgrade(self):
+        legacy_helper = HELPER.replace('"CHOWN", "DAC_OVERRIDE", "FOWNER", ', '')
+        legacy = legacy_helper + TEMPLATE.replace('\t\t\tName:    "guest",', SECURITY + '\t\t\tName:    "guest",')
+        updated = patched_source(legacy)
+        self.assertIn('Add: []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"}', updated)
+        self.assertEqual(patched_source(updated), updated)
+
     def test_full_snapshots_are_opted_in_and_patch_is_idempotent(self):
         updated = patched_source(TEMPLATE)
         self.assertIn('POPOT_SESSION_SNAPSHOT', updated)

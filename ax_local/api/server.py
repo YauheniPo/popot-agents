@@ -28,6 +28,37 @@ def kind_control_plane_host(context: str) -> str:
     return f"{context.removeprefix('kind-')}-control-plane"
 
 
+def configure_harness2(roles, profiles, runners, routes):
+    if not any(config.get('harness2', {}).get('enabled') for config in roles.values()):
+        return
+    model = os.getenv('HARNESS2_IMPROVER_MODEL', '').strip()
+    if not model:
+        raise ValueError('Set HARNESS2_IMPROVER_MODEL in .env for roles using Harness2')
+    if model != 'ax-harness-free' and not model.endswith(':free'):
+        raise ValueError('HARNESS2_IMPROVER_MODEL requires a free model')
+    selected = resolve_provider('omniroute', model, profiles, os.environ)
+    token = secrets.token_urlsafe(32)
+    routes[token] = selected
+    for runner in runners.values():
+        runner.harness2_environment = {
+            'HARNESS2_IMPROVER_MODEL': model, 'HARNESS2_PROXY_TOKEN': token,
+            'HARNESS2_MODEL_PARAMETERS_JSON': json.dumps(profiles['omniroute'].get('model_parameters', {})),
+        }
+
+
+def configure_delegation(server, roles, policy, runners):
+    server.delegation = None
+    if policy["enabled"]:
+        host = urlsplit(os.environ["AX_LOCAL_BASE_URL"]).hostname
+        server.delegation = DelegationService(
+            roles, policy, runners, server.store, f"http://{host}:{policy['port']}")
+        if 'project_operator' in roles:
+            from .project_operator import ProjectOperations
+            server.delegation.operations = ProjectOperations(roles, server.store)
+        for runner in runners.values():
+            runner.delegation = server.delegation
+
+
 def make_server():
     image = os.environ["AX_LOCAL_WORKER_IMAGE"]
     profiles = json.loads((ROOT / "config" / "agents.json").read_text(encoding="utf-8"))
@@ -49,20 +80,7 @@ def make_server():
             image=image, model=selected.model, base_url=os.environ['AX_LOCAL_BASE_URL'],
             context=AX_CONFIG['context'], proxy_token=token,
             model_parameters=profile.get('model_parameters'), worker_queue=queue)
-    if any(config.get('harness2', {}).get('enabled') for config in roles.values()):
-        model = os.getenv('HARNESS2_IMPROVER_MODEL', '').strip()
-        if not model:
-            raise ValueError('Set HARNESS2_IMPROVER_MODEL in .env for roles using Harness2')
-        if model != 'ax-harness-free' and not model.endswith(':free'):
-            raise ValueError('HARNESS2_IMPROVER_MODEL requires a free model')
-        selected = resolve_provider('omniroute', model, profiles, os.environ)
-        token = secrets.token_urlsafe(32)
-        routes[token] = selected
-        for runner in runners.values():
-            runner.harness2_environment = {
-                'HARNESS2_IMPROVER_MODEL': model, 'HARNESS2_PROXY_TOKEN': token,
-                'HARNESS2_MODEL_PARAMETERS_JSON': json.dumps(profiles['omniroute'].get('model_parameters', {})),
-            }
+    configure_harness2(roles, profiles, runners, routes)
     policy = AX_CONFIG["delegation"]
     for name, config in roles.items():
         config["_ax_role"] = name
@@ -95,16 +113,7 @@ def make_server():
         roles=roles, store=store,
     )
     server.provider_routes = routes
-    server.delegation = None
-    if policy["enabled"]:
-        host = urlsplit(os.environ["AX_LOCAL_BASE_URL"]).hostname
-        server.delegation = DelegationService(
-            roles, policy, runners, server.store, f"http://{host}:{policy['port']}")
-        if 'project_operator' in roles:
-            from .project_operator import ProjectOperations
-            server.delegation.operations = ProjectOperations(roles, server.store)
-        for runner in runners.values():
-            runner.delegation = server.delegation
+    configure_delegation(server, roles, policy, runners)
     server.cron = CronScheduler(roles, runners, server.store)
     return server
 

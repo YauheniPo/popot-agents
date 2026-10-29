@@ -8,14 +8,14 @@
   },
   "omniroute": {
     "session_mode": "http",
-    "environment": {"HARNESS_BASE_URL": "http://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
+    "environment": {"HARNESS_BASE_URL": "https://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
     "env_names": ["OMNIROUTE_API_KEY"],
     "model_env": "OMNIROUTE_MODEL",
     "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}, "chat_template_kwargs": {"enable_thinking": false}}
   },
   "omniroute_code": {
     "session_mode": "http",
-    "environment": {"HARNESS_BASE_URL": "http://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
+    "environment": {"HARNESS_BASE_URL": "https://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
     "env_names": ["OMNIROUTE_API_KEY"],
     "model_env": "OMNIROUTE_CODE_MODEL",
     "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}, "chat_template_kwargs": {"enable_thinking": false}}
@@ -47,7 +47,7 @@
   },
   "omniroute_ops": {
     "session_mode": "http",
-    "environment": {"HARNESS_BASE_URL": "http://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
+    "environment": {"HARNESS_BASE_URL": "https://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
     "env_names": ["OMNIROUTE_API_KEY"],
     "model_env": "OMNIROUTE_OPS_MODEL",
     "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}, "chat_template_kwargs": {"enable_thinking": false}}

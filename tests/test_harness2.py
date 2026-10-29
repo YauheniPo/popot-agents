@@ -4,13 +4,13 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import patch
+from contextlib import nullcontext
 
 from popot_agents.orchestrator.main import load_agents, load_roles
 from popot_agents.worker.http_harness import run_http
@@ -165,6 +165,55 @@ class Harness2RoleTests(unittest.TestCase):
         self.assertIn('Check source.', body['messages'][0]['content'])
 
 
+class PlanningClientTests(unittest.TestCase):
+    def setUp(self):
+        from popot_agents.worker.harness2 import PlanningClient
+        self.client = PlanningClient({
+            'base_url': 'http://model.test/v1', 'budget_seconds': 30,
+            'model': 'worker-model', 'improver_model': 'ax-harness-free',
+            'key': None, 'improver_key': 'planning-token',
+            'parameters': {}, 'improver_parameters': {},
+        })
+
+    def test_request_cap_and_expired_deadline_prevent_network_calls(self):
+        answer = b'{"choices":[{"message":{"content":"plan"}}]}'
+        with patch('urllib.request.urlopen', side_effect=lambda *a, **k: io.BytesIO(answer)) as upstream:
+            for _ in range(10):
+                self.assertEqual(self.client([]), {'content': 'plan'})
+            with self.assertRaisesRegex(RuntimeError, 'budget exhausted'):
+                self.client([])
+            self.assertEqual(upstream.call_count, 10)
+            self.client.count = 0
+            self.client.deadline = time.monotonic() - 1
+            with self.assertRaisesRegex(RuntimeError, 'budget exhausted'):
+                self.client([])
+            self.assertEqual(upstream.call_count, 10)
+
+    def test_oversized_truncated_and_invalid_responses_are_rejected(self):
+        for response, message in (
+                (b'x' * 262145, 'too large'),
+                (b'{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}', 'truncated'),
+                (b'not-json', 'Expecting value')):
+            with self.subTest(message=message), \
+                 patch('urllib.request.urlopen', return_value=io.BytesIO(response)):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.client([])
+
+    def test_proposals_use_improver_capability_and_only_the_prompt_tool(self):
+        answer = b'{"choices":[{"message":{"content":"plan"}}]}'
+        with patch('urllib.request.urlopen', return_value=io.BytesIO(answer)) as upstream:
+            self.client([{'role': 'user', 'content': 'Plan'}], improver=True, proposal=True)
+        call = upstream.call_args.args[0]
+        body = json.loads(call.data)
+        self.assertEqual(call.get_header('Authorization'), 'Bearer planning-token')
+        self.assertEqual(body['model'], 'ax-harness-free')
+        self.assertEqual(body['max_tokens'], 2048)
+        self.assertEqual([tool['function']['name'] for tool in body['tools']], ['propose_prompt'])
+        self.assertEqual(body['tool_choice']['function']['name'], 'propose_prompt')
+        self.assertGreater(upstream.call_args.kwargs['timeout'], 0)
+        self.assertLessEqual(upstream.call_args.kwargs['timeout'], 30)
+
+
 @unittest.skipUnless(importlib.util.find_spec('harness2'), 'Harness2 requires the Python 3.12 worker environment')
 class Harness2NativeTests(unittest.TestCase):
     def test_execution_mode_compares_actual_tool_results(self):
@@ -182,7 +231,13 @@ class Harness2NativeTests(unittest.TestCase):
                         'name': 'propose_prompt', 'arguments': json.dumps({
                             'prompt': 'Verify the result using calculate.', 'notes': 'Use tool evidence.'})}}]}
                 elif 'Choose using only' in system:
-                    candidates = re.findall(r'## candidates/([^/]+)\.md', body['messages'][1]['content'])
+                    candidates = []
+                    for section in ('\n' + body['messages'][1]['content']).split('\n## ')[1:]:
+                        heading, separator, _text = section.partition('\n')
+                        if separator and heading.startswith('candidates/') and heading.endswith('.md'):
+                            label = heading.removeprefix('candidates/').removesuffix('.md')
+                            if label and '/' not in label:
+                                candidates.append(label)
                     message = {'content': '```choice\n' + candidates[-1] + '\n```\n<why>Verified calculation.</why>'}
                 else:
                     message = {'content': '<experience>cue: arithmetic\nlesson: calculate\n'
@@ -235,7 +290,12 @@ class Harness2NativeTests(unittest.TestCase):
     def test_selector_can_keep_the_original_role(self):
         self.run_cycle(keep_base=True)
 
-    def run_cycle(self, *, empty_first=False, keep_base=False):
+    def test_optimizer_selects_from_real_sdk_plans_in_process(self):
+        for options in ({}, {'empty_first': True}, {'keep_base': True}):
+            with self.subTest(options=options):
+                self.run_cycle(in_process=True, **options)
+
+    def run_cycle(self, *, empty_first=False, keep_base=False, in_process=False):
         calls = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -252,7 +312,13 @@ class Harness2NativeTests(unittest.TestCase):
                                 'notes': 'The initial plan omitted source verification.'})}}]}
                     elif 'Choose using only' in system:
                         evidence = body['messages'][1]['content']
-                        candidates = re.findall(r'## candidates/([^/]+)\.md\n(.*?)(?=\n## |\Z)', evidence, re.S)
+                        candidates = []
+                        for section in ('\n' + evidence).split('\n## ')[1:]:
+                            heading, separator, text = section.partition('\n')
+                            if separator and heading.startswith('candidates/') and heading.endswith('.md'):
+                                label = heading.removeprefix('candidates/').removesuffix('.md')
+                                if label and '/' not in label:
+                                    candidates.append((label, text))
                         self_test.assertGreaterEqual(len(candidates), 2)
                         expected_plan = 'Plan without a source check.' if keep_base else 'Plan with source verification.'
                         chosen = next(name for name, text in candidates if expected_plan in text)
@@ -294,7 +360,14 @@ class Harness2NativeTests(unittest.TestCase):
                 role = {'name': 'code_reviewer', 'instructions': 'Review evidence.', 'tools': ['calculate'],
                         'harness2': {'enabled': True, 'timeout_seconds': 10}}
                 from popot_agents.worker import http_harness
-                with patch.object(http_harness, 'execute_tool', wraps=http_harness.execute_tool) as tool:
+                def execute_planner(command, **kwargs):
+                    from popot_agents.worker.harness2 import optimize
+                    result = optimize(json.loads(kwargs['input']))
+                    return subprocess.CompletedProcess(command, 0, json.dumps(result), '')
+
+                planner = (patch('popot_agents.worker.harness2.subprocess.run', side_effect=execute_planner)
+                           if in_process else nullcontext())
+                with planner, patch.object(http_harness, 'execute_tool', wraps=http_harness.execute_tool) as tool:
                     self.assertEqual(run_http('Review the supplied change', role), 'Executed result: 4')
                 tool.assert_called_once()
                 state = json.loads((Path(directory) / 'harness2/code_reviewer/state.json').read_text())
