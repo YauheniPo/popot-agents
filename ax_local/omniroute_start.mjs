@@ -7,4 +7,4 @@ createSecureContext({
   key: readFileSync(process.env.OMNIROUTE_TLS_KEY),
   minVersion: 'TLSv1.2',
 });
-await import('/app/dev/run-standalone.mjs');
+await import('./dev/run-standalone.mjs');

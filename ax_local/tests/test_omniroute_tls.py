@@ -1,5 +1,7 @@
 """Local OmniRoute TLS must verify both the CA and the endpoint hostname."""
 
+from contextlib import redirect_stderr
+import io
 import json
 import os
 from pathlib import Path
@@ -137,6 +139,23 @@ class OmniRouteTLSTests(unittest.TestCase):
                 with self.assertRaises((ValueError, ssl.SSLError)):
                     export_trust(Path(directory))
             self.assertEqual(path.read_text(), bundle)
+
+    def test_cli_initialization_only_uses_the_fixed_private_volume(self):
+        from ax_local.omniroute_tls import main
+        with patch('sys.argv', ['omniroute_tls', 'init', '--directory', '/tmp/unrelated']), \
+             patch('ax_local.omniroute_tls.initialize') as initialize, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                main()
+            self.assertEqual(result.exception.code, 2)
+            initialize.assert_not_called()
+        with patch('sys.argv', ['omniroute_tls', 'init']), \
+             patch('ax_local.omniroute_tls.initialize') as initialize:
+            main()
+            initialize.assert_called_once_with(Path('/tls'))
+        with patch('sys.argv', ['omniroute_tls', 'export']), \
+             patch('ax_local.omniroute_tls.export_trust') as export:
+            main()
+            export.assert_called_once_with()
 
     def test_server_stops_before_importing_omniroute_when_tls_material_is_missing(self):
         if not shutil.which('node'):

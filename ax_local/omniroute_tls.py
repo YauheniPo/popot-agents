@@ -106,10 +106,9 @@ def export_trust(root=ROOT):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('init', 'export'))
-    parser.add_argument('--directory', type=Path, default=Path('/tls'))
     args = parser.parse_args()
     if args.action == 'init':
-        initialize(args.directory)
+        initialize(Path('/tls'))
     else:
         export_trust()
 
