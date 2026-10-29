@@ -6,6 +6,7 @@ Usage: python3 -m ax_local.cluster.holmes "Why are AX workers restarting?"
 import argparse
 import json
 import os
+import ssl
 from pathlib import Path
 import re
 import shlex
@@ -22,12 +23,20 @@ IMAGE = 'robustadev/holmes:' + BUILD_VERSIONS['HOLMES_VERSION']
 HOME_PATH = '/home/holmes'
 
 
+def omniroute_ca_bundle():
+    path = Path(os.getenv('OMNIROUTE_CA_FILE', str(ROOT / 'ax_local/.local/omniroute-ca.pem')))
+    roots = ssl.get_default_verify_paths().cafile
+    public = Path(roots).read_text() if roots and Path(roots) != path else ''
+    return public + '\n' + path.read_text()
+
+
 def scope(config):
     if not re.fullmatch(r'kind-[a-z0-9-]+', config['context']):
         raise ValueError('Holmes requires a local kind context')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', config['atespace']):
         raise ValueError('Invalid AX worker namespace')
-    return ('ax-system', 'ate-system', config['atespace'])
+    return ('ax-system', 'ate-system', config['atespace'],
+            'otel-system', 'ax-diagnostics', 'kube-system')
 
 
 def manifests(config):
@@ -94,15 +103,18 @@ def manifests(config):
     objects.append({'apiVersion': 'v1', 'kind': 'ConfigMap',
                     'metadata': {'name': 'holmes-ax', 'namespace': NAMESPACE},
                     'data': {'tools.json': json.dumps(toolsets), 'kubeconfig.json': json.dumps(kubeconfig),
-                             'runner.py': (ROOT / 'ax_local/holmes/runner.py').read_text()}})
+                             'runner.py': (ROOT / 'ax_local/holmes/runner.py').read_text(),
+                             'settings.json': (ROOT / 'config/holmes.json').read_text(),
+                             'ca-bundle.pem': omniroute_ca_bundle()}})
     return objects
 
 
 def investigation_job(question, model):
+    settings = json.loads((ROOT / 'config/holmes.json').read_text())
     return {'apiVersion': 'batch/v1', 'kind': 'Job',
             'metadata': {'generateName': 'holmes-ax-', 'namespace': NAMESPACE},
-            'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 600,
-                     'ttlSecondsAfterFinished': 86400,
+            'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': settings['active_deadline_seconds'],
+                     'ttlSecondsAfterFinished': settings['ttl_seconds_after_finished'],
                      'template': {'spec': {
                          'serviceAccountName': 'holmes', 'restartPolicy': 'Never',
                          'securityContext': {'runAsNonRoot': True, 'runAsUser': 10001,
@@ -112,19 +124,20 @@ def investigation_job(question, model):
                              'command': ['python', '/etc/popot-holmes/runner.py', question],
                              'env': [
                                  {'name': 'HOLMES_MODEL', 'value': model},
-                                 {'name': 'OPENAI_API_BASE', 'value': 'http://host.docker.internal:20128/v1'},
+                                 {'name': 'OPENAI_API_BASE', 'value': settings['api_base']},
                                  {'name': 'OPENAI_API_KEY', 'valueFrom': {'secretKeyRef': {
                                      'name': 'holmes-omniroute', 'key': 'api-key'}}},
                                  {'name': 'HOME', 'value': HOME_PATH},
                                  {'name': 'TMPDIR', 'value': HOME_PATH},
+                                 {'name': 'SSL_CERT_FILE', 'value': '/etc/popot-holmes/ca-bundle.pem'},
+                                 {'name': 'REQUESTS_CA_BUNDLE', 'value': '/etc/popot-holmes/ca-bundle.pem'},
                                  {'name': 'PYTHONDONTWRITEBYTECODE', 'value': '1'},
                                  {'name': 'PYTHONUNBUFFERED', 'value': '1'},
                                  {'name': 'PYTHONPATH', 'value': '/app'},
                                  {'name': 'KUBECONFIG', 'value': '/etc/popot-holmes/kubeconfig.json'},
-                                 {'name': 'OVERRIDE_MAX_OUTPUT_TOKEN', 'value': '4096'},
+                                 {'name': 'OVERRIDE_MAX_OUTPUT_TOKEN', 'value': str(settings['max_output_tokens'])},
                              ],
-                             'resources': {'requests': {'cpu': '100m', 'memory': '512Mi'},
-                                           'limits': {'cpu': '1', 'memory': '2Gi'}},
+                             'resources': settings['resources'],
                              'securityContext': {'allowPrivilegeEscalation': False,
                                                  'readOnlyRootFilesystem': True,
                                                  'capabilities': {'drop': ['ALL']}},
@@ -169,8 +182,11 @@ def ensure_image(node, architecture):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('question')
+    parser.add_argument('question', nargs='?')
+    parser.add_argument('--prepare', action='store_true', help='Cache image and prepare read-only tools without a model call')
     args = parser.parse_args()
+    if not args.question and not args.prepare:
+        parser.error('question is required unless --prepare is used')
     config = json.loads((ROOT / 'ax_local/config.json').read_text())
     scope(config)
     load_dotenv(ROOT / '.env')
@@ -199,6 +215,9 @@ def main():
         'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
         'metadata': {'name': 'holmes-omniroute', 'namespace': NAMESPACE},
         'stringData': {'api-key': key}})
+    if args.prepare:
+        print('Holmes image and project read-only tools prepared', flush=True)
+        return
     job = json.loads(kube('create', '-f', '-', '-o', 'json',
                          payload=investigation_job(args.question, model)))['metadata']['name']
     print(f'Holmes job: {NAMESPACE}/{job}; model: {model}', flush=True)

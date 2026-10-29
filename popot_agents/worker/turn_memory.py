@@ -19,7 +19,7 @@ def trace(event: str, **fields) -> None:
     trace_event(event, **fields)
 
 
-def project_dataset(messages: list[dict]) -> str | None:
+def project_dataset(messages: list[dict], *, default: str | None = None) -> str | None:
     # Only user-authored context determines scope; fetched content cannot switch it.
     for message in reversed(messages):
         if message.get('role') != 'user':
@@ -44,7 +44,7 @@ def project_dataset(messages: list[dict]) -> str | None:
             # the owner/repo boundary can otherwise collapse to the same slug.
             digest = hashlib.sha256(canonical.encode()).hexdigest()[:16]
             return f'{readable[:47].rstrip("-")}-{digest}'
-    return None
+    return default
 
 
 def parse_summary(content) -> dict:
@@ -69,7 +69,7 @@ def parse_summary(content) -> dict:
 class TurnMemory:
     def __init__(self, role: dict, messages: list[dict], *, client=None):
         env = safe_tool_env()
-        self.dataset = project_dataset(messages)
+        self.dataset = project_dataset(messages, default=role.get('memory_project'))
         self.task = scrub(next((m['content'] for m in reversed(messages) if m.get('role') == 'user'), ''))[:RUNTIME["memory"]["task_chars"]]
         self.evidence = {'user': self.task}
         self.enabled = bool(self.dataset and 'cognee' in role.get('mcpServers', {})

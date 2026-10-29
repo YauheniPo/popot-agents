@@ -22,6 +22,13 @@ class HolmesRunnerTests(unittest.TestCase):
         self.load_tools = Mock(return_value=[self.toolset])
         self.executor = Mock(return_value=SimpleNamespace(tools_by_name={'ax_pods': object()}))
         self.llm = Mock()
+        record_llm = self.llm
+
+        class NativeLLM:
+            def __init__(self, **kwargs):
+                self.args = kwargs.get('args', {})
+                record_llm(**kwargs)
+
         self.agent = Mock()
         self.agent.return_value.call.return_value = SimpleNamespace(
             result='AX workers are ready', num_llm_calls=2, tool_calls=[object()])
@@ -30,7 +37,7 @@ class HolmesRunnerTests(unittest.TestCase):
                      'holmes.core.tools_utils', 'holmes.core.tools_utils.tool_executor',
                      'holmes.plugins', 'holmes.plugins.toolsets'):
             modules[name] = ModuleType(name)
-        modules['holmes.core.llm'].DefaultLLM = self.llm
+        modules['holmes.core.llm'].DefaultLLM = NativeLLM
         modules['holmes.core.tool_calling_llm'].ToolCallingLLM = self.agent
         modules['holmes.core.tools_utils.tool_executor'].ToolExecutor = self.executor
         modules['holmes.plugins.toolsets'].load_toolsets_from_config = self.load_tools
@@ -38,12 +45,13 @@ class HolmesRunnerTests(unittest.TestCase):
 
     def run_runner(self):
         output = io.StringIO()
+        settings = (RUNNER.parents[2] / 'config/holmes.json').read_text()
         with patch.dict(sys.modules, self.modules), \
              patch.dict(os.environ, {'HOLMES_MODEL': 'diagnostic-model',
                                      'OPENAI_API_KEY': 'test-provider-secret',
                                      'OPENAI_API_BASE': 'http://gateway/v1'}), \
              patch.object(sys, 'argv', [str(RUNNER), 'Why are workers restarting?']), \
-             patch.object(Path, 'read_text', return_value='{"ax/pods": {"enabled": true}}'), \
+             patch.object(Path, 'read_text', side_effect=[settings, '{"ax/pods": {"enabled": true}}']), \
              contextlib.redirect_stdout(output):
             runpy.run_path(str(RUNNER), run_name='__main__')
         return output.getvalue()
@@ -108,6 +116,33 @@ class HolmesRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Provider request failed'):
             self.run_runner()
         self.assertFalse(self.agent.call_args.kwargs['tool_results_dir'].exists())
+
+
+    def test_native_final_round_sends_none_and_preserves_ordinary_tool_calls(self):
+        class NativeLLM:
+            def __init__(self, **kwargs):
+                self.args = kwargs.get('args', {})
+
+            def completion(self, messages, **kwargs):
+                return {'messages':messages,'args':dict(self.args),**kwargs}
+
+        modules = {}
+        for name, exports in {
+            'holmes.core.llm':{'DefaultLLM':NativeLLM},
+            'holmes.core.tool_calling_llm':{'ToolCallingLLM':object},
+            'holmes.core.tools_utils.tool_executor':{'ToolExecutor':object},
+            'holmes.plugins.toolsets':{'load_toolsets_from_config':None},
+        }.items():
+            module=ModuleType(name);module.__dict__.update(exports);modules[name]=module
+        with patch.dict('sys.modules',modules):
+            namespace=runpy.run_path(str(Path(__file__).parents[1]/'holmes/runner.py'))
+        model=namespace['FinishingLLM'](args={'max_tokens':8192})
+        normal=model.completion([{'role':'user','content':'Inspect'}],tools=[{'function':{}}],tool_choice='auto')
+        self.assertNotIn('tool_choice',normal['args'])
+        final=model.completion([{'role':'user','content':'Inspect'}],tools=None,tool_choice=None)
+        self.assertEqual(final['args']['tool_choice'],'none')
+        self.assertIn('final report',final['messages'][-1]['content'])
+        self.assertNotIn('tool_choice',model.args)
 
 
 if __name__ == '__main__':

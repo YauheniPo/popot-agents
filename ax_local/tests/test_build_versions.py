@@ -18,6 +18,7 @@ SERVICE_PINS = {
     'OMNIROUTE_VERSION': '9.8.7', 'COGNEE_VERSION': 'main-ccccccc',
     'COGNEE_COMMIT': 'c' * 40, 'COGNEE_SOURCE_SHA256': 'd' * 64,
     'HOLMES_VERSION': '0.99.0', 'POSTGRES_VERSION': '18',
+    'GRAFANA_VERSION': '12.4.11', 'KUBE_STATE_METRICS_VERSION': 'v2.19.1',
     'NGINX_VERSION': '1.29-alpine', 'KUBECTL_VERSION': 'v1.36.0',
     'PYTHON_IMAGE': 'python:3.13-slim',
     'GO_IMAGE': 'golang:1.28.0-bookworm',
@@ -86,6 +87,8 @@ class BuildVersionTests(unittest.TestCase):
                          'worker_pool.py', 'substrate_cleanup.py', 'holmes.py'):
                 shutil.copyfile(source / name, scripts / name)
             (root / 'pyproject.toml').write_text(PINS)
+            (root / 'config').mkdir()
+            shutil.copyfile(ROOT / 'config/holmes.json', root / 'config/holmes.json')
             code = (f'import sys; sys.path.append({str(ROOT)!r}); '
                     'from ax_local.cluster import controller_tools, worker_health, substrate_cleanup, holmes; '
                     'assert controller_tools.AX_COMMIT == "a" * 40; '

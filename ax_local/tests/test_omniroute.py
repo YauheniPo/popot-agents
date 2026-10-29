@@ -22,6 +22,7 @@ class OmniRouteTests(unittest.TestCase):
             'AX_LOCAL_SESSION_BACKEND': 'file',
             'OMNIROUTE_MODEL': 'ax-free',
             'OMNIROUTE_CODE_MODEL': 'ax-code-free',
+            'OMNIROUTE_OPS_MODEL': 'ax-ops-free',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
             'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
             'OPENROUTER_MODEL': 'direct-provider-model',
@@ -53,7 +54,7 @@ class OmniRouteTests(unittest.TestCase):
             if call.full_url == runner.base_url + '/chat/completions':
                 self.assertEqual(call.get_header('Authorization'), 'Bearer ' + runner.proxy_token)
                 return original_urlopen(call, **kwargs)
-            self.assertEqual(call.full_url, 'http://omniroute:20128/v1/chat/completions')
+            self.assertEqual(call.full_url, 'https://omniroute:20128/v1/chat/completions')
             self.assertEqual(call.get_header('Authorization'), 'Bearer private-gateway-key')
             payload = json.loads(call.data)
             self.assertEqual(payload['model'], 'ax-free')

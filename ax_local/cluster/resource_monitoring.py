@@ -22,9 +22,15 @@ else:
     from resource_dashboard import dashboard
 
 ROOT = Path(__file__).resolve().parents[2]
+if not __package__:
+    sys.path.insert(0, str(ROOT))
+from ax_local.resource_config import load_monitoring
+from ax_local.cluster.build_versions import BUILD_VERSIONS
+
 LOCAL = ROOT / 'ax_local/.local'
 NS = 'otel-system'
 BEGIN, END = '  # popot-resources begin', '  # popot-resources end'
+PROMETHEUS_CONFIG = 'prometheus.yml'
 
 
 def local_context(config: dict) -> str:
@@ -34,8 +40,7 @@ def local_context(config: dict) -> str:
     return context
 
 
-def extend_prometheus_config(original: str, node: str = 'popot-ax-control-plane',
-                             address: str = '172.24.0.2') -> str:
+def extend_prometheus_config(original: str, node: str, address: str, *, scrape_interval: str = '15s') -> str:
     if BEGIN in original:
         start, end = original.index(BEGIN), original.index(END) + len(END)
         original = original[:start] + original[end:].lstrip('\n')
@@ -43,7 +48,7 @@ def extend_prometheus_config(original: str, node: str = 'popot-ax-control-plane'
     original = original.replace('(substrate|otelcol)_.*', '(substrate|otelcol|popot)_.*')
     return original.rstrip('\n') + '\n' + f'''{BEGIN}
   - job_name: popot-cadvisor
-    scrape_interval: 15s
+    scrape_interval: {scrape_interval}
     metrics_path: /metrics/cadvisor
     scheme: https
     authorization:
@@ -99,10 +104,9 @@ def pvc(name, size):
 
 
 def deployment(name, image, *, args=None, ports=None, env=None, volumes=None, mounts=None,
-               service_account=None, uid=65534, memory='128Mi'):
+               service_account=None, uid=65534, resources):
     container = {'name': name, 'image': image, 'ports': ports or [],
-                 'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'},
-                               'limits': {'cpu': '500m', 'memory': memory}},
+                 'resources': resources,
                  'securityContext': {'allowPrivilegeEscalation': False,
                                      'capabilities': {'drop': ['ALL']}}}
     for key, value in [('args', args), ('env', env), ('volumeMounts', mounts)]:
@@ -166,6 +170,8 @@ def migrate_prometheus_storage(cluster, prom):
 
 def install():
     cluster = Cluster()
+    settings = load_monitoring(ROOT)
+    overrides = {name: service['resources'] for name, service in settings.items() if 'resources' in service}
     node = json.loads(cluster.run('get', 'nodes', '-o', 'json'))['items']
     expected = cluster.context.removeprefix('kind-') + '-control-plane'
     if len(node) != 1 or node[0]['metadata']['name'] != expected:
@@ -187,7 +193,8 @@ def install():
                 'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'ClusterRole',
                             'name': role_name},
                 'subjects': [{'kind': 'ServiceAccount', 'name': account, 'namespace': NS}]}
-    ksm = deployment('kube-state-metrics', 'registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.19.1',
+    ksm = deployment('kube-state-metrics', 'registry.k8s.io/kube-state-metrics/kube-state-metrics:' + BUILD_VERSIONS['KUBE_STATE_METRICS_VERSION'],
+                     resources=overrides['kube-state-metrics'],
                      args=['--resources=pods,nodes', '--port=8080'],
                      ports=[{'containerPort': 8080}], service_account='kube-state-metrics')
     ksm['spec']['template']['spec']['containers'][0]['readinessProbe'] = {
@@ -201,16 +208,20 @@ def install():
                        'ports': [{'port': 8080, 'targetPort': 8080}]})])
 
     config = cluster.get('configmap', 'prometheus-config')['data']
-    config['prometheus.yml'] = extend_prometheus_config(config['prometheus.yml'], expected, address)
+    config[PROMETHEUS_CONFIG] = extend_prometheus_config(config[PROMETHEUS_CONFIG], expected, address,
+        scrape_interval=settings['prometheus']['scrape_interval'])
     cluster.run('-n', NS, 'exec', '-i', 'deployment/prometheus', '--', 'promtool', 'check',
-                'config', '--syntax-only', '/dev/stdin', input=config['prometheus.yml'])
+                'config', '--syntax-only', '/dev/stdin', input=config[PROMETHEUS_CONFIG])
     cluster.patch('configmap', 'prometheus-config', {'data': config})
     prom = cluster.get('deployment', 'prometheus')
     migrate_prometheus_storage(cluster, prom)
     spec = prom['spec']['template']['spec']
     containers = spec['containers']
+    if 'prometheus' in overrides:
+        containers[0]['resources'] = overrides['prometheus']
     args = [a for a in containers[0]['args'] if not a.startswith('--storage.tsdb.retention.')]
-    containers[0]['args'] = args + ['--storage.tsdb.retention.time=7d', '--storage.tsdb.retention.size=1GB']
+    containers[0]['args'] = args + ['--storage.tsdb.retention.time=' + settings['prometheus']['retention_time'],
+                                     '--storage.tsdb.retention.size=' + settings['prometheus']['retention_size']]
     if not any(v['name'] == 'kubelet-tls' for v in spec['volumes']):
         spec['volumes'].append({'name': 'kubelet-tls', 'configMap': {'name': 'popot-kubelet-tls'}})
         containers[0]['volumeMounts'].append({'name': 'kubelet-tls', 'mountPath': '/etc/kubelet-tls', 'readOnly': True})
@@ -222,21 +233,14 @@ def install():
     cluster.patch('deployment', 'prometheus', {'spec': {'strategy': {'type': 'Recreate', 'rollingUpdate': None},
         'template': {'metadata': {'annotations': {'popot.dev/resource-config': digest}}, 'spec': spec}}})
 
-    provision = {'apiVersion': 1, 'datasources': [{'name': 'Prometheus', 'uid': 'popot-prometheus',
-        'type': 'prometheus', 'access': 'proxy', 'url': 'http://prometheus:9090',
-        'isDefault': True, 'editable': False}]}
-    providers = {'apiVersion': 1, 'providers': [{'name': 'popot', 'type': 'file',
-        'disableDeletion': True, 'allowUiUpdates': False, 'options': {'path': '/var/lib/grafana/dashboards'}}]}
+    provision = settings['grafana']['datasources']
+    providers = settings['grafana']['dashboard_providers']
     data = {'datasources.yaml': json.dumps(provision), 'dashboards.yaml': json.dumps(providers),
             'resources.json': json.dumps(dashboard())}
-    grafana = deployment('grafana', 'grafana/grafana:12.4.11', uid=472, memory='256Mi',
+    grafana = deployment('grafana', 'grafana/grafana:' + BUILD_VERSIONS['GRAFANA_VERSION'], uid=472,
+        resources=overrides['grafana'],
         ports=[{'name': 'web', 'containerPort': 3000}],
-        env=[{'name': k, 'value': v} for k, v in {
-            'GF_AUTH_ANONYMOUS_ENABLED': 'true', 'GF_AUTH_ANONYMOUS_ORG_ROLE': 'Viewer',
-            'GF_AUTH_DISABLE_LOGIN_FORM': 'true', 'GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION': 'true',
-            'GF_USERS_ALLOW_SIGN_UP': 'false', 'GF_ANALYTICS_REPORTING_ENABLED': 'false',
-            'GF_ANALYTICS_CHECK_FOR_UPDATES': 'false', 'GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES': 'false',
-            'GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH': '/var/lib/grafana/dashboards/resources.json'}.items()],
+        env=[{'name': k, 'value': v} for k, v in settings['grafana']['environment'].items()],
         volumes=[{'name': 'data', 'persistentVolumeClaim': {'claimName': 'grafana-resource-data'}},
                  {'name': 'config', 'configMap': {'name': 'popot-grafana-config'}}],
         mounts=[{'name': 'data', 'mountPath': '/var/lib/grafana'},
@@ -251,6 +255,10 @@ def install():
     cluster.apply([obj('ConfigMap', 'popot-grafana-config', data=data), grafana,
                    obj('Service', 'grafana', spec={'selector': {'app': 'grafana'},
                        'ports': [{'port': 3000, 'targetPort': 3000}]})])
+    if 'opentelemetry-collector' in overrides:
+        collector = cluster.get('deployment', 'opentelemetry-collector')['spec']['template']['spec']
+        collector['containers'][0]['resources'] = overrides['opentelemetry-collector']
+        cluster.patch('deployment', 'opentelemetry-collector', {'spec': {'template': {'spec': collector}}})
     for name in ['prometheus', 'kube-state-metrics', 'grafana']:
         print(cluster.run('-n', NS, 'rollout', 'status', f'deployment/{name}', '--timeout=600s').strip())
     cluster.run('-n', NS, 'exec', 'deployment/prometheus', '--', 'promtool', 'check', 'config',

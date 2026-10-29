@@ -45,7 +45,7 @@ class ProjectLayoutTests(unittest.TestCase):
                  str(compose_file), 'config',
                  '--format', 'json'], cwd=directory,
                 env={key: value for key, value in os.environ.items()
-                     if not key.startswith('COMPOSE_')},
+                     if not key.startswith('COMPOSE_') and key != 'POPOT_DB_PASSWORD'},
                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(result.stdout)

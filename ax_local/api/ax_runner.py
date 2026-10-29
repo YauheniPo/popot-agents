@@ -137,8 +137,18 @@ class AxAgentRunner:
                         env['COGNEE_API_URL'] = urlunsplit(memory_url._replace(
                             netloc=f"{memory_host}:{memory_url.port or 8000}"))
             env["HARNESS_TOOL_ENV_NAMES_JSON"] = json.dumps(names)
+            if role_config.get('_ax_harness2_probe') and 'github' in role_config.get('mcpServers', {}):
+                env['AX_HARNESS2_GITHUB_TOKEN'] = os.environ['GITHUB_PERSONAL_ACCESS_TOKEN']
         except ValueError as exc:
             raise AgentConfigurationError(str(exc)) from exc
+        # Substrate permits at most 32 env entries. Restore internal capabilities
+        # in the entrypoint, keeping role/tool credentials under their own names.
+        capabilities = {key: value for key, value in env.items()
+                        if key.startswith(('AX_DELEGATION_', 'AX_HARNESS2_', 'HARNESS2_'))}
+        for key in capabilities:
+            del env[key]
+        if capabilities:
+            env['AX_CAPABILITIES_JSON'] = json.dumps(capabilities)
         return {
             "apiVersion": "ax.io/v1alpha1", "kind": "Task",
             "metadata": {"name": f"popot-chat-{chat_id}",
@@ -598,7 +608,7 @@ class AxChat:
         timeout = self.timeout_seconds if timeout_seconds is None else min(
             self.timeout_seconds, timeout_seconds)
         service = self.runner.delegation
-        with (service.turn(self.container_name.removeprefix("popot-chat-"), timeout)
+        with (service.turn(self.container_name.removeprefix("popot-chat-"), timeout, message=message)
               if service else nullcontext()):
             callback = progress_observer()
             payload = {"action": "message", "message": message}

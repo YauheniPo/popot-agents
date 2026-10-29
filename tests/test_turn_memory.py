@@ -16,6 +16,20 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_role_default_project_enables_memory_without_a_task_tag(self):
+        with patch.dict(os.environ, ENV, clear=True):
+            memory = TurnMemory({**ROLE,'memory_project':'popot-agents'},
+                [{'role':'user','content':'Analyze local service health.'}], client=Mock())
+        self.assertTrue(memory.enabled)
+        self.assertEqual(memory.dataset,'popot-agents')
+
+    def test_default_project_does_not_override_ambiguous_user_projects(self):
+        with patch.dict(os.environ, ENV, clear=True):
+            memory = TurnMemory({**ROLE,'memory_project':'popot-agents'},
+                [{'role':'user','content':'Compare https://github.com/a/one and https://github.com/b/two'}],
+                client=Mock())
+        self.assertFalse(memory.enabled)
+
     def test_recall_keeps_provenance_when_ingested_text_is_clean(self):
         client = Mock()
         record = {'recorded_at': '2026-10-10', 'references': ['https://github.com/a/b/pull/70'],

@@ -122,6 +122,10 @@ class Grant:
     root_id: str
     lineage: tuple[str, ...]
     token: str = field(repr=False)
+    probe_token: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
+    probes: int = 0
+    config: dict = field(default_factory=dict, repr=False)
+    approved_change: str = ''
     run: Run | None = None
     active: bool = False
     deadline: float = 0
@@ -172,6 +176,8 @@ class DelegationService:
 
     def prepare_config(self, session_id: str, config: dict | None) -> dict:
         config = dict(config or {})
+        if config.get('_ax_harness2_probe'):
+            return config
         role = config.get("_ax_role")
         if role is None:
             saved = self.store.get(session_id)
@@ -184,6 +190,8 @@ class DelegationService:
         return config
 
     def worker_environment(self, session_id: str, config: dict) -> dict[str, str]:
+        if config.get('_ax_harness2_probe'):
+            return {}
         role = config.get("_ax_role")
         if role not in self.roles:
             return {}
@@ -194,16 +202,27 @@ class DelegationService:
                 job = self.jobs.get(session_id)
                 grant = Grant(session_id, role, meta.get("root_session_id", session_id),
                               tuple(meta.get("lineage", [role])), secrets.token_urlsafe(32),
-                              run=job.run if job else None)
+                              run=job.run if job else None, config=json.loads(json.dumps(config)))
                 self.grants[session_id] = grant
                 self.tokens[hashlib.sha256(grant.token.encode()).hexdigest()] = grant
+                self.tokens[hashlib.sha256(grant.probe_token.encode()).hexdigest()] = grant
+            environment = {}
+            if role == 'project_operator' and getattr(self, 'operations', None):
+                environment = {'AX_DELEGATION_URL': self.base_url, 'AX_DELEGATION_TOKEN': grant.token,
+                               'AX_DELEGATION_OPERATOR': '1'}
+            settings = self.roles[role].get('harness2', {})
+            if settings.get('enabled') and settings.get('mode') == 'execution' \
+                    and config.get('harness2', {}).get('enabled') \
+                    and config.get('harness2', {}).get('mode') == 'execution':
+                environment = {'AX_HARNESS2_URL': self.base_url, 'AX_HARNESS2_TOKEN': grant.probe_token,
+                               'AX_HARNESS2_ROLE': role}
             allowed = [target for target in self.roles[role].get("allowed_roles", [])
                        if target not in grant.lineage]
             if len(grant.lineage) > self.policy["max_depth"]:
                 allowed = []
             if not allowed:
-                return {}
-            return {"AX_DELEGATION_URL": self.base_url, "AX_DELEGATION_TOKEN": grant.token,
+                return environment
+            return {**environment, "AX_DELEGATION_URL": self.base_url, "AX_DELEGATION_TOKEN": grant.token,
                     "AX_DELEGATION_ROLES": json.dumps(allowed),
                     "AX_DELEGATION_DESCRIPTIONS": json.dumps({target:
                         self.roles[target].get("description", self.roles[target]["instructions"][:1000])
@@ -214,34 +233,41 @@ class DelegationService:
             grant = self.grants.pop(session_id, None)
             if grant:
                 self.tokens.pop(hashlib.sha256(grant.token.encode()).hexdigest(), None)
+                self.tokens.pop(hashlib.sha256(grant.probe_token.encode()).hexdigest(), None)
+
+    def _begin_turn(self, grant, timeout_seconds, message):
+        if grant.active:
+            raise RuntimeError("AX session already has an active turn")
+        job = self.jobs.get(grant.session_id)
+        if job and (job.canceled.is_set() or job.run.canceled.is_set()):
+            raise TimeoutError("AX parent turn was canceled")
+        owner = grant.run is None
+        if owner:
+            grant.root_id, grant.lineage = grant.session_id, (grant.role,)
+            grant.run = Run(time.monotonic() + timeout_seconds)
+        grant.active = True
+        grant.approved_change = (message.strip().split()[1] if
+            re.fullmatch(r'/apply change-[0-9a-f]{24}', message.strip())
+            and not grant.config.get('_ax_delegation') else '')
+        grant.probes = 0
+        grant.deadline = min(grant.run.deadline, time.monotonic() + timeout_seconds)
+        return owner
 
     @contextmanager
-    def turn(self, session_id: str, timeout_seconds: float):
+    def turn(self, session_id: str, timeout_seconds: float, *, message: str = ''):
         with self.lock:
             grant = self.grants.get(session_id)
-            if grant is None:
-                yield_without_grant = True
-                owner = False
-            else:
-                yield_without_grant = False
-                if grant.active:
-                    raise RuntimeError("AX session already has an active turn")
-                job = self.jobs.get(session_id)
-                if job and (job.canceled.is_set() or job.run.canceled.is_set()):
-                    raise TimeoutError("AX parent turn was canceled")
-                owner = grant.run is None
-                if owner:
-                    grant.root_id, grant.lineage = session_id, (grant.role,)
-                    grant.run = Run(time.monotonic() + timeout_seconds)
-                grant.active = True
-                grant.deadline = min(grant.run.deadline, time.monotonic() + timeout_seconds)
+            owner = False
+            if grant is not None:
+                owner = self._begin_turn(grant, timeout_seconds, message)
                 run = grant.run
         try:
             yield
         finally:
-            if not yield_without_grant:
+            if grant is not None:
                 with self.lock:
                     grant.active = False
+                    grant.approved_change = ''
                     if owner:
                         grant.run = None
                 if owner:
@@ -273,13 +299,27 @@ class DelegationService:
             if job.chat:
                 job.chat.close()
 
+    def authorized_operator(self, token: str) -> Grant:
+        with self.lock:
+            grant = self.tokens.get(hashlib.sha256(token.encode()).hexdigest())
+            if self.closed or not grant or grant.role != 'project_operator' \
+                    or not secrets.compare_digest(token, grant.token) or not grant.active \
+                    or not grant.run or grant.run.canceled.is_set() or time.monotonic() >= grant.deadline \
+                    or not getattr(self, 'operations', None):
+                raise A2AError('operator capability is expired or invalid')
+            return grant
+
     def _authorized(self, token: str, role: str) -> Grant:
         with self.lock:
             grant = self.tokens.get(hashlib.sha256(token.encode()).hexdigest())
             if self.closed or not grant or not grant.active or not grant.run \
                     or grant.run.canceled.is_set() or time.monotonic() >= grant.deadline:
                 raise A2AError("delegation capability is expired or invalid")
-            if role not in self.roles[grant.role].get("allowed_roles", []):
+            if secrets.compare_digest(token, grant.probe_token):
+                settings = self.roles[grant.role].get('harness2', {})
+                if role != grant.role or not settings.get('enabled') or settings.get('mode') != 'execution':
+                    raise A2AError('probe capability is restricted to its configured role')
+            elif role not in self.roles[grant.role].get("allowed_roles", []):
                 raise A2AError("target role is not allowed")
             return grant
 
@@ -303,7 +343,7 @@ class DelegationService:
         if not isinstance(params, dict):
             raise A2AError("params must be an object")
         if method == "SendMessage":
-            return {"task": self._submit(grant, role, params)}
+            return {"task": self._submit(grant, role, params, token=token)}
         if method in {"GetTask", "CancelTask"}:
             if not isinstance(params.get("id"), str):
                 raise A2AError("task id must be a string")
@@ -328,14 +368,14 @@ class DelegationService:
             return self._task(saved)
         raise A2AError("operation is not supported by the local AX adapter", -32601)
 
-    def _submit(self, grant: Grant, role: str, params: dict) -> dict:
-        message = params.get("message")
+    @staticmethod
+    def _message_input(message, root_id):
         if not isinstance(message, dict) or message.get("role") != "ROLE_USER":
             raise A2AError("message with ROLE_USER is required")
         message_id = message.get("messageId")
         if not isinstance(message_id, str) or not 1 <= len(message_id) <= 100:
             raise A2AError("messageId must be a nonempty string up to 100 characters")
-        if "taskId" in message or message.get("contextId", grant.root_id) != grant.root_id:
+        if "taskId" in message or message.get("contextId", root_id) != root_id:
             raise A2AError("only new tasks in the caller's context are supported")
         parts = message.get("parts")
         if not isinstance(parts, list) or not parts or any(
@@ -345,43 +385,127 @@ class DelegationService:
         task = "\n".join(part["text"] for part in parts).strip()
         if not task or len(task) > RUNTIME["limits"]["message_chars"]:
             raise A2AError("task is empty or too long")
-        configuration = params.get("configuration", {})
-        if not isinstance(configuration, dict):
-            raise A2AError("configuration must be an object")
-        fingerprint = hashlib.sha256((role + "\n" + task).encode()).hexdigest()
+        return message_id, task
+
+    @staticmethod
+    def _probe_request(grant, message, token):
+        metadata = message.get('metadata', {})
+        if not isinstance(metadata, dict):
+            raise A2AError('message metadata must be an object')
+        probe = metadata.get('harness2')
+        # Only the dedicated probe capability can enter this path; a normal
+        # delegation request cannot opt into a more privileged same-role actor.
+        is_probe = secrets.compare_digest(token, grant.probe_token)
+        if is_probe:
+            if not isinstance(probe, dict) or set(probe) != {'prompt', 'timeout_seconds'} \
+                    or not isinstance(probe.get('prompt'), str) or len(probe['prompt']) > 1500 \
+                    or type(probe.get('timeout_seconds')) not in {int, float} \
+                    or not 0 < probe['timeout_seconds'] <= 300:
+                raise A2AError('invalid Harness2 probe')
+        elif probe is not None:
+            raise A2AError('probe must target the same role')
+        return probe, is_probe
+
+    def _existing_submission(self, parent_id, message_id, fingerprint):
+        # Persisted message IDs survive API restarts; never repeat actor side effects.
+        for saved in self.store.list_chats():
+            meta = (saved.get("roleConfig") or {}).get("_ax_delegation", {})
+            if meta.get("parent_session_id") == parent_id \
+                    and meta.get("message_id") == message_id:
+                if meta.get("fingerprint") != fingerprint:
+                    raise A2AError("messageId was already used with different input")
+                return self._task(saved)
+        return None
+
+    def _check_probe_limits(self, grant, role):
+        if grant.probes >= 4:
+            raise A2AError('Harness2 probe limit reached')
+        if any(job.config.get('_ax_harness2_probe') and
+                job.config['_ax_delegation']['state'] in ACTIVE and
+                job.config['_ax_delegation']['parent_session_id'] == grant.session_id
+                for job in self.jobs.values()):
+            raise A2AError('a Harness2 probe is already active')
+        queue = getattr(self.runners[self.roles[role]['agent']], 'worker_queue', None)
+        if queue:
+            capacity = queue.status()
+            if capacity['active'] >= capacity['limit'] or capacity['queued']:
+                raise A2AError('No spare worker capacity for a Harness2 probe')
+
+    def _check_submission_limits(self, grant, role, is_probe):
+        if is_probe:
+            self._check_probe_limits(grant, role)
+            return
+        if role in grant.lineage:
+            raise A2AError('delegation cycle is not allowed')
+        if len(grant.lineage) > self.policy['max_depth']:
+            raise A2AError('delegation depth limit reached')
+        if grant.run.calls >= self.policy['max_calls_per_turn']:
+            raise A2AError('delegation call limit reached')
+
+    def _submit(self, grant: Grant, role: str, params: dict, *, token: str) -> dict:
+        message = params.get('message')
+        message_id, task = self._message_input(message, grant.root_id)
+        if not isinstance(params.get('configuration', {}), dict):
+            raise A2AError('configuration must be an object')
+        probe, is_probe = self._probe_request(grant, message, token)
+        fingerprint = hashlib.sha256((role + '\n' + task +
+            (json.dumps(probe, sort_keys=True) if is_probe else '')).encode()).hexdigest()
         with self.lock:
-            self._authorized(grant.token, role)
-            # Persisted message IDs survive API restarts; never repeat actor side effects.
-            for saved in self.store.list_chats():
-                meta = (saved.get("roleConfig") or {}).get("_ax_delegation", {})
-                if meta.get("parent_session_id") == grant.session_id \
-                        and meta.get("message_id") == message_id:
-                    if meta.get("fingerprint") != fingerprint:
-                        raise A2AError("messageId was already used with different input")
-                    return self._task(saved)
-            self._authorized(grant.token, role)
-            if role in grant.lineage:
-                raise A2AError("delegation cycle is not allowed")
-            if len(grant.lineage) > self.policy["max_depth"]:
-                raise A2AError("delegation depth limit reached")
-            if grant.run.calls >= self.policy["max_calls_per_turn"]:
-                raise A2AError("delegation call limit reached")
+            self._authorized(token, role)
+            existing = self._existing_submission(grant.session_id, message_id, fingerprint)
+            if existing is not None:
+                return existing
+            self._authorized(token, role)
+            self._check_submission_limits(grant, role, is_probe)
             session_id = uuid.uuid4().hex[:16]
             config = {**self.roles[role], "_ax_delegation": {
                 "parent_session_id": grant.session_id, "root_session_id": grant.root_id,
                 "lineage": [*grant.lineage, role], "message_id": message_id,
                 "fingerprint": fingerprint, "input": task, "state": "TASK_STATE_SUBMITTED"}}
-            job = Job(session_id, config, task, grant.run, grant.deadline)
+            deadline = grant.deadline
+            if is_probe:
+                parent = {**grant.config, '_ax_delegation': config['_ax_delegation']}
+                parent['tools'] = [name for name in parent.get('tools', [])
+                                   if name in self.roles[role].get('tools', [])]
+                config = self._probe_config(parent, probe, self.roles[role])
+                deadline = min(deadline, time.monotonic() + probe['timeout_seconds'])
+            job = Job(session_id, config, task, grant.run, deadline)
             try:
                 self._save(job, "TASK_STATE_SUBMITTED")
                 self.jobs[session_id] = job
-                grant.run.calls += 1
+                if is_probe:
+                    grant.probes += 1
+                else:
+                    grant.run.calls += 1
                 job.thread = threading.Thread(target=self._execute, args=(job,), daemon=True)
                 job.thread.start()
             except Exception:
                 self.jobs.pop(session_id, None)
                 raise
             return self._task(self.store.get(session_id))
+
+    @staticmethod
+    def _probe_config(config, probe, current):
+        """Restrict MCP to reads; local changes live in this AX Task."""
+        readonly = {'get_file_contents', 'get_commit', 'search_repositories',
+                    'list_branches', 'pull_request_read', 'issue_read'}
+        servers = {}
+        github = config.get('mcpServers', {}).get('github')
+        current_github = current.get('mcpServers', {}).get('github', {})
+        if github and current_github and github.get('url') in {'https://api.githubcopilot.com/mcp/',
+                                          'https://api.githubcopilot.com/mcp/x/all/readonly'}:
+            servers['github'] = {**github, 'tools': [name for name in github['tools']
+                if name in readonly and name in current_github.get('tools', [])],
+                'url': 'https://api.githubcopilot.com/mcp/x/all/readonly',
+                'bearer_token_env': 'AX_HARNESS2_GITHUB_TOKEN'}
+        return {**config, '_ax_harness2_probe': True, 'harness2': {'enabled': False},
+            'allowed_roles': [], 'env_names': [], 'mcpServers': servers,
+            'timeout_seconds': min(300, max(1, int(probe['timeout_seconds']))), 'max_tool_rounds': 12,
+            'instructions': config['instructions'] + '\n\nIsolated Harness2 probe: perform the task '
+                'using actual tools and report evidence. Local edits and checks are allowed. '
+                'External publication, delegation and memory writes are unavailable. '
+                'Other workers\' files are unavailable; use supplied source or accessible repository refs. '
+                'Return the diff and exact check results when you change code.\n' + probe['prompt']}
 
     @staticmethod
     def _remaining(job: Job) -> float:

@@ -1,21 +1,46 @@
 name: popot-ax-local
 
 services:
+  omniroute-tls-init:
+    image: ${PYTHON_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
+    profiles: [omniroute]
+    command: ["python", "/bootstrap/omniroute_tls.py", "init"]
+    volumes:
+      - ./omniroute_tls.py:/bootstrap/omniroute_tls.py:ro
+      - omniroute-tls:/tls
+    restart: "no"
+
   omniroute:
     image: diegosouzapw/omniroute:${OMNIROUTE_VERSION:?Use bash compose.sh to load pyproject.toml versions}
     profiles: [omniroute]
+    depends_on:
+      omniroute-tls-init:
+        condition: service_completed_successfully
     environment:
       DATA_DIR: /app/data
       REQUIRE_API_KEY: "true"
       INITIAL_PASSWORD: ${OMNIROUTE_INITIAL_PASSWORD:-}
+      HOSTNAME: 0.0.0.0
+      OMNIROUTE_TLS_CERT: /run/popot-tls/cert.pem
+      OMNIROUTE_TLS_KEY: /run/popot-tls/key.pem
+      NODE_EXTRA_CA_CERTS: /run/popot-tls/ca.pem
+    command: ["node", "/app/popot-start.mjs"]
     ports:
       - "127.0.0.1:20128:20128"
     volumes:
       - omniroute-data:/app/data
+      - ./omniroute_start.mjs:/app/popot-start.mjs:ro
+      - ./omniroute_healthcheck.mjs:/app/popot-healthcheck.mjs:ro
+      - type: volume
+        source: omniroute-tls
+        target: /run/popot-tls
+        read_only: true
+        volume:
+          subpath: server
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "node", "healthcheck.mjs"]
+      test: ["CMD", "node", "/app/popot-healthcheck.mjs"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -30,7 +55,8 @@ services:
       omniroute:
         condition: service_healthy
     environment:
-      OMNIROUTE_URL: http://omniroute:20128
+      OMNIROUTE_URL: https://omniroute:20128
+      SSL_CERT_FILE: /run/popot-tls/ca-bundle.pem
       OMNIROUTE_INITIAL_PASSWORD: ${OMNIROUTE_INITIAL_PASSWORD:-}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -46,6 +72,12 @@ services:
     volumes:
       - ./omniroute.py:/bootstrap/omniroute.py:ro
       - ../config:/config:ro
+      - type: volume
+        source: omniroute-tls
+        target: /run/popot-tls
+        read_only: true
+        volume:
+          subpath: trust
     restart: "no"
 
   db:
@@ -90,6 +122,7 @@ services:
       AX_LOCAL_WORKER_IMAGE_FILE: /run/ax-local/worker-image
       POPOT_DB_PASSWORD: ${POPOT_DB_PASSWORD:-}
     volumes:
+      - ../config:/app/config
       - type: bind
         source: ./.local/kubeconfig-container
         target: /run/ax-local/kubeconfig
@@ -129,6 +162,7 @@ services:
 
 volumes:
   omniroute-data:
+  omniroute-tls:
   ax-postgres:
 
 networks:

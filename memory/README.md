@@ -190,6 +190,10 @@ if that turn saves no memory. Missing provider cost is marked in the completion
 trace; the upstream dashboard may estimate cost from token counts even when the stored
 cost is zero; that estimate is not a provider invoice. Old runs are
 not backfilled. Turns without a project or memory-enabled role are excluded.
+For a local check, include `[project: popot-agents]` in the task. A successful
+turn should emit `memory_recalled` and `memory_session_recorded`; it can save
+zero memories when nothing durable was established. Harness² trial workers
+intentionally omit Cognee and do not create memory sessions.
 
 The backend mounts `session_api.py` as an app extension for the pinned Cognee
 SDK: its authenticated lifecycle route fills the SDK-only completion and usage

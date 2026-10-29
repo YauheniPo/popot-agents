@@ -115,23 +115,29 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
             raise ValueError(f"invalid role name: {name}")
         required = {"agent", "instructions", "tools"}
         optional = {"permissions", "mcpServers", "timeout_seconds", "max_tool_rounds",
-                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description", "name", "harness2"}
+                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description", "name", "harness2", "memory_project"}
         if not isinstance(config, dict) or not required.issubset(config) \
                 or set(config) - required - optional:
             raise ValueError(f"role {name} must define agent, instructions and tools")
         if "name" in config and config["name"] != name:
             raise ValueError(f"role {name} has an invalid name")
+        if 'memory_project' in config and (not isinstance(config['memory_project'],str)
+                or not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}',config['memory_project'])):
+            raise ValueError(f'role {name} has invalid memory_project')
         agent = config["agent"]
         if not isinstance(agent, str) or agent not in agents:
             raise ValueError(f"role {name} uses an unknown agent")
         if 'harness2' in config:
             settings = config['harness2']
-            if not isinstance(settings, dict) or set(settings) - {'enabled', 'timeout_seconds'} \
+            if not isinstance(settings, dict) or set(settings) - {'enabled', 'timeout_seconds', 'mode'} \
                     or type(settings.get('enabled')) is not bool:
-                raise ValueError(f'role {name} harness2 must define enabled and optionally timeout_seconds')
+                raise ValueError(f'role {name} harness2 must define enabled and optionally timeout_seconds/mode')
+            if not isinstance(settings.get('mode', 'planning'), str) \
+                    or settings.get('mode', 'planning') not in {'planning', 'execution'}:
+                raise ValueError(f'role {name} has invalid harness2.mode')
             budget = settings.get('timeout_seconds', 180)
-            if type(budget) is not int or not 1 <= budget <= 300:
-                raise ValueError(f'role {name} has invalid harness2.timeout_seconds (1..300)')
+            if type(budget) is not int or not 1 <= budget <= 900:
+                raise ValueError(f'role {name} has invalid harness2.timeout_seconds (1..900)')
             if settings['enabled'] and agents[agent].session_mode != 'http':
                 raise ValueError(f'role {name} needs an HTTP agent for harness2')
         if not isinstance(config["instructions"], str) or len(config["instructions"]) > 4000:

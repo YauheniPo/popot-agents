@@ -91,7 +91,8 @@ def safe_tool_env() -> dict[str, str]:
     """Forward baseline variables and only role-selected credentials to tools."""
     names = validate_role_env_names(json.loads(os.getenv("HARNESS_TOOL_ENV_NAMES_JSON", "[]")))
     return ({key: value for key, value in os.environ.items()
-             if key in {"PATH", "LANG", "LC_ALL", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+             if key in {"PATH", "LANG", "LC_ALL", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR",
+                        "PLAYWRIGHT_BROWSERS_PATH"}
              or key in names}
             | {"HOME": str(WORKSPACE_ROOT), "GIT_TERMINAL_PROMPT": "0"})
 

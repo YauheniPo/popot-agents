@@ -5,6 +5,8 @@ import subprocess
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
+from pathlib import Path
+import tempfile
 
 from ax_local.cluster.holmes import IMAGE, NAMESPACE, manifests, investigation_job, scope, wait_for_pod, ensure_image, main
 
@@ -14,6 +16,31 @@ TEST_MODEL = 'selected-free-combo'
 
 
 class HolmesTests(unittest.TestCase):
+    def setUp(self):
+        bundle = patch('ax_local.cluster.holmes.omniroute_ca_bundle', return_value='public-ca-bundle')
+        bundle.start()
+        self.addCleanup(bundle.stop)
+
+    def test_job_and_runner_config_follow_service_settings(self):
+        root=Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory)
+            (target/'config').mkdir()
+            (target/'ax_local/holmes').mkdir(parents=True)
+            (target/'ax_local/holmes/runner.py').write_text('runner')
+            settings=json.loads((root/'config/holmes.json').read_text())
+            settings.update(active_deadline_seconds=180,ttl_seconds_after_finished=3600,max_steps=5)
+            settings['resources']['limits']['memory']='1Gi'
+            (target/'config/holmes.json').write_text(json.dumps(settings))
+            with patch('ax_local.cluster.holmes.ROOT',target):
+                job=investigation_job('Check pods',TEST_MODEL)
+                data=next(o for o in manifests(CONFIG) if o['kind']=='ConfigMap')['data']
+        self.assertEqual(job['spec']['activeDeadlineSeconds'],180)
+        self.assertEqual(job['spec']['ttlSecondsAfterFinished'],3600)
+        self.assertEqual(job['spec']['template']['spec']['containers'][0]['resources']['limits']['memory'],'1Gi')
+        self.assertEqual(json.loads(data['settings.json'])['max_steps'],5)
+        self.assertEqual(data['ca-bundle.pem'], 'public-ca-bundle')
+
     def test_model_is_required_before_any_cluster_or_image_actions(self):
         for value in (None, '', '   '):
             environment = {'OMNIROUTE_API_KEY': 'test-gateway-key'}
@@ -69,6 +96,8 @@ class HolmesTests(unittest.TestCase):
         env = {item['name']: item['value'] for item in container['env'] if 'value' in item}
         self.assertEqual(env['HOME'], '/home/holmes')
         self.assertEqual(env['TMPDIR'], env['HOME'])
+        self.assertEqual(env['SSL_CERT_FILE'], '/etc/popot-holmes/ca-bundle.pem')
+        self.assertEqual(env['REQUESTS_CA_BUNDLE'], env['SSL_CERT_FILE'])
         mounts = {item['mountPath']: item['name'] for item in container['volumeMounts']}
         self.assertNotIn('/tmp', mounts)
         volume = next(item for item in pod['volumes'] if item['name'] == mounts[env['HOME']])
@@ -107,7 +136,8 @@ class HolmesTests(unittest.TestCase):
             wait_for_pod(kube, 'failed-job')
 
     def test_scope_rejects_remote_context_and_invalid_namespace(self):
-        self.assertEqual(scope(CONFIG), ('ax-system', 'ate-system', 'ate-demo-counter'))
+        self.assertEqual(scope(CONFIG), ('ax-system', 'ate-system', 'ate-demo-counter',
+                                        'otel-system', 'ax-diagnostics', 'kube-system'))
         for config in ({**CONFIG, 'context': 'production'},
                        {**CONFIG, 'atespace': '../production'}):
             with self.assertRaises(ValueError):

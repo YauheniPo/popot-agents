@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 [dependency-groups]
 build = ["pip==26.2.2"]
 mcp = ["mcp==2.3.0"]
+browser = ["playwright==1.64.0"]
 harness2 = [
     "harness2 @ git+https://github.com/google-research/harness2@1cfe254e8d25b15f37048c3730134686abe60335",
 ]
@@ -54,6 +55,8 @@ KO_VERSION = "v0.19.1"
 KUBECTL_VERSION = "v1.35.3"
 OMNIROUTE_VERSION = "3.8.51"
 HOLMES_VERSION = "0.43.0"
+GRAFANA_VERSION = "12.4.11"
+KUBE_STATE_METRICS_VERSION = "v2.19.1"
 COGNEE_VERSION = "main-b32d8af"
 COGNEE_COMMIT = "b32d8afc59e1064d9291b9828a8a147be9cc8bab"
 COGNEE_SOURCE_SHA256 = "167b0866ed0f019bccea5a655544c400845b5d2878af622452189b3bd890860b"

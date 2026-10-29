@@ -235,6 +235,21 @@ class FeatureTeamConfigTests(unittest.TestCase):
                          ["GITHUB_PERSONAL_ACCESS_TOKEN", "COGNEE_API_URL", "COGNEE_PASSWORD",
                           "GITGUARDIAN_API_KEY", "SONAR_TOKEN"])
 
+    def test_frontend_and_qa_can_execute_checks_with_readonly_github_access(self):
+        config = Path(__file__).resolve().parents[1] / 'config'
+        roles = load_roles(config / 'roles.json', load_agents(config / 'agents.json'))
+        for name in ('frontend_engineer', 'qa_engineer'):
+            role = roles[name]
+            self.assertLessEqual({'bash', 'read_file', 'write_file', 'git_clone'}, set(role['tools']))
+            self.assertTrue(role['permissions']['shell'])
+            self.assertEqual(role['permissions']['workspace'], 'persistent')
+            self.assertIn('GITHUB_PERSONAL_ACCESS_TOKEN', role['env_names'])
+            self.assertLessEqual({'GITGUARDIAN_API_KEY', 'SONAR_TOKEN'}, set(role['env_names']))
+            github = role['mcpServers']['github']
+            self.assertTrue(github['url'].endswith('/readonly'))
+            self.assertIn('get_file_contents', github['tools'])
+            self.assertFalse({'create_pull_request', 'create_or_update_file'} & set(github['tools']))
+
     def test_demo_cron_role_has_daily_utc_time_task(self):
         config = Path(__file__).resolve().parents[1] / "config"
         roles = load_roles(config / "roles.json", load_agents(config / "agents.json"))

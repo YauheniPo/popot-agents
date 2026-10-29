@@ -14,7 +14,7 @@ class AxServerTests(unittest.TestCase):
             'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
             'AX_LOCAL_BASE_URL': 'http://proxy.test/v1',
             'AX_LOCAL_SESSION_BACKEND': 'file',
-            'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_API_KEY': 'test-gateway-key',
+            'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_OPS_MODEL': 'ax-ops-free', 'OMNIROUTE_API_KEY': 'test-gateway-key',
         }
         role = {'agent': 'omniroute_code', 'instructions': '', 'tools': [], 'harness2': {'enabled': True}}
         for value in (None, '', '   '):
@@ -41,7 +41,7 @@ class AxServerTests(unittest.TestCase):
             'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
             'AX_LOCAL_BASE_URL': 'http://proxy.test/v1',
             'AX_LOCAL_SESSION_BACKEND': 'file',
-            'OMNIROUTE_MODEL': 'ax-free', 'OMNIROUTE_CODE_MODEL': 'ax-code-free',
+            'OMNIROUTE_MODEL': 'ax-free', 'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_OPS_MODEL': 'ax-ops-free',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
             'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
         }
@@ -57,11 +57,13 @@ class AxServerTests(unittest.TestCase):
             manifests = {name: runner.task_manifest('0123456789abcdef', role)
                          for name, role in roles.items()}
             env = {item['name']: item['value'] for item in manifests['reviewer']['spec']['env']}
+            env.update(json.loads(env['AX_CAPABILITIES_JSON']))
             self.assertEqual(env['HARNESS2_IMPROVER_MODEL'], 'ax-harness-free')
             self.assertEqual(server.provider_routes[env['HARNESS2_PROXY_TOKEN']].model, 'ax-harness-free')
             self.assertNotEqual(env['HARNESS2_PROXY_TOKEN'], env['AX_PROXY_TOKEN'])
             self.assertNotIn('private-gateway-key', json.dumps(manifests))
-            ordinary = {item['name'] for item in manifests['backend']['spec']['env']}
+            ordinary = {item['name']: item['value'] for item in manifests['backend']['spec']['env']}
+            ordinary.update(json.loads(ordinary.get('AX_CAPABILITIES_JSON', '{}')))
             self.assertNotIn('HARNESS2_PROXY_TOKEN', ordinary)
         finally:
             runner.shutdown_worker_queue()
@@ -74,7 +76,7 @@ class AxServerTests(unittest.TestCase):
             'OPENROUTER_MODEL': 'role-cloud-model',
             'OPENROUTER_API_KEY': 'private-cloud-key',
             'OMNIROUTE_MODEL': 'ax-free',
-            'OMNIROUTE_CODE_MODEL': 'ax-code-free',
+            'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_OPS_MODEL': 'ax-ops-free',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
             'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
             # Stale overrides must not replace the role's profile.
@@ -87,7 +89,7 @@ class AxServerTests(unittest.TestCase):
         roles = create.call_args.kwargs['roles']
         self.assertEqual(roles['analyst']['agent'], 'omniroute')
         runners = create.call_args.args[0]
-        self.assertEqual(set(runners), {'omniroute', 'omniroute_code'})
+        self.assertEqual(set(runners), {'omniroute', 'omniroute_code', 'omniroute_ops'})
         for name in ('chat', 'planner', 'tech_lead', 'qa_engineer', 'cron_demo'):
             self.assertEqual(roles[name]['agent'], 'omniroute')
         self.assertEqual(runners['omniroute'].model, 'ax-free')
@@ -133,7 +135,7 @@ class AxServerTests(unittest.TestCase):
             "OPENROUTER_MODEL": "selected-model",
             "OPENROUTER_API_KEY": "test-key",
             "OMNIROUTE_MODEL": "ax-free",
-            "OMNIROUTE_CODE_MODEL": "ax-code-free",
+            "OMNIROUTE_CODE_MODEL": "ax-code-free", "OMNIROUTE_OPS_MODEL": "ax-ops-free",
             "OMNIROUTE_API_KEY": "gateway-key",
             "HARNESS2_IMPROVER_MODEL": "ax-harness-free",
             "AX_LOCAL_BASE_URL": "http://172.18.0.5:8004/v1",
@@ -144,7 +146,7 @@ class AxServerTests(unittest.TestCase):
         roles = create.call_args.kwargs["roles"]
         self.assertEqual(roles["backend_engineer"]["agent"], "omniroute_code")
         self.assertIn("bash", roles["backend_engineer"]["tools"])
-        self.assertEqual(set(create.call_args.args[0]), {"omniroute", "omniroute_code"})
+        self.assertEqual(set(create.call_args.args[0]), {"omniroute", "omniroute_code", "omniroute_ops"})
         self.assertNotIn("allowed_roles", server.delegation.policy)
         self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer"])
         env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
@@ -161,7 +163,7 @@ class AxServerTests(unittest.TestCase):
             "OPENROUTER_MODEL": "selected-model",
             "OPENROUTER_API_KEY": "test-key",
             "OMNIROUTE_MODEL": "ax-free",
-            "OMNIROUTE_CODE_MODEL": "ax-code-free",
+            "OMNIROUTE_CODE_MODEL": "ax-code-free", "OMNIROUTE_OPS_MODEL": "ax-ops-free",
             "OMNIROUTE_API_KEY": "gateway-key",
             "HARNESS2_IMPROVER_MODEL": "ax-harness-free",
             "AX_LOCAL_BASE_URL": "http://172.18.0.5:8004/v1",

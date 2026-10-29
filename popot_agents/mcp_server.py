@@ -71,7 +71,8 @@ def _describe_chat_tool_schema(schema: dict, names: tuple[str, ...]) -> None:
     ]
     properties = schema.setdefault("properties", {})
     descriptions = {
-        "role": "Configured role for a new session. Use 'chat' for general questions. "
+        "role": "Configured role for a new session. Use 'chat' for general questions; "
+                "'project_operator' for local services, Holmes, model routing, metrics and memory. "
                 "Ask the user if the intended role is unclear.",
         "agent": "Configured agent profile for a new session; use this instead of role "
                  "only when the user specifies an agent profile.",

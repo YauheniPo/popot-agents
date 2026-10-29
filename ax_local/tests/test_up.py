@@ -41,6 +41,16 @@ class ComposeProvisioningTests(unittest.TestCase):
                          'service_healthy')
         self.assertTrue(all(mount['read_only'] for mount in services['omniroute-init']['volumes']))
         self.assertNotIn('env_file', services['omniroute-init'])
+        self.assertEqual(services['omniroute']['depends_on']['omniroute-tls-init']['condition'],
+                         'service_completed_successfully')
+        self.assertEqual(services['omniroute-init']['environment']['OMNIROUTE_URL'], 'https://omniroute:20128')
+        self.assertEqual(services['omniroute']['environment']['OMNIROUTE_TLS_KEY'], '/run/popot-tls/key.pem')
+        for name in ('api', 'omniroute-init'):
+            trust = next(mount for mount in services[name]['volumes'] if mount['target'] == '/run/popot-tls')
+            self.assertTrue(trust['read_only'])
+            self.assertEqual(trust['volume']['subpath'], 'trust')
+            self.assertEqual(services[name]['environment']['SSL_CERT_FILE'], '/run/popot-tls/ca-bundle.pem')
+        self.assertEqual(services['omniroute']['ports'][0]['host_ip'], '127.0.0.1')
 
 
 class UpScriptTests(unittest.TestCase):
@@ -159,6 +169,18 @@ class UpScriptTests(unittest.TestCase):
         result = self.run_up()
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
+
+    def test_operator_prepares_holmes_without_starting_an_investigation(self):
+        (self.root / 'config/roles.json').write_text(json.dumps({'project_operator':{'agent':'omniroute'}}))
+        (self.ax / 'omniroute_tls.py').write_text(
+            "import os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==['export']\n"
+            "with Path(os.environ['CALLS']).open('a') as f:f.write('tls-export\\n')\n")
+        (self.ax / 'cluster/holmes.py').write_text(
+            "import os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==['--prepare']\n"
+            "with Path(os.environ['CALLS']).open('a') as f:f.write('holmes-prepare\\n')\n")
+        result=self.run_up()
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines()[-2:],['tls-export','holmes-prepare'])
 
     def test_omniroute_roles_select_provisioning_dependency(self):
         result = self.run_up()
