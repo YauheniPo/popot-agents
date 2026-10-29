@@ -1,5 +1,5 @@
 {
-  "api_base": "http://host.docker.internal:20128/v1",
+  "api_base": "https://host.docker.internal:20128/v1",
   "max_steps": 12,
   "max_output_tokens": 4096,
   "llm_args": {

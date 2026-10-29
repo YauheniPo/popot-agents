@@ -143,8 +143,10 @@ class AxAgentRunner:
             raise AgentConfigurationError(str(exc)) from exc
         # Substrate permits at most 32 env entries. Restore internal capabilities
         # in the entrypoint, keeping role/tool credentials under their own names.
-        capabilities = {key: env.pop(key) for key in list(env)
+        capabilities = {key: value for key, value in env.items()
                         if key.startswith(('AX_DELEGATION_', 'AX_HARNESS2_', 'HARNESS2_'))}
+        for key in capabilities:
+            del env[key]
         if capabilities:
             env['AX_CAPABILITIES_JSON'] = json.dumps(capabilities)
         return {

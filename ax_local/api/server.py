@@ -46,6 +46,19 @@ def configure_harness2(roles, profiles, runners, routes):
         }
 
 
+def configure_delegation(server, roles, policy, runners):
+    server.delegation = None
+    if policy["enabled"]:
+        host = urlsplit(os.environ["AX_LOCAL_BASE_URL"]).hostname
+        server.delegation = DelegationService(
+            roles, policy, runners, server.store, f"http://{host}:{policy['port']}")
+        if 'project_operator' in roles:
+            from .project_operator import ProjectOperations
+            server.delegation.operations = ProjectOperations(roles, server.store)
+        for runner in runners.values():
+            runner.delegation = server.delegation
+
+
 def make_server():
     image = os.environ["AX_LOCAL_WORKER_IMAGE"]
     profiles = json.loads((ROOT / "config" / "agents.json").read_text(encoding="utf-8"))
@@ -100,16 +113,7 @@ def make_server():
         roles=roles, store=store,
     )
     server.provider_routes = routes
-    server.delegation = None
-    if policy["enabled"]:
-        host = urlsplit(os.environ["AX_LOCAL_BASE_URL"]).hostname
-        server.delegation = DelegationService(
-            roles, policy, runners, server.store, f"http://{host}:{policy['port']}")
-        if 'project_operator' in roles:
-            from .project_operator import ProjectOperations
-            server.delegation.operations = ProjectOperations(roles, server.store)
-        for runner in runners.values():
-            runner.delegation = server.delegation
+    configure_delegation(server, roles, policy, runners)
     server.cron = CronScheduler(roles, runners, server.store)
     return server
 

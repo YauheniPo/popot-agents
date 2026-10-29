@@ -26,6 +26,23 @@ def validate_prompt(prompt):
     return prompt
 
 
+def save_refinement(state, fingerprint, candidate, model, mode):
+    prompt = validate_prompt(candidate['prompt'])
+    experience = candidate.get('experience', {})
+    if not isinstance(experience, dict) or len(json.dumps(experience)) > 4000:
+        raise ValueError('Invalid Harness2 experience')
+    report = candidate.get('report', {})
+    if not isinstance(report, dict) or len(json.dumps(report)) > 60000:
+        raise ValueError('Invalid Harness2 execution report')
+    state.mkdir(parents=True, exist_ok=True)
+    temporary = state / 'state.tmp'
+    temporary.write_text(json.dumps({'fingerprint': fingerprint, 'experience': experience,
+        'selected': bool(prompt), 'model': model, 'mode': mode,
+        'last_run': report}, ensure_ascii=False), encoding='utf-8')
+    temporary.replace(state / STATE_FILE)
+    return prompt, report
+
+
 def refine_role(messages, role, *, deadline, tool_names):
     """Failure preserves the role; real probes run in separate AX actors."""
     settings = role.get('harness2', {})
@@ -80,19 +97,7 @@ def refine_role(messages, role, *, deadline, tool_names):
             result = subprocess.run([sys.executable, '-m', __name__], input=json.dumps(payload),
                 text=True, capture_output=True, check=True, timeout=budget, env=child_env)
             candidate = json.loads(result.stdout)
-        prompt = validate_prompt(candidate['prompt'])
-        experience = candidate.get('experience', {})
-        if not isinstance(experience, dict) or len(json.dumps(experience)) > 4000:
-            raise ValueError('Invalid Harness2 experience')
-        report = candidate.get('report', {})
-        if not isinstance(report, dict) or len(json.dumps(report)) > 60000:
-            raise ValueError('Invalid Harness2 execution report')
-        state.mkdir(parents=True, exist_ok=True)
-        temporary = state / 'state.tmp'
-        temporary.write_text(json.dumps({'fingerprint': fingerprint, 'experience': experience,
-            'selected': bool(prompt), 'model': model, 'mode': mode,
-            'last_run': report}, ensure_ascii=False), encoding='utf-8')
-        temporary.replace(state / STATE_FILE)
+        prompt, report = save_refinement(state, fingerprint, candidate, model, mode)
         trace_event('harness2_completed', role=name, applied=bool(prompt),
                     mode=mode, probes=len(report.get('probes', [])), requests=candidate.get('requests'),
                     elapsed_seconds=round(time.monotonic() - started, 2))
@@ -148,6 +153,26 @@ class PlanningClient:
         return choice['message']
 
 
+def execute_probe(payload, root, chat, probes, prompt, run_id):
+    from ax_local.worker.delegation import run_probe
+    probe_timeout = min(180, (chat.deadline - time.monotonic()) / max(2, 5 - len(probes)))
+    if probe_timeout <= 0:
+        raise TimeoutError('Harness2 probe deadline exceeded')
+    outcome = run_probe(json.dumps(payload['messages'], ensure_ascii=False), prompt,
+        environ=payload['probe'], timeout_seconds=probe_timeout,
+        call_id=str(root) + ':' + run_id)
+    if outcome.get('isError') or not outcome.get('answer'):
+        raise RuntimeError('Isolated AX probe failed; inspect its child session')
+    probes.append({'label': run_id, 'sessionId': outcome['sessionId'],
+                   'answer': outcome['answer'][:4000]})
+    directory = root / 'executions' / run_id
+    directory.mkdir(parents=True)
+    (directory / ANSWER_FILE).write_text(outcome['answer'], encoding='utf-8')
+    (directory / 'trajectory.md').write_text(json.dumps(
+        outcome.get('activity', []), ensure_ascii=False), encoding='utf-8')
+    return directory
+
+
 def planning_adapter(payload, chat, surface, channel, probes):
     from types import SimpleNamespace
     from harness2.core.spec import BenchPrompts, BenchSpec
@@ -189,23 +214,7 @@ def planning_adapter(payload, chat, surface, channel, probes):
         def execute(self, task_id, harness_dir, run_id, *, timeout=None):
             prompt = ((harness_dir or self.base_harness()) / PROMPT_FILE).read_text()
             if execution:
-                from ax_local.worker.delegation import run_probe
-                probe_timeout = min(180, (chat.deadline - time.monotonic()) / max(2, 5 - len(probes)))
-                if probe_timeout <= 0:
-                    raise TimeoutError('Harness2 probe deadline exceeded')
-                outcome = run_probe(json.dumps(payload['messages'], ensure_ascii=False), prompt,
-                    environ=payload['probe'], timeout_seconds=probe_timeout,
-                    call_id=str(root) + ':' + run_id)
-                if outcome.get('isError') or not outcome.get('answer'):
-                    raise RuntimeError('Isolated AX probe failed; inspect its child session')
-                probes.append({'label': run_id, 'sessionId': outcome['sessionId'],
-                               'answer': outcome['answer'][:4000]})
-                directory = root / 'executions' / run_id
-                directory.mkdir(parents=True)
-                (directory / ANSWER_FILE).write_text(outcome['answer'], encoding='utf-8')
-                (directory / 'trajectory.md').write_text(json.dumps(
-                    outcome.get('activity', []), ensure_ascii=False), encoding='utf-8')
-                return directory
+                return execute_probe(payload, root, chat, probes, prompt, run_id)
             messages = [{'role': 'system', 'content': payload['instructions'] + '\n' + plan_policy +
                          '\nTask-specific planning guidance:\n' + prompt}, *payload['messages']]
             for attempt in range(2):

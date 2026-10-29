@@ -227,7 +227,7 @@ def provision(api, config, combos, environ):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--url', default=os.environ.get('OMNIROUTE_URL', 'http://127.0.0.1:20128'))
+    parser.add_argument('--url', default=os.environ.get('OMNIROUTE_URL', 'https://127.0.0.1:20128'))
     parser.add_argument('--config', type=Path, default=ROOT / 'config/omniroute-settings.json')
     parser.add_argument('--combos', type=Path, default=ROOT / 'config/omniroute-combos.json')
     args = parser.parse_args()

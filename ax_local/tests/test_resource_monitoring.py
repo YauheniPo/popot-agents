@@ -40,7 +40,7 @@ class ResourceMonitoringTests(unittest.TestCase):
 
     def test_custom_scrape_interval_is_applied_without_changing_other_jobs(self):
         original='scrape_configs:\n  - job_name: existing\n    scrape_interval: 5s\n'
-        updated=extend_prometheus_config(original,scrape_interval='30s')
+        updated=extend_prometheus_config(original,'local-control-plane','node.internal',scrape_interval='30s')
         self.assertTrue(updated.startswith(original))
         self.assertIn('job_name: popot-cadvisor\n    scrape_interval: 30s',updated)
 
@@ -85,11 +85,11 @@ class ResourceMonitoringTests(unittest.TestCase):
 
     def test_prometheus_extension_preserves_existing_jobs_and_is_idempotent(self):
         original = 'global:\n  scrape_interval: 15s\nscrape_configs:\n  - job_name: existing\n'
-        updated = extend_prometheus_config(original)
+        updated = extend_prometheus_config(original, 'local-control-plane', 'node.internal')
         self.assertTrue(updated.startswith(original))
         self.assertIn('metrics/cadvisor', updated)
         self.assertIn('kube-state-metrics', updated)
-        self.assertEqual(updated, extend_prometheus_config(updated))
+        self.assertEqual(updated, extend_prometheus_config(updated, 'local-control-plane', 'node.internal'))
 
     def test_context_guard_rejects_remote_clusters(self):
         self.assertEqual(local_context({'context': 'kind-popot-ax'}), 'kind-popot-ax')

@@ -6,6 +6,7 @@ Usage: python3 -m ax_local.cluster.holmes "Why are AX workers restarting?"
 import argparse
 import json
 import os
+import ssl
 from pathlib import Path
 import re
 import shlex
@@ -20,6 +21,13 @@ ROOT = Path(__file__).resolve().parents[2]
 NAMESPACE = 'ax-diagnostics'
 IMAGE = 'robustadev/holmes:' + BUILD_VERSIONS['HOLMES_VERSION']
 HOME_PATH = '/home/holmes'
+
+
+def omniroute_ca_bundle():
+    path = Path(os.getenv('OMNIROUTE_CA_FILE', str(ROOT / 'ax_local/.local/omniroute-ca.pem')))
+    roots = ssl.get_default_verify_paths().cafile
+    public = Path(roots).read_text() if roots and Path(roots) != path else ''
+    return public + '\n' + path.read_text()
 
 
 def scope(config):
@@ -96,7 +104,8 @@ def manifests(config):
                     'metadata': {'name': 'holmes-ax', 'namespace': NAMESPACE},
                     'data': {'tools.json': json.dumps(toolsets), 'kubeconfig.json': json.dumps(kubeconfig),
                              'runner.py': (ROOT / 'ax_local/holmes/runner.py').read_text(),
-                             'settings.json': (ROOT / 'config/holmes.json').read_text()}})
+                             'settings.json': (ROOT / 'config/holmes.json').read_text(),
+                             'ca-bundle.pem': omniroute_ca_bundle()}})
     return objects
 
 
@@ -120,6 +129,8 @@ def investigation_job(question, model):
                                      'name': 'holmes-omniroute', 'key': 'api-key'}}},
                                  {'name': 'HOME', 'value': HOME_PATH},
                                  {'name': 'TMPDIR', 'value': HOME_PATH},
+                                 {'name': 'SSL_CERT_FILE', 'value': '/etc/popot-holmes/ca-bundle.pem'},
+                                 {'name': 'REQUESTS_CA_BUNDLE', 'value': '/etc/popot-holmes/ca-bundle.pem'},
                                  {'name': 'PYTHONDONTWRITEBYTECODE', 'value': '1'},
                                  {'name': 'PYTHONUNBUFFERED', 'value': '1'},
                                  {'name': 'PYTHONPATH', 'value': '/app'},

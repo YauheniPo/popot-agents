@@ -16,6 +16,11 @@ TEST_MODEL = 'selected-free-combo'
 
 
 class HolmesTests(unittest.TestCase):
+    def setUp(self):
+        bundle = patch('ax_local.cluster.holmes.omniroute_ca_bundle', return_value='public-ca-bundle')
+        bundle.start()
+        self.addCleanup(bundle.stop)
+
     def test_job_and_runner_config_follow_service_settings(self):
         root=Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as directory:
@@ -34,6 +39,7 @@ class HolmesTests(unittest.TestCase):
         self.assertEqual(job['spec']['ttlSecondsAfterFinished'],3600)
         self.assertEqual(job['spec']['template']['spec']['containers'][0]['resources']['limits']['memory'],'1Gi')
         self.assertEqual(json.loads(data['settings.json'])['max_steps'],5)
+        self.assertEqual(data['ca-bundle.pem'], 'public-ca-bundle')
 
     def test_model_is_required_before_any_cluster_or_image_actions(self):
         for value in (None, '', '   '):
@@ -90,6 +96,8 @@ class HolmesTests(unittest.TestCase):
         env = {item['name']: item['value'] for item in container['env'] if 'value' in item}
         self.assertEqual(env['HOME'], '/home/holmes')
         self.assertEqual(env['TMPDIR'], env['HOME'])
+        self.assertEqual(env['SSL_CERT_FILE'], '/etc/popot-holmes/ca-bundle.pem')
+        self.assertEqual(env['REQUESTS_CA_BUNDLE'], env['SSL_CERT_FILE'])
         mounts = {item['mountPath']: item['name'] for item in container['volumeMounts']}
         self.assertNotIn('/tmp', mounts)
         volume = next(item for item in pod['volumes'] if item['name'] == mounts[env['HOME']])
