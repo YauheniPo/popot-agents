@@ -49,6 +49,46 @@ class FakeRunner:
         return self.chats[-1][2]
 
 
+class RoleDirectoryTests(unittest.TestCase):
+    def test_role_names_come_from_filenames_and_allow_cross_file_delegation(self):
+        configs = {
+            'reviewer': {'agent': 'nous', 'instructions': 'Review code', 'tools': []},
+            'chat': {'agent': 'nous', 'instructions': 'Delegate reviews', 'tools': [],
+                     'allowed_roles': ['reviewer']},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            for name, config in configs.items():
+                (path / f'{name}.json').write_text(json.dumps(config))
+            (path / 'README.md').write_text('Role settings')
+            loaded = load_roles(path, {'nous': FakeRunner()})
+            self.assertEqual(list(loaded), ['chat', 'reviewer'])
+            for name, config in configs.items():
+                self.assertEqual(loaded[name], {**config, 'name': name})
+                self.assertEqual(json.loads((path / f'{name}.json').read_text()), config)
+
+    def test_directory_rejects_invalid_filenames_and_role_settings(self):
+        valid = {'agent': 'nous', 'instructions': 'Review code', 'tools': []}
+        for filename, config, error in (
+                ('Bad-role.json', valid, 'invalid role name'),
+                ('reviewer.json', [], 'must define'),
+                ('reviewer.json', {'reviewer': valid}, 'must define'),
+                ('reviewer.json', {**valid, 'agent': 'missing'}, 'unknown agent'),
+                ('reviewer.json', {**valid, 'allowed_roles': ['missing']}, 'allowed_roles')):
+            with self.subTest(filename=filename, config=config), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                (path / filename).write_text(json.dumps(config))
+                with self.assertRaisesRegex(ValueError, error):
+                    load_roles(path, {'nous': FakeRunner()})
+
+    def test_directory_reports_malformed_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'chat.json').write_text('{')
+            with self.assertRaises(json.JSONDecodeError):
+                load_roles(path, {'nous': FakeRunner()})
+
+
 class RoleApiTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -80,7 +120,7 @@ class RoleApiTests(unittest.TestCase):
         conn.close()
         return result
 
-    def test_role_name_is_derived_from_its_block_key(self):
+    def test_legacy_role_file_derives_names_from_block_keys(self):
         path = Path(self.directory.name) / 'roles.json'
         config = {'agent': 'nous', 'instructions': 'Review code', 'tools': []}
         path.write_text(json.dumps({'reviewer': config}))
@@ -89,7 +129,8 @@ class RoleApiTests(unittest.TestCase):
         self.assertNotIn('name', json.loads(path.read_text())['reviewer'])
 
     def test_review_budget_fits_ax_and_leaves_room_for_final_answer(self):
-        roles = json.loads((Path(__file__).resolve().parents[1] / 'config/roles.json').read_text())
+        config = Path(__file__).resolve().parents[1] / 'config'
+        roles = load_roles(config / 'roles', load_agents(config / 'agents.json'))
         from popot_agents.runtime_config import RUNTIME
         self.assertNotIn('timeout_seconds', roles['code_reviewer'])
         self.assertGreaterEqual(RUNTIME['timeouts']['turn_seconds'], 900)
@@ -221,7 +262,7 @@ class FeatureTeamConfigTests(unittest.TestCase):
 
     def test_feature_team_roles_are_selectable_with_clear_responsibilities(self):
         config = Path(__file__).resolve().parents[1] / "config"
-        roles = load_roles(config / "roles.json", load_agents(config / "agents.json"))
+        roles = load_roles(config / "roles", load_agents(config / "agents.json"))
         expected = {
             "tech_lead", "backend_engineer", "frontend_engineer", "qa_engineer",
         }
@@ -237,7 +278,7 @@ class FeatureTeamConfigTests(unittest.TestCase):
 
     def test_frontend_and_qa_can_execute_checks_with_readonly_github_access(self):
         config = Path(__file__).resolve().parents[1] / 'config'
-        roles = load_roles(config / 'roles.json', load_agents(config / 'agents.json'))
+        roles = load_roles(config / 'roles', load_agents(config / 'agents.json'))
         for name in ('frontend_engineer', 'qa_engineer'):
             role = roles[name]
             self.assertLessEqual({'bash', 'read_file', 'write_file', 'git_clone'}, set(role['tools']))
@@ -252,7 +293,7 @@ class FeatureTeamConfigTests(unittest.TestCase):
 
     def test_demo_cron_role_has_daily_utc_time_task(self):
         config = Path(__file__).resolve().parents[1] / "config"
-        roles = load_roles(config / "roles.json", load_agents(config / "agents.json"))
+        roles = load_roles(config / "roles", load_agents(config / "agents.json"))
         demo = roles["cron_demo"]
         self.assertEqual(demo["agent"], "omniroute")
         self.assertEqual(demo["tools"], ["utc_time"])

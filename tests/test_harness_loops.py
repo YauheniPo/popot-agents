@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from popot_agents import tools
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.progress import observe_progress
 from popot_agents.worker.agent_worker import run_harness
 from popot_agents.worker.http_harness import run_http
 
@@ -18,6 +19,25 @@ def tool_call(identifier, name, arguments):
 
 
 class HttpRecoveryLoopTests(unittest.TestCase):
+    def test_reviewer_returns_partial_status_on_its_last_round_without_more_tools(self):
+        requests = []
+        def respond(call, **kwargs):
+            body = json.loads(call.data)
+            requests.append(body)
+            message = ({'content': 'Review remains pending; nothing was published.'}
+                       if body.get('tool_choice') == 'none' else
+                       {'tool_calls': [tool_call('calc', 'calculate', {'expression': '1+1'})]})
+            return io.BytesIO(json.dumps({'choices': [{'message': message}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('Review PR', {'_ax_role': 'code_reviewer', 'tools': ['calculate'], 'max_tool_rounds': 2})
+        self.assertIn('Partial result', answer)
+        self.assertIn('Review remains pending', answer)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[-1]['tool_choice'], 'none')
+        self.assertNotIn('tools', requests[-1])
+
     def test_operator_reserves_its_last_round_for_an_explicit_no_tools_answer(self):
         requests=[]
         def respond(call,**kwargs):
@@ -73,6 +93,24 @@ class HttpRecoveryLoopTests(unittest.TestCase):
                 self.assertEqual(results[1]['tool_call_id'], 'bad')
                 self.assertTrue(json.loads(results[1]['content'])['isError'])
                 self.assertEqual(self.requests[2]['messages'][-1]['content'], '2')
+
+    def test_unknown_tool_is_recoverable_without_executing_it_or_losing_other_results(self):
+        events = []
+        with observe_progress(events.append):
+            answer = self.run_messages([
+                {'tool_calls': [tool_call('bad', 'mcp__github__pull_request_review_read', {}),
+                                tool_call('ok', 'calculate', {'expression': '2+1'})]},
+                {'content': 'Unavailable tool; valid result is 3.'}], ['calculate'])
+        self.assertEqual(answer, 'Unavailable tool; valid result is 3.')
+        results = self.requests[1]['messages'][-2:]
+        self.assertEqual(results[0]['tool_call_id'], 'bad')
+        error = json.loads(results[0]['content'])
+        self.assertTrue(error['isError'])
+        self.assertIn('calculate', error['error'])
+        self.assertEqual(results[1]['content'], '3')
+        event = next(json.loads(item) for item in events if json.loads(item)['event'] == 'tool_error')
+        self.assertTrue(event['recoverable'])
+        self.assertIn('not allowed', event['error'])
 
     def test_failed_file_operation_can_be_repaired_by_next_step(self):
         failure = subprocess.CompletedProcess([], 2, '', 'file not found')

@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 from contextlib import nullcontext
 
-from popot_agents.orchestrator.main import load_roles
+from popot_agents.orchestrator.main import load_agents, load_roles
 from popot_agents.worker.http_harness import run_http
 
 
@@ -43,9 +43,10 @@ class Harness2RoleTests(unittest.TestCase):
                 load_roles(path, {'test': profile})
 
     def test_only_selected_roles_are_enabled_in_project(self):
-        roles = json.loads((Path(__file__).resolve().parents[1] / 'config/roles.json').read_text())
+        config = Path(__file__).resolve().parents[1] / 'config'
+        roles = load_roles(config / 'roles', load_agents(config / 'agents.json'))
         enabled = [name for name, config in roles.items() if config.get('harness2', {}).get('enabled')]
-        self.assertEqual(enabled, ['analyst', 'backend_engineer', 'frontend_engineer', 'code_reviewer', 'qa_engineer'])
+        self.assertEqual(enabled, ['analyst', 'backend_engineer', 'code_reviewer', 'frontend_engineer', 'qa_engineer'])
         self.assertTrue(all(roles[name]['harness2']['mode'] == 'execution' for name in enabled))
 
     def test_worker_applies_addendum_once_and_preserves_original_configuration(self):

@@ -1,6 +1,10 @@
 {
   "settings": {
     "cloudEnabled": false,
+    "credentialRedactionEnabled": true,
+    "debugMode": false,
+    "memoryEnabled": false,
+    "skillsEnabled": false,
     "autoRefreshProviderQuota": true,
     "autoRefreshProviderQuotaInterval": 180,
     "mcpEnabled": false,
@@ -30,14 +34,14 @@
     },
     "waitForCooldown": {
       "enabled": true,
-      "maxRetries": 3,
-      "maxRetryWaitSec": 30
+      "maxRetries": 1,
+      "maxRetryWaitSec": 15
     },
     "comboCooldownWait": {
       "enabled": true,
-      "maxWaitMs": 90000,
-      "maxAttempts": 5,
-      "budgetMs": 300000
+      "maxWaitMs": 15000,
+      "maxAttempts": 2,
+      "budgetMs": 30000
     },
     "providerCooldown": {
       "enabled": false
@@ -63,6 +67,7 @@
       "compressionEnabled": false,
       "cacheDefaultMode": "bypass",
       "allowAutoCombos": false,
+      "chaosModeEnabled": false,
       "scopes": ["self:usage"]
     }
   }

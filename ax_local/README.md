@@ -32,7 +32,7 @@ API на порту 8002 доступен только контейнерам Co
 Роль использует профиль `omniroute_ops` и `OMNIROUTE_OPS_MODEL=ax-ops-free`
 из `.env`: Super VL первой, затем существующие бесплатные маршруты. Holmes
 также настроен на `HOLMES_MODEL=ax-ops-free`; состав комбо находится в
-`config/omniroute-combos.json`. Маршруты остальных ролей не меняются. Для неё Harness²
+`config/omniroute/combos.json`. Маршруты остальных ролей не меняются. Для неё Harness²
 выключен: расследования и предложения изменений не нужно выполнять повторно.
 `chat`, `planner` и `tech_lead` могут передавать ей аналитические подзадачи.
 Делегированные запросы не могут подтверждать изменения.
@@ -81,7 +81,7 @@ shell или ключей провайдеров. Пароль Cognee перед
 Поддерживаемые изменения:
 
 - `configure_combo`: порядок/состав `priority`-комбо из уже одобренных моделей
-  в `config/omniroute-combos.json`. Новые провайдеры, ключи и неизвестные модели
+  в `config/omniroute/combos.json`. Новые провайдеры, ключи и неизвестные модели
   не добавляются. Изменение применяется к OmniRoute и сохраняется в этом файле.
 - `set_resources`: CPU/память requests и limits для `grafana`, `prometheus`,
   `kube-state-metrics`, `opentelemetry-collector` в `otel-system`. Значения
@@ -162,7 +162,7 @@ GitHub отключены. Ключ GitHub доступен MCP-клиенту �
 сравнивает варианты и формирует reflection. Переменная обязательна, когда
 Harness² включён хотя бы у одной роли; резервной модели в коде нет.
 `HARNESS2_IMPROVER_MODEL=ax-harness-free` и состав комбо задаются в `.env` и
-`config/omniroute-combos.json`. Новые ключи провайдеров для этого режима не нужны.
+`config/omniroute/combos.json`. Новые ключи провайдеров для этого режима не нужны.
 API выдаёт отдельные ограниченные токены для модели оптимизатора и запуска проб;
 пробные workers эти возможности не получают.
 В Task эти внутренние параметры упакованы в `AX_CAPABILITIES_JSON`, чтобы
@@ -451,7 +451,7 @@ AX_TEST_LIVE_QUEUE=1 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest ax_local.test
 `COGNEE_PASSWORD` from the root `.env`. Agent memory is visible under **Brains**
 after indexing. Details: [memory/README.md](../memory/README.md).
 
-Поле `skills` в `config/roles.json` задаёт навыки роли, например
+Поле `skills` в `config/roles/` задаёт навыки роли, например
 `["engineering/codebase-design", "engineering/tdd"]`. API проверяет пути,
 а AX worker загружает выбранные Markdown-файлы в инструкции harness до
 начала обслуживания сессии. Подробности и каталог: [skills/README.md](../skills/README.md).
@@ -500,7 +500,7 @@ Compose API/MCP. Уже запущенные контейнеры Compose при
 до отправки новых запросов. Это проверка при запуске, а не постоянный монитор:
 после следующего перезапуска кластера нужно снова выполнить `up.sh`.
 
-Роль выбирает профиль через `agent` в `config/roles.json`. Профиль из
+Роль выбирает профиль через `agent` в `config/roles/`. Профиль из
 `config/agents.json` задаёт endpoint, имя переменной модели (`model_env`) и
 параметры модели. Значение модели берётся из `.env`: например,
 `backend_engineer → omniroute_code → OMNIROUTE_CODE_MODEL`,
@@ -522,7 +522,7 @@ AX v0.3.1 поддерживает только литералы в `Task.env`, 
 Дополнительные токены сначала разрешаются общим списком имён
 `"role_env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]` в `config/runtime.json`.
 Затем роль выбирает нужные имена через
-`"env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]` в `config/roles.json`.
+`"env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"]` в `config/roles/`.
 Значение `GITHUB_PERSONAL_ACCESS_TOKEN` должно быть задано в окружении AX API; в JSON роли
 его не пишут. Служебное окружение AX остаётся доступным, а shell/MCP-инструменты
 получают свой обычный минимальный набор переменных плюс явно выбранные и
@@ -539,7 +539,7 @@ AX v0.3.1 сохраняет переданные значения как лит
 отклоняются при загрузке. AX проверяет свои таймауты относительно общих бюджетов.
 При прямом запуске Python можно выбрать файлы через `POPOT_AX_CONFIG` и
 `POPOT_RUNTIME_CONFIG`; локальные скрипты читают `ax_local/config.json` из репозитория.
-Роли и инструменты остаются в `config/roles.json`, провайдеры — в `config/agents.json`.
+Роли и инструменты остаются в `config/roles/`, провайдеры — в `config/agents.json`.
 При запуске через Compose после правки конфига повторите команду запуска ниже. При смене AX context
 нужен отдельный локальный кластер; для другого atespace заранее нужен
 WorkerPool в соответствующем пространстве.
@@ -589,8 +589,8 @@ bundle через ConfigMap; проверки TLS у Python, Node и Holmes ос
 Точные model IDs: `nvidia/nemotron-3.5-lightning-30b-a3b` у NVIDIA,
 `nvidia/nemotron-3.5-lightning:free`, `nvidia/nemotron-3.5-super-vl:free` и
 `cohere/north-mini-code:free` у OpenRouter.
-Комбо и fallback-цепочки заданы в `config/omniroute-combos.json`, настройки,
-cooldown, circuit breaker и ссылки на секреты — в `config/omniroute-settings.json`.
+Комбо и fallback-цепочки заданы в `config/omniroute/combos.json`, настройки,
+cooldown, circuit breaker и ссылки на секреты — в `config/omniroute/settings.json`.
 При запуске AX сервис `omniroute-init` применяет оба файла через management API
 и проверяет результат перед стартом API/MCP. ID подключений подставляются из
 целевого окружения; локальные UUID в Git не сохраняются.
@@ -602,6 +602,15 @@ cooldown, circuit breaker и ссылки на секреты — в `config/omn
 один target с ожиданием до 90 секунд и общим бюджетом 105 секунд.
 У `ax-ops-free` четыре targets: ожидание одного до 60 секунд, общий бюджет
 105 секунд и не более четырёх попыток. Сжатие контекста отключено.
+Ожидание короткого cooldown ограничено 15 секундами: для соединения разрешён
+один повтор, для комбо — две попытки с общим бюджетом ожидания 30 секунд.
+Это оставляет время на вызов target в пределах общего бюджета комбо;
+HTTP harness ждёт ответ до 120 секунд. RPM и параллелизм очереди остаются
+настройками окружения и должны соответствовать квотам upstream.
+Маскирование credentials включено для запросов и ответов, включая аргументы
+и результаты инструментов. Оно заменяет распознанные секреты и не заменяет
+контроль доступа. Встроенные память, skills, debug и Chaos для ключа AX
+явно отключены: память и навыки задаются runtime и ролями.
 North Mini оставлен первым и для общих задач: в новой AX-сессии он вызвал
 `utc_time` и `calculate` и вернул их результаты. В прежней сессии Lightning
 пропустил эти инструменты и выдал выдуманные значения. После изменения маршрутов
@@ -663,7 +672,7 @@ Hosted-доступ NVIDIA здесь используется для локал
    [фильтрация OmniRoute работает fail-open](https://github.com/diegosouzapw/OmniRoute/blob/v3.8.51/docs/routing/AUTO-COMBO.md).
    При недоступности всех бесплатных targets задача может завершиться ошибкой.
 
-3. В `config/roles.json` роли вне разработки выбирают `"agent": "omniroute"`.
+3. В `config/roles/` роли вне разработки выбирают `"agent": "omniroute"`.
    `backend_engineer`, `frontend_engineer` и `code_reviewer` выбирают
    `"agent": "omniroute_code"`. Примените конфигурацию
    через `bash ax_local/up.sh` и начните новую сессию. Проверочный MCP-вызов:
@@ -775,7 +784,7 @@ GitHub-токена. Полный текущий spec и решения оста
 агента берутся из текущего выбора AX. Нужна модель с поддержкой вызовов инструментов.
 
 Доступные роли задаются полем `allowed_roles` внутри каждой роли в
-`config/roles.json`. Например, у `tech_lead`:
+`config/roles/`. Например, у `tech_lead`:
 
 ```json
 "allowed_roles": ["backend_engineer", "frontend_engineer", "qa_engineer", "code_reviewer"]
@@ -838,7 +847,7 @@ GitHub MCP авторизуется автоматически через `GITHU
 Например, для цепочки
 `chat → tech_lead → backend_engineer → qa_engineer` добавьте `tech_lead`
 в `chat.allowed_roles`. Проверка разрешений выполняется API по текущему
-`config/roles.json` и токену конкретного родительского воркера, независимо
+`config/roles/` и токену конкретного родительского воркера, независимо
 от аргументов модели или конфигурации ранее сохранённой сессии.
 
 Параметры запуска и ограничения `delegation` находятся в `ax_local/config.json`:
@@ -863,11 +872,11 @@ bash ax_local/up.sh
 
 ## Задачи по расписанию
 
-В `config/roles.json` у роли можно задать один или несколько запусков через
-`cron`. Например:
+В файле роли `config/roles/<role>.json` можно задать один или несколько запусков
+через `cron`. Например, в `config/roles/cron_demo.json`:
 
 ```json
-"cron_demo": {
+{
   "agent": "openrouter",
   "instructions": "You are a demo scheduled agent. Use utc_time to read the current UTC date and time, then report it briefly. Do not guess the time.",
   "tools": ["utc_time"],
@@ -875,7 +884,7 @@ bash ax_local/up.sh
 }
 ```
 
-Эта роль уже есть в `config/roles.json` и выполняется ежедневно в 09:00 UTC
+Эта роль уже есть в `config/roles/cron_demo.json` и выполняется ежедневно в 09:00 UTC
 после перезапуска AX API с обновлённым конфигом.
 
 AX API выполняет числовые пяти полевые cron-выражения по **UTC** (минута, час,
@@ -886,7 +895,7 @@ AX API выполняет числовые пяти полевые cron-выра
 не восполняются. Повторный старт API в ту же минуту не повторяет уже сохранённый
 запуск. Если предыдущий запуск того же расписания ещё работает или ждёт
 worker, текущая минута пропускается. При заполненном общем лимите 10 worker
-запуски разных расписаний ждут в очереди до часа. Изменения `config/roles.json`
+запуски разных расписаний ждут в очереди до часа. Изменения `config/roles/`
 применяются после перезапуска AX API. Cron расписания исполняет AX API.
 Пока делегированная или cron задача активна, `DELETE /chats/ID` возвращает
 HTTP 409. После завершения задачи сессию можно удалить обычным запросом.
@@ -956,7 +965,7 @@ bash compose.sh --env-file .env -f ax_local/compose.yaml logs --tail=500 api | g
 последний ответ родителя как непроверенный контекст и политику публикации.
 Файлы workspace и результаты инструментов родителя не копируются; передавайте
 нужные доказательства или доступную дочернему агенту ссылку на repository/ref/PR.
-У `frontend_engineer` и `qa_engineer` по текущему `config/roles.json` нет
+У `frontend_engineer` и `qa_engineer` по текущему `config/roles/` нет
 файловых и shell-инструментов: их ответы содержат предложения и сценарии,
 а выполнение проверок требует отдельно настроенных инструментов роли.
 

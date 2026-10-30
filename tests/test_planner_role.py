@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def configured_roles():
-    roles = load_roles(ROOT / 'config/roles.json', load_agents(ROOT / 'config/agents.json'))
+    roles = load_roles(ROOT / 'config/roles', load_agents(ROOT / 'config/agents.json'))
     return {name: {**config, '_ax_role': name} for name, config in roles.items()}
 
 

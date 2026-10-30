@@ -66,11 +66,13 @@ class LocalToolRecoveryTests(unittest.TestCase):
         self.command.assert_not_called()
         self.assertEqual(len(self.requests), 2)
 
-    def test_disallowed_tool_remains_fatal_and_never_executes(self):
-        with self.assertRaisesRegex(RuntimeError, 'not allowed'):
-            self.run_turn(['repo'], allowed=[])
+    def test_disallowed_tool_never_executes_and_model_receives_the_rejection(self):
+        self.assertEqual(self.run_turn(['repo'], allowed=[]), 'done')
         self.command.assert_not_called()
-        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.requests), 2)
+        result = json.loads(self.requests[-1]['messages'][-1]['content'])
+        self.assertTrue(result['isError'])
+        self.assertIn('not allowed: git_clone', result['error'])
 
     def test_execution_failure_is_not_retried(self):
         for failure in (RuntimeError('command timed out'), ValueError('invalid runtime config')):

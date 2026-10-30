@@ -2,16 +2,35 @@
 
 import copy
 import io
-from pathlib import Path
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
 from ax_local.omniroute import Api, ProvisionError, provision
+from popot_agents.runtime_config import RUNTIME
+
+
+class ManagedConfigTests(unittest.TestCase):
+    def test_cooldown_budget_leaves_time_for_model_fallback(self):
+        root = Path(__file__).resolve().parents[2]
+        config = json.loads((root / 'config/omniroute/settings.json').read_text())
+        combos = json.loads((root / 'config/omniroute/combos.json').read_text())
+        wait = config['resilience']['comboCooldownWait']
+        connection_wait = config['resilience']['waitForCooldown']
+        connection_wait_ms = connection_wait['maxRetries'] * connection_wait['maxRetryWaitSec'] * 1000
+        for name, combo in combos.items():
+            with self.subTest(combo=name):
+                budget = combo['config']
+                self.assertLess(budget['comboTimeoutMs'], RUNTIME['timeouts']['model_request_seconds'] * 1000)
+                if len(combo['models']) > 1:
+                    self.assertLessEqual(max(wait['budgetMs'], connection_wait_ms) + budget['targetTimeoutMs'],
+                                         budget['comboTimeoutMs'])
 
 
 class Gateway:

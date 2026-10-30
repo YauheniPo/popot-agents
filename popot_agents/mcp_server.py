@@ -10,7 +10,7 @@ import uuid
 from urllib import error, parse, request
 
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.progress import is_progress_message
+from popot_agents.progress import is_progress_message, redact_text
 
 MAX_LOG_BODY_BYTES = RUNTIME["logging"]["mcp_body_max_bytes"]
 SECRET_NAMES = {"authorization", "proxy-authorization", "cookie", "set-cookie",
@@ -150,6 +150,19 @@ class MCPHTTPLoggingMiddleware:
             raise
 
 
+class OrchestratorError(RuntimeError):
+    """An expected upstream failure that can be reported as an MCP tool error."""
+
+
+async def _tool_call(action):
+    try:
+        return await action
+    except (OrchestratorError, TimeoutError) as exc:
+        from mcp.server.mcpserver.exceptions import ToolError
+        detail = str(exc) if isinstance(exc, OrchestratorError) else 'orchestrator is unavailable or timed out'
+        raise ToolError(redact_text(detail)) from None
+
+
 class OrchestratorClient:
     def __init__(self, base_url: str,
                  timeout_seconds: int = RUNTIME["timeouts"]["mcp_upstream_seconds"]) -> None:
@@ -170,13 +183,13 @@ class OrchestratorClient:
                 detail = json.load(exc).get("error", "request failed")
             except (ValueError, AttributeError):
                 detail = "request failed"
-            raise RuntimeError(f"orchestrator HTTP {exc.code}: {detail}") from exc
+            raise OrchestratorError(f"orchestrator HTTP {exc.code}: {detail}") from exc
         except (error.URLError, TimeoutError) as exc:
-            raise RuntimeError("orchestrator is unavailable or timed out") from exc
+            raise OrchestratorError("orchestrator is unavailable or timed out") from exc
         except ValueError as exc:
-            raise RuntimeError("orchestrator returned invalid JSON") from exc
+            raise OrchestratorError("orchestrator returned invalid JSON") from exc
         if not isinstance(result, dict):
-            raise RuntimeError("orchestrator returned an invalid response")
+            raise OrchestratorError("orchestrator returned an invalid response")
         return result
 
     def run_task(self, task: str, role: str | None = None,
@@ -239,7 +252,7 @@ async def stream_call(client, path, payload, context):
                     if not isinstance(result, dict):
                         raise ValueError('invalid response')
                     if response.status_code >= 400:
-                        raise RuntimeError(f'orchestrator HTTP {response.status_code}: {result.get("error", "request failed")}')
+                        raise OrchestratorError(f'orchestrator HTTP {response.status_code}: {result.get("error", "request failed")}')
                     return result
                 pending = b''
                 async for chunk in response.aiter_bytes():
@@ -267,13 +280,13 @@ async def stream_call(client, path, payload, context):
                             if not isinstance(result, dict) or not isinstance(status, int):
                                 raise ValueError('invalid result')
                             if status >= 400:
-                                raise RuntimeError(f'orchestrator HTTP {status}: {result.get("error", "request failed")}')
+                                raise OrchestratorError(f'orchestrator HTTP {status}: {result.get("error", "request failed")}')
                             return {**result, 'activity': list(activity)}
                 raise ValueError('stream ended without a result')
     except (httpx2.HTTPError, TimeoutError) as exc:
-        raise RuntimeError('orchestrator is unavailable or timed out') from exc
+        raise OrchestratorError('orchestrator is unavailable or timed out') from exc
     except (ValueError, UnicodeDecodeError) as exc:
-        raise RuntimeError('orchestrator returned invalid progress stream') from exc
+        raise OrchestratorError('orchestrator returned invalid progress stream') from exc
 
 
 async def _omit_null_progress_token(ctx, call_next):
@@ -324,7 +337,7 @@ def main() -> None:
             raise ValueError("sessionId and session_id must match")
         selected = sessionId if sessionId is not None else session_id
         if ctx is None:
-            return await asyncio.to_thread(client.run_task, task, role=role, agent=agent, session_id=selected)
+            return await _tool_call(asyncio.to_thread(client.run_task, task, role=role, agent=agent, session_id=selected))
         _require_target(role, agent, selected)
         payload = {'message' if selected else 'task': task}
         if selected:
@@ -333,8 +346,8 @@ def main() -> None:
             payload['role'] = role
         if agent is not None:
             payload['agent'] = agent
-        return await asyncio.wait_for(stream_call(client, '/messages' if selected else '/tasks', payload, ctx),
-                                      timeout=client.timeout_seconds)
+        return await _tool_call(asyncio.wait_for(
+            stream_call(client, '/messages' if selected else '/tasks', payload, ctx), timeout=client.timeout_seconds))
 
     @server.tool()
     async def send_message(message: str, session_id: str | None = None,
@@ -345,7 +358,8 @@ def main() -> None:
         """
         selected = _normalized_session_id(session_id)
         if ctx is None:
-            return await asyncio.to_thread(client.send_message, message, session_id=selected, role=role, agent=agent)
+            return await _tool_call(asyncio.to_thread(
+                client.send_message, message, session_id=selected, role=role, agent=agent))
         _require_target(role, agent, selected)
         payload = {'message': message}
         if selected:
@@ -354,7 +368,7 @@ def main() -> None:
             payload['role'] = role
         if agent is not None:
             payload['agent'] = agent
-        return await asyncio.wait_for(stream_call(client, '/messages', payload, ctx), timeout=client.timeout_seconds)
+        return await _tool_call(asyncio.wait_for(stream_call(client, '/messages', payload, ctx), timeout=client.timeout_seconds))
 
     @server.tool()
     def list_chats() -> dict:

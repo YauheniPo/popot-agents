@@ -39,7 +39,7 @@ class ModelTimeoutTests(unittest.TestCase):
         tool.assert_not_called()
         self.assertNotIn('tools', bodies[-1])
         self.assertIn('Verified partial result', answer)
-        self.assertIn('частичный', answer.lower())
+        self.assertIn('partial result', answer.lower())
 
     def test_final_model_timeout_returns_partial_result_without_repeating_write(self):
         now = [0.0]
@@ -71,7 +71,7 @@ class ModelTimeoutTests(unittest.TestCase):
                 'mcpServers': {'cognee': {'command': ['python', 'memory.py'], 'tools': ['recall']}}})
         tool.assert_called_once()
         self.assertEqual(len(calls), 2)
-        self.assertIn('частичный', answer.lower())
+        self.assertIn('partial result', answer.lower())
 
         self.assertEqual(memory_client.session_event.call_args.args[0]['status'], 'failed')
         memory_client.remember.assert_not_called()

@@ -46,12 +46,12 @@ class ProjectOperations:
         self.namespaces = scope(AX_CONFIG)
 
     def _combos(self):
-        return json.loads((self.root / 'config/omniroute-combos.json').read_text())
+        return json.loads((self.root / 'config/omniroute/combos.json').read_text())
 
     def _save(self, name, value):
         # Paths come only from this allow-list; configuration strings remain JSON data.
         paths = {filename: self.root / 'config' / filename
-                 for filename in ('omniroute-combos.json', 'monitoring.json')}
+                 for filename in ('omniroute/combos.json', 'monitoring.json')}
         if name not in paths:
             raise ValueError('only managed configuration files may be saved')
         path = paths[name]
@@ -360,7 +360,7 @@ class ProjectOperations:
         config[name] = copy.deepcopy(after)
         for target in config[name]['models']:
             target.pop('connectionId',None)
-        self._save('omniroute-combos.json',config)
+        self._save('omniroute/combos.json',config)
 
     def _apply_deployment(self, plan, current):
         name, action = plan['target'], plan['action']

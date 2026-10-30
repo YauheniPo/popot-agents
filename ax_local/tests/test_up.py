@@ -68,7 +68,8 @@ class UpScriptTests(unittest.TestCase):
         shutil.copyfile(SOURCE.parent / 'compose.sh', self.ax / 'compose.sh')
         config = self.root / 'config'
         config.mkdir()
-        (config / 'roles.json').write_text(json.dumps({'analyst': {'agent': 'omniroute'}}))
+        (config / 'roles').mkdir()
+        (config / 'roles/analyst.json').write_text(json.dumps({'agent': 'omniroute'}))
         cluster = self.ax / "cluster"
         cluster.mkdir()
         shutil.copyfile(SOURCE.parent / 'cluster/build_versions.py', cluster / 'build_versions.py')
@@ -171,7 +172,7 @@ class UpScriptTests(unittest.TestCase):
         self.assertFalse(self.calls.exists())
 
     def test_operator_prepares_holmes_without_starting_an_investigation(self):
-        (self.root / 'config/roles.json').write_text(json.dumps({'project_operator':{'agent':'omniroute'}}))
+        (self.root / 'config/roles/project_operator.json').write_text(json.dumps({'agent':'omniroute'}))
         (self.ax / 'omniroute_tls.py').write_text(
             "import os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==['export']\n"
             "with Path(os.environ['CALLS']).open('a') as f:f.write('tls-export\\n')\n")
@@ -189,8 +190,8 @@ class UpScriptTests(unittest.TestCase):
         self.assertIn('compose.omniroute.yaml --profile omniroute', calls)
 
     def test_other_profiles_do_not_start_omniroute(self):
-        (self.root / 'config/roles.json').write_text(
-            json.dumps({'analyst': {'agent': 'openrouter'}}))
+        (self.root / 'config/roles/analyst.json').write_text(
+            json.dumps({'agent': 'openrouter'}))
         result = self.run_up()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('compose.omniroute.yaml', self.calls.read_text())

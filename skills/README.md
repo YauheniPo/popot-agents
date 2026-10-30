@@ -1,30 +1,33 @@
 # Навыки для агентов
 
-Импортированы 12 навыков из [mattpocock/skills](https://github.com/mattpocock/skills/tree/b0618bc436ad893b3c5e84e55fba86586d34a404/skills)
-на коммите `b0618bc436ad893b3c5e84e55fba86586d34a404` (проверен `main` 8 октября 2026).
+Импортированы 15 навыков из [mattpocock/skills](https://github.com/mattpocock/skills/tree/5beb35b040e3de97e54fa9e386d7e42d15c295c2/skills)
+на коммите `5beb35b040e3de97e54fa9e386d7e42d15c295c2` (проверен `main` 21 октября 2026).
 Исходные файлы скопированы без изменений вместе со
 справочниками, шаблонами и `agents/`. Лицензия: [MIT](LICENSE.mattpocock).
 Версия и SHA-256 каждого файла: [upstream.json](upstream.json).
 
 ## Подборка по ролям
 
-Роли сверены с `config/roles.json`. Один навык может использоваться несколькими
-ролями; достаточно одной копии его каталога. Конкретные назначения заданы в `config/roles.json`.
+Роли сверены с `config/roles/`. Один навык может использоваться несколькими
+ролями; достаточно одной копии его каталога. Конкретные назначения заданы в `config/roles/`.
 
 | Каталог в исходном репозитории | Роли | Назначение |
 | --- | --- | --- |
-| `skills/productivity/grilling` | `planner`, `product_manager`, `product_designer`, `data_analyst`, `analyst`, `local_analyst` | Уточнение требований, решений и предположений |
-| `skills/productivity/handoff` | `planner`, `product_manager`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `data_analyst` | Передача контекста следующему агенту |
+| `skills/productivity/grilling` | `planner`, `analyst` | Уточнение требований, решений и предположений |
+| `skills/productivity/handoff` | `planner`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `project_operator` | Передача контекста следующему агенту |
 | `skills/engineering/grill-with-docs` | `planner` | Обсуждение с фиксацией общего словаря и архитектурных решений |
-| `skills/engineering/domain-modeling` | `planner`, `product_manager`, `tech_lead`, `data_analyst` | Общий словарь предметной области и проверка модели на сценариях |
-| `skills/engineering/to-spec` | `planner`, `product_manager`, `tech_lead` | Спецификация, пользовательские истории и решения по тестированию |
-| `skills/engineering/to-tickets` | `planner`, `product_manager`, `tech_lead` | Декомпозиция работы с зависимостями |
-| `skills/engineering/prototype` | `product_designer`, `frontend_engineer` | Проверка вариантов интерфейса и моделей состояния прототипами |
-| `skills/engineering/codebase-design` | `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | Границы модулей, интерфейсы и тестируемость |
+| `skills/engineering/domain-modeling` | `planner`, `tech_lead` | Общий словарь предметной области и проверка модели на сценариях |
+| `skills/engineering/to-spec` | `planner`, `tech_lead` | Спецификация, пользовательские истории и решения по тестированию |
+| `skills/engineering/to-tickets` | `planner`, `tech_lead` | Декомпозиция работы с зависимостями |
+| `skills/engineering/prototype` | `frontend_engineer` | Проверка вариантов интерфейса и моделей состояния прототипами |
+| `skills/engineering/codebase-design` | `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer`, `project_operator` | Границы модулей, интерфейсы и тестируемость |
 | `skills/engineering/tdd` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | Тестирование поведения через публичные интерфейсы |
-| `skills/engineering/diagnosing-bugs` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | Воспроизведение и диагностика ошибок, регрессионная проверка |
+| `skills/engineering/diagnosing-bugs` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer`, `project_operator` | Воспроизведение и диагностика ошибок, регрессионная проверка |
 | `skills/engineering/code-review` | `planner`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | Проверка изменений по требованиям и стандартам кода |
-| `skills/engineering/setup-matt-pocock-skills` | `planner`, `product_manager`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `qa_engineer` | Справочники трекера и доменной документации |
+| `skills/engineering/setup-matt-pocock-skills` | `planner`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `qa_engineer` | Справочники трекера и доменной документации |
+| `skills/engineering/pr` | `backend_engineer`, `frontend_engineer` | Описание PR с результатами проверок и оценкой последствий изменений |
+| `skills/productivity/writing-for-agents` | `planner`, `backend_engineer`, `frontend_engineer` | Написание навыков и инструкций для агентов; справочник для `retro` |
+| `skills/engineering/retro` | `planner` | Ретроспектива сессии по явному запросу пользователя |
 
 Для `chat` и `cron_demo` специальные навыки из этого набора не нужны.
 
@@ -32,13 +35,25 @@
 ссылаются навыки спецификации, декомпозиции и ревью. Это справочник настройки
 трекера и доменной документации; добавление в список не запускает настройку.
 
-Для `planner` выбран набор из восьми навыков. `grill-with-docs` использует
+Для `planner` выбран набор из десяти навыков. `grill-with-docs` использует
 `grilling` и `domain-modeling`, поэтому оба включены в его prompt вместе с
 шаблонами словаря и ADR. `to-spec` и `to-tickets` дают спецификацию и задачи с
 зависимостями; `code-review` — две оси проверки (стандарты и соответствие spec),
 `handoff` — передачу контекста. В роли уже задан локальный режим drafts в
 `/workspace/specs`; справочники setup не запускают настройку репозитория или
 публикацию в трекер. Внешняя публикация требует разрешения пользователя.
+
+`pr` помогает backend и frontend подготовить описание PR с доказательствами.
+`writing-for-agents` добавляет правила написания инструкций и справочник
+`SKILL-MECHANICS.md`. Состав прав и инструментов ролей задаётся отдельно.
+
+`retro` доступен planner по явному запросу пользователя. Он разбирает текущую
+сессию или предоставленные материалы и предлагает улучшения окружения агента.
+Его зависимость `writing-for-agents` включена в тот же набор навыков.
+
+`research` не импортирован: upstream требует фонового агента, а текущий
+`delegate_task` ожидает завершения дочерней задачи. Перед подключением нужен
+согласованный с этим поведением сценарий исследования.
 
 `implement-spec` не подключён: он предполагает общий репозиторий, worktree и
 слияние веток. `wayfinder` полезен для больших исследований на много сессий,
@@ -49,7 +64,7 @@
 
 ## Конфигурация
 
-В `config/roles.json` укажите пути каталогов относительно `skills/`:
+В файле роли `config/roles/<role>.json` укажите пути каталогов относительно `skills/`:
 
 ```json
 {
@@ -84,9 +99,11 @@
 и разрешения пользователя имеют приоритет. Навыки с `disable-model-invocation`
 предназначены для явного запроса пользователя. Доступ к трекеру, запуск тестов,
 создание файлов и делегирование возможны только при наличии соответствующих
-инструментов. Например, у `product_designer`, `frontend_engineer` и `qa_engineer`
-сейчас нет файловых инструментов: они могут использовать методику, но не
-создавать прототипы и не запускать тесты самостоятельно.
+инструментов. У `backend_engineer`, `frontend_engineer` и `qa_engineer` есть
+файловые и shell-инструменты для реализации и проверок. `planner` может читать
+и писать документы, но не имеет shell. `tech_lead` и `code_reviewer` работают
+с предоставленным контекстом и доступными им инструментами; импорт навыка
+не добавляет им доступ к workspace другого агента.
 
 ## Обновление и запуск
 

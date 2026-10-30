@@ -40,7 +40,7 @@ fi
 
 python3 "$ROOT/ax_local/cluster/deployment_cleanup.py"
 python3 "$ROOT/ax_local/cluster/resource_monitoring.py" install
-if python3 -c 'import json,sys; sys.exit(0 if "project_operator" in json.load(open(sys.argv[1])) else 1)' "$ROOT/config/roles.json"; then
+if [[ -f "$ROOT/config/roles/project_operator.json" ]]; then
   python3 "$ROOT/ax_local/omniroute_tls.py" export
   PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 "$ROOT/ax_local/cluster/holmes.py" --prepare
 fi

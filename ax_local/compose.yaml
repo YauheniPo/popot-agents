@@ -66,9 +66,9 @@ services:
       - python
       - /bootstrap/omniroute.py
       - --config
-      - /config/omniroute-settings.json
+      - /config/omniroute/settings.json
       - --combos
-      - /config/omniroute-combos.json
+      - /config/omniroute/combos.json
     volumes:
       - ./omniroute.py:/bootstrap/omniroute.py:ro
       - ../config:/config:ro
