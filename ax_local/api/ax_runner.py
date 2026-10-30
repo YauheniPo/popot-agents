@@ -94,7 +94,7 @@ class AxAgentRunner:
             "HARNESS_ROLE_JSON": json.dumps(role_config, ensure_ascii=False),
             "HARNESS_SESSION_MODE": "http",
             "HARNESS_CHAT_ID": chat_id,
-            "HARNESS_SOCKET_PATH": "/workspace/chat.sock",
+            "HARNESS_SOCKET_PATH": "/run/popot/chat.sock",
             "POPOT_SESSION_SNAPSHOT": self.snapshot_mode,
             "POPOT_RESOURCE_METRICS_URL": "http://opentelemetry-collector.otel-system.svc:4318/v1/metrics",
             "POPOT_RESOURCE_METRICS_TASK": f"popot-chat-{chat_id}",
@@ -147,8 +147,10 @@ class AxAgentRunner:
             raise AgentConfigurationError(str(exc)) from exc
         # Substrate permits at most 32 env entries. Restore internal capabilities
         # in the entrypoint, keeping role/tool credentials under their own names.
-        capabilities = {key: env.pop(key) for key in list(env)
+        capabilities = {key: value for key, value in env.items()
                         if key.startswith(('AX_DELEGATION_', 'AX_HARNESS2_', 'HARNESS2_'))}
+        for key in capabilities:
+            del env[key]
         if capabilities:
             env['AX_CAPABILITIES_JSON'] = json.dumps(capabilities)
         return {

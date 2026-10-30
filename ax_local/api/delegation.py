@@ -247,35 +247,36 @@ class DelegationService:
                 self.tokens.pop(hashlib.sha256(grant.token.encode()).hexdigest(), None)
                 self.tokens.pop(hashlib.sha256(grant.probe_token.encode()).hexdigest(), None)
 
+    def _begin_turn(self, grant, timeout_seconds, message):
+        if grant.active:
+            raise RuntimeError("AX session already has an active turn")
+        job = self.jobs.get(grant.session_id)
+        if job and (job.canceled.is_set() or job.run.canceled.is_set()):
+            raise TimeoutError("AX parent turn was canceled")
+        owner = grant.run is None
+        if owner:
+            grant.root_id, grant.lineage = grant.session_id, (grant.role,)
+            grant.run = Run(time.monotonic() + timeout_seconds)
+        grant.active = True
+        grant.approved_change = (message.strip().split()[1] if
+            re.fullmatch(r'/apply change-[0-9a-f]{24}', message.strip())
+            and not grant.config.get('_ax_delegation') else '')
+        grant.probes = 0
+        grant.deadline = min(grant.run.deadline, time.monotonic() + timeout_seconds)
+        return owner
+
     @contextmanager
     def turn(self, session_id: str, timeout_seconds: float, *, message: str = ''):
         with self.lock:
             grant = self.grants.get(session_id)
-            if grant is None:
-                yield_without_grant = True
-                owner = False
-            else:
-                yield_without_grant = False
-                if grant.active:
-                    raise RuntimeError("AX session already has an active turn")
-                job = self.jobs.get(session_id)
-                if job and (job.canceled.is_set() or job.run.canceled.is_set()):
-                    raise TimeoutError("AX parent turn was canceled")
-                owner = grant.run is None
-                if owner:
-                    grant.root_id, grant.lineage = session_id, (grant.role,)
-                    grant.run = Run(time.monotonic() + timeout_seconds)
-                grant.active = True
-                grant.approved_change = (message.strip().split()[1] if
-                    re.fullmatch(r'/apply change-[0-9a-f]{24}', message.strip())
-                    and not grant.config.get('_ax_delegation') else '')
-                grant.probes = 0
-                grant.deadline = min(grant.run.deadline, time.monotonic() + timeout_seconds)
+            owner = False
+            if grant is not None:
+                owner = self._begin_turn(grant, timeout_seconds, message)
                 run = grant.run
         try:
             yield
         finally:
-            if not yield_without_grant:
+            if grant is not None:
                 with self.lock:
                     grant.active = False
                     grant.approved_change = ''
@@ -379,8 +380,8 @@ class DelegationService:
             return self._task(saved)
         raise A2AError("operation is not supported by the local AX adapter", -32601)
 
-    def _submit(self, grant: Grant, role: str, params: dict, *, token: str) -> dict:
-        message = params.get("message")
+    @staticmethod
+    def _message_input(message, root_id):
         if not isinstance(message, dict) or message.get("role") != "ROLE_USER":
             raise A2AError("message with ROLE_USER is required")
         message_id = message.get("messageId")
@@ -390,7 +391,7 @@ class DelegationService:
         if session_id is not None and (not isinstance(session_id, str) or
                 not re.fullmatch(r'[0-9a-f]{16}', session_id)):
             raise A2AError('invalid continuation session ID')
-        if message.get("contextId", grant.root_id) != grant.root_id:
+        if message.get("contextId", root_id) != root_id:
             raise A2AError("task must belong to the caller's context")
         parts = message.get("parts")
         if not isinstance(parts, list) or not parts or any(
@@ -400,9 +401,10 @@ class DelegationService:
         task = "\n".join(part["text"] for part in parts).strip()
         if not task or len(task) > RUNTIME["limits"]["message_chars"]:
             raise A2AError("task is empty or too long")
-        configuration = params.get("configuration", {})
-        if not isinstance(configuration, dict):
-            raise A2AError("configuration must be an object")
+        return message_id, task, session_id
+
+    @staticmethod
+    def _probe_request(grant, message, token):
         metadata = message.get('metadata', {})
         if not isinstance(metadata, dict):
             raise A2AError('message metadata must be an object')
@@ -414,7 +416,7 @@ class DelegationService:
         # Only the dedicated probe capability can enter this path; a normal
         # delegation request cannot opt into a more privileged same-role actor.
         is_probe = secrets.compare_digest(token, grant.probe_token)
-        if is_probe and session_id:
+        if is_probe and message.get('taskId'):
             raise A2AError('Harness2 probes cannot continue delegated sessions')
         if is_probe:
             if not isinstance(probe, dict) or set(probe) != {'prompt', 'timeout_seconds'} \
@@ -424,38 +426,60 @@ class DelegationService:
                 raise A2AError('invalid Harness2 probe')
         elif probe is not None:
             raise A2AError('probe must target the same role')
+        return probe, is_probe, call_timeout
+
+    def _existing_submission(self, parent_id, message_id, fingerprint):
+        # Persisted message IDs survive API restarts; never repeat actor side effects.
+        for saved in self.store.list_chats():
+            meta = (saved.get("roleConfig") or {}).get("_ax_delegation", {})
+            previous = meta.get('attempts', {}).get(message_id)
+            if meta.get("parent_session_id") == parent_id and (
+                    previous or meta.get("message_id") == message_id):
+                if (previous or meta.get("fingerprint")) != fingerprint:
+                    raise A2AError("messageId was already used with different input")
+                return self._task(saved)
+        return None
+
+    def _check_probe_limits(self, grant, role):
+        if grant.probes >= 4:
+            raise A2AError('Harness2 probe limit reached')
+        if any(job.config.get('_ax_harness2_probe') and
+                job.config['_ax_delegation']['state'] in ACTIVE and
+                job.config['_ax_delegation']['parent_session_id'] == grant.session_id
+                for job in self.jobs.values()):
+            raise A2AError('a Harness2 probe is already active')
+        queue = getattr(self.runners[self.roles[role]['agent']], 'worker_queue', None)
+        if queue:
+            capacity = queue.status()
+            if capacity['active'] >= capacity['limit'] or capacity['queued']:
+                raise A2AError('No spare worker capacity for a Harness2 probe')
+
+    def _check_submission_limits(self, grant, role, is_probe):
+        if is_probe:
+            self._check_probe_limits(grant, role)
+            return
+        if role in grant.lineage:
+            raise A2AError('delegation cycle is not allowed')
+        if len(grant.lineage) > self.policy['max_depth']:
+            raise A2AError('delegation depth limit reached')
+        if grant.run.calls >= self.policy['max_calls_per_turn']:
+            raise A2AError('delegation call limit reached')
+
+    def _submit(self, grant: Grant, role: str, params: dict, *, token: str) -> dict:
+        message = params.get('message')
+        message_id, task, session_id = self._message_input(message, grant.root_id)
+        if not isinstance(params.get('configuration', {}), dict):
+            raise A2AError('configuration must be an object')
+        probe, is_probe, call_timeout = self._probe_request(grant, message, token)
         fingerprint = hashlib.sha256((role + '\n' + (session_id or '') + '\n' + task +
             (json.dumps(probe, sort_keys=True) if is_probe else '')).encode()).hexdigest()
         with self.lock:
             self._authorized(token, role)
-            # Persisted message IDs survive API restarts; never repeat actor side effects.
-            for saved in self.store.list_chats():
-                meta = (saved.get("roleConfig") or {}).get("_ax_delegation", {})
-                previous = meta.get('attempts', {}).get(message_id)
-                if meta.get("parent_session_id") == grant.session_id and (
-                        previous or meta.get("message_id") == message_id):
-                    if (previous or meta.get("fingerprint")) != fingerprint:
-                        raise A2AError("messageId was already used with different input")
-                    return self._task(saved)
+            existing = self._existing_submission(grant.session_id, message_id, fingerprint)
+            if existing is not None:
+                return existing
             self._authorized(token, role)
-            if role in grant.lineage and not is_probe:
-                raise A2AError("delegation cycle is not allowed")
-            if not is_probe and len(grant.lineage) > self.policy["max_depth"]:
-                raise A2AError("delegation depth limit reached")
-            if is_probe and grant.probes >= 4:
-                raise A2AError('Harness2 probe limit reached')
-            if is_probe and any(job.config.get('_ax_harness2_probe') and
-                    job.config['_ax_delegation']['state'] in ACTIVE and
-                    job.config['_ax_delegation']['parent_session_id'] == grant.session_id
-                    for job in self.jobs.values()):
-                raise A2AError('a Harness2 probe is already active')
-            queue = getattr(self.runners[self.roles[role]['agent']], 'worker_queue', None)
-            if is_probe and queue:
-                capacity = queue.status()
-                if capacity['active'] >= capacity['limit'] or capacity['queued']:
-                    raise A2AError('No spare worker capacity for a Harness2 probe')
-            if not is_probe and grant.run.calls >= self.policy["max_calls_per_turn"]:
-                raise A2AError("delegation call limit reached")
+            self._check_submission_limits(grant, role, is_probe)
             previous_messages, chat = [], None
             if session_id:
                 saved = self.store.get(session_id)

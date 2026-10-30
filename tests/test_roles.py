@@ -281,11 +281,11 @@ class FeatureTeamConfigTests(unittest.TestCase):
         roles = load_roles(config / 'roles', load_agents(config / 'agents.json'))
         for name in ('frontend_engineer', 'qa_engineer'):
             role = roles[name]
-            self.assertTrue({'bash', 'read_file', 'write_file', 'git_clone'} <= set(role['tools']))
+            self.assertLessEqual({'bash', 'read_file', 'write_file', 'git_clone'}, set(role['tools']))
             self.assertTrue(role['permissions']['shell'])
             self.assertEqual(role['permissions']['workspace'], 'persistent')
             self.assertIn('GITHUB_PERSONAL_ACCESS_TOKEN', role['env_names'])
-            self.assertTrue({'GITGUARDIAN_API_KEY', 'SONAR_TOKEN'} <= set(role['env_names']))
+            self.assertLessEqual({'GITGUARDIAN_API_KEY', 'SONAR_TOKEN'}, set(role['env_names']))
             github = role['mcpServers']['github']
             self.assertTrue(github['url'].endswith('/readonly'))
             self.assertIn('get_file_contents', github['tools'])

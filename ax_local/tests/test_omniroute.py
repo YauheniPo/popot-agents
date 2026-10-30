@@ -54,7 +54,7 @@ class OmniRouteTests(unittest.TestCase):
             if call.full_url == runner.base_url + '/chat/completions':
                 self.assertEqual(call.get_header('Authorization'), 'Bearer ' + runner.proxy_token)
                 return original_urlopen(call, **kwargs)
-            self.assertEqual(call.full_url, 'http://omniroute:20128/v1/chat/completions')
+            self.assertEqual(call.full_url, 'https://omniroute:20128/v1/chat/completions')
             self.assertEqual(call.get_header('Authorization'), 'Bearer private-gateway-key')
             payload = json.loads(call.data)
             self.assertEqual(payload['model'], 'ax-free')
