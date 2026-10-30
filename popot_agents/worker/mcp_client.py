@@ -175,11 +175,12 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
     try:
         async with Client(_streams(config)) as client:
             result = await client.call_tool(native_name, arguments=arguments)
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         if result is None:
             raise
         # A completed RPC must not become an unknown write when closing its
-        # transport fails. Preserve the received result, including is_error.
+        # transport fails or the outer deadline cancels cleanup. Preserve the
+        # received result, including is_error; cancellation before it propagates.
         trace_event('mcp_cleanup_failed', tool=native_name,
                     error=_error_text(config, exc), result_received=True)
     parts = []

@@ -51,22 +51,24 @@ class EntrypointTests(unittest.TestCase):
 
     def test_root_overlay_allows_tool_uid_to_traverse_before_harness_starts(self):
         modes = {"/": 0o700, "/workspace": 0o1777, "/dev/shm": 0o755}
-        owner = [10001, 10001]
+        owners = {99: [0, 0], 100: [0, 0]}
+        directories = {99: "/workspace", 100: "/dev/shm"}
 
-        def chmod_workspace(fd, mode):
-            modes["/workspace"] = mode
+        def chmod_directory(fd, mode):
+            modes[directories[fd]] = mode
 
         def start_harness():
             # UID 10001 must cross / to execute Python or read its stdlib.
             self.assertEqual(modes["/"], 0o711)
             self.assertEqual(modes["/"] & 0o022, 0)
             self.assertEqual(modes["/workspace"], 0o700)
-            self.assertEqual(owner, [10001, 10001])
-            self.assertEqual(modes["/dev/shm"], 0o1777)
+            self.assertEqual(owners, {99: [10001, 10001], 100: [10001, 10001]})
+            self.assertEqual(modes["/dev/shm"], 0o700)
 
         with patch.dict(os.environ, {"POPOT_TOOLS_UID": "10001"}), \
              patch("ax_local.worker.entrypoint.os.makedirs"), \
-             patch("ax_local.worker.entrypoint.os.open", return_value=99), \
+             patch("ax_local.worker.entrypoint.os.open",
+                   side_effect=lambda path, flags: next(fd for fd, name in directories.items() if name == path)) as opened, \
              patch("ax_local.worker.entrypoint.os.close"), \
              patch("ax_local.worker.entrypoint.os.geteuid", return_value=0), \
              patch("ax_local.worker.entrypoint.os.stat",
@@ -74,11 +76,13 @@ class EntrypointTests(unittest.TestCase):
              patch("ax_local.worker.entrypoint.os.chmod",
                    side_effect=lambda path, mode: modes.update({path: mode})), \
              patch("ax_local.worker.entrypoint.os.fchown",
-                   side_effect=lambda fd, uid, gid: owner.__setitem__(slice(None), [uid, gid])), \
-             patch("ax_local.worker.entrypoint.os.fchmod", side_effect=chmod_workspace), \
+                   side_effect=lambda fd, uid, gid: owners.__setitem__(fd, [uid, gid])), \
+             patch("ax_local.worker.entrypoint.os.fchmod", side_effect=chmod_directory), \
              patch("ax_local.worker.entrypoint.make_tools", return_value={}), \
              patch("ax_local.worker.entrypoint.serve", side_effect=start_harness):
             main()
+        for opened_call in opened.call_args_list:
+            self.assertEqual(opened_call.args[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 
     def test_ax_entrypoint_supplies_the_delegation_tool_to_session_harness(self):
         tools = {"delegate_task": {"schema": {}, "call": lambda *_: ""}}
@@ -105,6 +109,29 @@ class EntrypointTests(unittest.TestCase):
         close.assert_called_once_with(99)
         serve.assert_not_called()
 
+    def test_shm_symlink_is_rejected_without_changing_its_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'workspace').mkdir()
+            target = root / 'target'
+            target.mkdir(mode=0o700)
+            (root / 'shm').symlink_to(target, target_is_directory=True)
+            real_open = os.open
+            with patch.dict(os.environ, {'POPOT_TOOLS_UID': '10001'}), \
+                 patch.object(entrypoint.os, 'makedirs'), \
+                 patch.object(entrypoint.os, 'geteuid', return_value=0), \
+                 patch.object(entrypoint.os, 'stat', return_value=SimpleNamespace(st_mode=0o755)), \
+                 patch.object(entrypoint.os, 'open', side_effect=lambda path, flags:
+                              real_open(root / Path(path).name, flags)), \
+                 patch.object(entrypoint.os, 'fchown') as chown, \
+                 patch.object(entrypoint, 'serve') as serve:
+                with self.assertRaises(OSError):
+                    main()
+            self.assertEqual(chown.call_count, 1)  # Only the workspace was opened.
+            self.assertEqual(target.stat().st_mode & 0o7777, 0o700)
+            self.assertTrue((root / 'shm').is_symlink())
+            serve.assert_not_called()
+
     def test_role_without_local_tools_keeps_private_root_workspace(self):
         with patch.dict(os.environ, {}, clear=True), \
              patch.object(entrypoint.os, "makedirs"), \
@@ -120,7 +147,8 @@ class EntrypointTests(unittest.TestCase):
              patch.object(entrypoint, "serve"):
             main()
         chown.assert_not_called()
-        chmod.assert_called_once_with(99, 0o700)
+        self.assertEqual(chmod.call_count, 2)
+        self.assertTrue(all(call.args == (99, 0o700) for call in chmod.call_args_list))
 
 
 if __name__ == "__main__":

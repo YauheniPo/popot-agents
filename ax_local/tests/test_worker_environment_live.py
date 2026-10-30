@@ -19,7 +19,9 @@ for tool in ('cc', 'make', 'pkg-config', 'rg', 'unzip', 'git', 'node', 'npm'):
     assert shutil.which(tool), 'missing development tool: '+tool
 print(json.dumps({'home':os.environ['HOME'], 'passwd_home':pwd.getpwuid(os.geteuid()).pw_dir}), flush=True)
 assert pwd.getpwuid(os.geteuid()).pw_dir == os.environ['HOME']
-assert os.stat('/dev/shm').st_mode & 0o7777 == 0o1777
+shm = os.stat('/dev/shm')
+assert shm.st_mode & 0o7777 == 0o700
+assert shm.st_uid == os.geteuid()
 ctx = multiprocessing.get_context('fork')
 with ctx.Lock():
     queue = ctx.Queue()

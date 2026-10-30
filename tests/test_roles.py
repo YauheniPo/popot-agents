@@ -50,6 +50,16 @@ class FakeRunner:
 
 
 class RoleDirectoryTests(unittest.TestCase):
+    def test_diagram_snapshot_matches_role_capabilities(self):
+        directory = Path(__file__).resolve().parents[1] / 'config' / 'roles'
+        html = (directory / 'index.html').read_text(encoding='utf-8')
+        embedded = html.split('<script id="role-data" type="application/json">', 1)[1].split('</script>', 1)[0]
+        snapshot = json.loads(embedded)['roles']
+        fields = {'agent', 'skills', 'tools', 'allowed_roles', 'permissions', 'mcpServers', 'harness2', 'cron', 'memory_project'}
+        roles = {path.stem: {key: value for key, value in json.loads(path.read_text()).items() if key in fields}
+                 for path in directory.glob('*.json')}
+        self.assertEqual(snapshot, roles)
+
     def test_role_names_come_from_filenames_and_allow_cross_file_delegation(self):
         configs = {
             'reviewer': {'agent': 'nous', 'instructions': 'Review code', 'tools': []},
