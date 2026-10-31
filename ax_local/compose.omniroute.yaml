@@ -1,6 +1,16 @@
 # Selected by ax_local/compose.sh when a role uses an OmniRoute profile.
 services:
   api:
+    environment:
+      SSL_CERT_FILE: /run/popot-tls/ca-bundle.pem
+      OMNIROUTE_CA_FILE: /run/popot-tls/ca-bundle.pem
+    volumes:
+      - type: volume
+        source: omniroute-tls
+        target: /run/popot-tls
+        read_only: true
+        volume:
+          subpath: trust
     depends_on:
       omniroute-init:
         condition: service_completed_successfully

@@ -23,16 +23,18 @@ COPY --from=build-versions /build-versions.env /build-versions.env
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 RUN . /build-versions.env \
-    && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+    && curl --proto '=https' --proto-redir '=https' -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
       -o /usr/local/bin/kubectl \
-    && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" \
+    && curl --proto '=https' --proto-redir '=https' -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" \
       -o /tmp/kubectl.sha256 \
     && printf '%s  %s\n' "$(cat /tmp/kubectl.sha256)" /usr/local/bin/kubectl | sha256sum -c - \
     && chmod +x /usr/local/bin/kubectl \
     && rm /tmp/kubectl.sha256
-RUN pip install --no-cache-dir 'psycopg[binary]==3.3.6' 'a2a-sdk[http-server]==1.2.2' 'uvicorn==0.42.0'
-COPY --from=ax-cli /ax /usr/local/bin/ax
 WORKDIR /app
+COPY pyproject.toml ./
+RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
+    && python -m pip install --no-cache-dir --only-binary=:all: --group build --group orchestrator --group ax
+COPY --from=ax-cli /ax /usr/local/bin/ax
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/
 COPY popot_agents/prompts.py /app/popot_agents/

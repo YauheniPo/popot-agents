@@ -265,6 +265,30 @@ class DelegationRoutingTests(unittest.TestCase):
             self.assertEqual(run_http(history, self.role, extra_tools=self.tools), 'ok')
         self.delegate.assert_not_called()
 
+    def test_parent_implements_changes_after_explicit_reviewer_delegation(self):
+        replies = [
+            {'tool_calls': [{'id': 'review', 'type': 'function', 'function': {
+                'name': 'delegate_task', 'arguments': json.dumps({
+                    'role': 'code_reviewer', 'task': 'Review ' + PR})}}]},
+            {'tool_calls': [{'id': 'fix', 'type': 'function', 'function': {
+                'name': 'bash', 'arguments': json.dumps({'command': 'apply-fix'})}}]},
+            {'content': 'Review findings fixed'},
+        ]
+        def reply(*_args, **_kwargs):
+            return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1',
+                                     'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply) as model, \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='updated') as local, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('Передай code_reviewer ревью PR ' + PR +
+                              ', затем сам исправь найденные ошибки.', self.role, extra_tools=self.tools)
+        self.assertEqual(answer, 'Review findings fixed')
+        self.delegate.assert_called_once()
+        self.assertEqual(model.call_count, 3)
+        local.assert_called_once()
+        self.assertEqual(local.call_args.args[:2], ('bash', {'command': 'apply-fix'}))
+
     def test_model_selected_delegate_receives_original_user_scope(self):
         requests = []
         replies = [

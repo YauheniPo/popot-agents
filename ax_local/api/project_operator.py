@@ -22,6 +22,7 @@ from ax_local.resource_config import SERVICES, load_monitoring, validate_resourc
 from popot_agents.progress import redact_text, trace_event
 
 ROOT = Path(__file__).resolve().parents[2]
+COMBOS_PATH = '/api/combos'
 
 
 def safe_result(value):
@@ -48,7 +49,12 @@ class ProjectOperations:
         return json.loads((self.root / 'config/omniroute/combos.json').read_text())
 
     def _save(self, name, value):
-        path = self.root / 'config' / name
+        # Paths come only from this allow-list; configuration strings remain JSON data.
+        paths = {filename: self.root / 'config' / filename
+                 for filename in ('omniroute/combos.json', 'monitoring.json')}
+        if name not in paths:
+            raise ValueError('only managed configuration files may be saved')
+        path = paths[name]
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
         temporary.replace(path)
@@ -89,12 +95,13 @@ class ProjectOperations:
             return {'tcp_reachable':True, 'note':'TCP reachability only; not a tool execution check'}
 
     def _api_health(self):
+        # This API's own /healthz returns only {"status": "ok"}, without credentials.
         from .provider_proxy import network_address_toward
         host = os.getenv('AX_LOCAL_BIND_HOST') or network_address_toward('db',5432)
         return self._json('http://' + host + ':' + os.getenv('AX_LOCAL_API_PORT','8002') + '/healthz')
 
     def _gateway(self):
-        api = Api('http://omniroute:20128', timeout=8)
+        api = Api('https://omniroute:20128', timeout=8)
         api.request('POST', '/api/auth/login', {'password': os.environ['OMNIROUTE_INITIAL_PASSWORD']})
         return api
 
@@ -103,7 +110,7 @@ class ProjectOperations:
         return CogneeMemory(os.environ['COGNEE_API_URL'], os.environ['COGNEE_PASSWORD'], timeout=8)
 
     def read_combo(self, name):
-        rows = self._gateway().request('GET', '/api/combos')['combos']
+        rows = self._gateway().request('GET', COMBOS_PATH)['combos']
         found = next((r for r in rows if r['name'] == name), None)
         if found is None:
             raise ValueError('managed combo not found')
@@ -111,9 +118,9 @@ class ProjectOperations:
 
     def write_combo(self, name, combo):
         api = self._gateway()
-        rows = api.request('GET', '/api/combos')['combos']
+        rows = api.request('GET', COMBOS_PATH)['combos']
         row = next(r for r in rows if r['name'] == name)
-        api.request('PUT', '/api/combos/' + quote(row['id'], safe=''), combo)
+        api.request('PUT', COMBOS_PATH + '/' + quote(row['id'], safe=''), combo)
         current = self.read_combo(name)
         if any(not contains(current.get(k),combo[k]) for k in ('models', 'strategy', 'config')):
             raise RuntimeError('Combo write could not be verified')
@@ -127,80 +134,98 @@ class ProjectOperations:
         if not isinstance(params, dict):
             raise ValueError('parameters must be an object')
         if kind == 'overview':
-            result = {}
-            for name, function in {
-                'ax_api': self._api_health,
-                'mcp_gateway': self._mcp_status,
-                'omniroute': lambda: self._gateway().request('GET','/api/monitoring/health'),
-                'cognee': lambda: self._json('http://cognee:8000/health'),
-                'cognee_ui': lambda: self._http_status('http://host.docker.internal:3001/sessions'),
-                'grafana': lambda: self._proxy('grafana', '/api/health'),
-                'prometheus': lambda: self._proxy('prometheus', '/api/v1/query?' + urlencode({'query':'up'})),
-                'postgres': self._database,
-            }.items():
-                try:
-                    result[name] = safe_result(function())
-                except Exception as exc:
-                    result[name] = {'unavailable': True, 'error_type': type(exc).__name__}
-            result['roles'] = {n: {k: v for k, v in r.items() if k in
-                {'agent', 'harness2', 'timeout_seconds', 'max_tool_rounds'}} for n, r in self.roles.items()}
-            return result
+            return self._overview()
         if kind in {'pods', 'events', 'logs'}:
-            namespace = params.get('namespace', AX_CONFIG['atespace'])
-            if namespace not in self.namespaces:
-                raise ValueError('namespace is outside the local project')
-            if kind == 'logs':
-                pod, container = params.get('pod', ''), params.get('container', '')
-                if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,252}', pod) or not re.fullmatch(
-                        r'[a-z0-9][a-z0-9-]{0,62}', container):
-                    raise ValueError('valid pod and container names are required')
-                args = ['-n',namespace,'logs',pod,'-c',container,'--tail=200','--since=30m','--timestamps=true']
-                if params.get('previous') is True:
-                    args.append('--previous')
-                return {'logs': redact_text(self._kube(*args))}
-            rows = json.loads(self._kube('-n',namespace,'get',kind,'-o','json'))['items']
-            if kind == 'events':
-                return safe_result([{'time': r.get('lastTimestamp'), 'type': r.get('type'),
-                    'reason': r.get('reason'), 'object': r.get('involvedObject', {}).get('name'),
-                    'message': r.get('message')} for r in rows[-100:]])
-            return [{'namespace': namespace, 'pod': r['metadata']['name'], 'status': r.get('status'),
-                'resources': [{'container': c['name'], 'resources': c.get('resources', {})}
-                              for c in r['spec']['containers']]} for r in rows]
+            return self._kubernetes(kind, params)
         if kind == 'metrics':
-            query = params.get('query', '')
-            if not isinstance(query, str) or not query.strip() or len(query) > 3000:
-                raise ValueError('PromQL query of 1..3000 characters is required')
-            args = {'query': query, 'timeout':'5s'}
-            if 'start' in params or 'end' in params:
-                start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
-                if any(type(v) not in {int, float} for v in (start, end, step)) \
-                        or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
-                    raise ValueError('range must be <=7d, step>=15s and <=1500 points')
-                args.update(start=start, end=end, step=step)
-            endpoint = 'query_range' if 'start' in args else 'query'
-            return self._proxy('prometheus', '/api/v1/' + endpoint + '?' + urlencode(args))
+            return self._metrics(params)
         if kind == 'models':
-            api = self._gateway()
-            return safe_result({'combos': api.request('GET','/api/combos'),
-                'health': api.request('GET','/api/monitoring/health'),
-                'usage': api.request('GET','/api/usage/history'),
-                'combo_metrics': api.request('GET','/api/combos/metrics')})
+            return self._models()
         if kind == 'memory':
-            period = params.get('range', '24h')
-            if period not in {'24h','7d','30d','all'}:
-                raise ValueError('invalid memory time range')
-            client = self._memory()
-            return safe_result({'stats':client._request('/api/v1/sessions/stats?range=' + period),
-                'sessions':client._request('/api/v1/sessions?limit=20&range=' + period),
-                'datasets':client._request('/api/v1/datasets')})
+            return self._memory_status(params)
         if kind == 'sessions':
-            rows = self.store.list_chats() if self.store else []
-            return {'total':len(rows),'recent':[{k:v for k,v in r.items() if k in
-                {'sessionId','agent','role','createdAt','updatedAt'}} for r in rows[:30]],
-                'postgres':self._database()}
+            return self._sessions()
         if kind == 'holmes':
             return self._holmes(params, actor, request_id)
         raise ValueError('unknown inspection; use overview, pods, events, logs, metrics, models, memory, sessions or holmes')
+
+    def _overview(self):
+        result = {}
+        for name, function in {
+            'ax_api': self._api_health,
+            'mcp_gateway': self._mcp_status,
+            'omniroute': lambda: self._gateway().request('GET','/api/monitoring/health'),
+            'cognee': lambda: self._json('http://cognee:8000/health'),
+            'cognee_ui': lambda: self._http_status('http://host.docker.internal:3001/sessions'),
+            'grafana': lambda: self._proxy('grafana', '/api/health'),
+            'prometheus': lambda: self._proxy('prometheus', '/api/v1/query?' + urlencode({'query':'up'})),
+            'postgres': self._database,
+        }.items():
+            try:
+                result[name] = safe_result(function())
+            except Exception as exc:
+                result[name] = {'unavailable': True, 'error_type': type(exc).__name__}
+        result['roles'] = {n: {k: v for k, v in r.items() if k in
+            {'agent', 'harness2', 'timeout_seconds', 'max_tool_rounds'}} for n, r in self.roles.items()}
+        return result
+
+    def _kubernetes(self, kind, params):
+        namespace = params.get('namespace', AX_CONFIG['atespace'])
+        if namespace not in self.namespaces:
+            raise ValueError('namespace is outside the local project')
+        if kind == 'logs':
+            pod, container = params.get('pod', ''), params.get('container', '')
+            if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,252}', pod) or not re.fullmatch(
+                    r'[a-z0-9][a-z0-9-]{0,62}', container):
+                raise ValueError('valid pod and container names are required')
+            args = ['-n',namespace,'logs',pod,'-c',container,'--tail=200','--since=30m','--timestamps=true']
+            if params.get('previous') is True:
+                args.append('--previous')
+            return {'logs': redact_text(self._kube(*args))}
+        rows = json.loads(self._kube('-n',namespace,'get',kind,'-o','json'))['items']
+        if kind == 'events':
+            return safe_result([{'time': r.get('lastTimestamp'), 'type': r.get('type'),
+                'reason': r.get('reason'), 'object': r.get('involvedObject', {}).get('name'),
+                'message': r.get('message')} for r in rows[-100:]])
+        return [{'namespace': namespace, 'pod': r['metadata']['name'], 'status': r.get('status'),
+            'resources': [{'container': c['name'], 'resources': c.get('resources', {})}
+                          for c in r['spec']['containers']]} for r in rows]
+
+    def _metrics(self, params):
+        query = params.get('query', '')
+        if not isinstance(query, str) or not query.strip() or len(query) > 3000:
+            raise ValueError('PromQL query of 1..3000 characters is required')
+        args = {'query': query, 'timeout':'5s'}
+        if 'start' in params or 'end' in params:
+            start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
+            if any(type(v) not in {int, float} for v in (start, end, step)) \
+                    or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
+                raise ValueError('range must be <=7d, step>=15s and <=1500 points')
+            args.update(start=start, end=end, step=step)
+        endpoint = 'query_range' if 'start' in args else 'query'
+        return self._proxy('prometheus', '/api/v1/' + endpoint + '?' + urlencode(args))
+
+    def _models(self):
+        api = self._gateway()
+        return safe_result({'combos': api.request('GET',COMBOS_PATH),
+            'health': api.request('GET','/api/monitoring/health'),
+            'usage': api.request('GET','/api/usage/history'),
+            'combo_metrics': api.request('GET','/api/combos/metrics')})
+
+    def _memory_status(self, params):
+        period = params.get('range', '24h')
+        if period not in {'24h','7d','30d','all'}:
+            raise ValueError('invalid memory time range')
+        client = self._memory()
+        return safe_result({'stats':client._request('/api/v1/sessions/stats?range=' + period),
+            'sessions':client._request('/api/v1/sessions?limit=20&range=' + period),
+            'datasets':client._request('/api/v1/datasets')})
+
+    def _sessions(self):
+        rows = self.store.list_chats() if self.store else []
+        return {'total':len(rows),'recent':[{k:v for k,v in r.items() if k in
+            {'sessionId','agent','role','createdAt','updatedAt'}} for r in rows[:30]],
+            'postgres':self._database()}
 
     def _database(self):
         if self.store is None or not hasattr(self.store, '_connect'):
@@ -210,32 +235,36 @@ class ProjectOperations:
                 '(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())').fetchone()
         return {'database_bytes':row[0], 'connections':row[1]}
 
+    def _start_holmes(self, params, actor, request_id):
+        question = params.get('question', '')
+        if not isinstance(question,str) or not 1 <= len(question.strip()) <= 6000 or not actor or not request_id:
+            raise ValueError('Holmes needs a question and an active operator request')
+        with self.lock:
+            label = hashlib.sha256((actor + request_id).encode()).hexdigest()[:24]
+            existing = json.loads(self._kube('-n','ax-diagnostics','get','jobs',
+                '-l','popot.dev/operator-request=' + label,'-o','json'))['items']
+            if existing:
+                job = existing[0]['metadata']['name']
+            else:
+                active = json.loads(self._kube('-n','ax-diagnostics','get','jobs',
+                    '-l','popot.dev/operator-session=' + actor,'-o','json'))['items']
+                if sum(not r.get('status',{}).get('completionTime') and not r.get('status',{}).get('failed') for r in active) >= 2:
+                    raise ValueError('two Holmes investigations are already active; inspect them first')
+                self._kube('apply','--server-side','-f','-',payload={'apiVersion':'v1','kind':'List',
+                    'items':manifests(AX_CONFIG)})
+                self._kube('apply','--server-side','-f','-',payload={'apiVersion':'v1','kind':'Secret',
+                    'metadata':{'name':'holmes-omniroute','namespace':'ax-diagnostics'},'type':'Opaque',
+                    'stringData':{'api-key':os.environ['OMNIROUTE_API_KEY']}})
+                spec = investigation_job(question, os.environ['HOLMES_MODEL'])
+                spec['metadata']['labels'] = {'popot.dev/operator-session': actor,
+                                              'popot.dev/operator-request': label}
+                job = json.loads(self._kube('create','-f','-','-o','json',payload=spec))['metadata']['name']
+        return job
+
     def _holmes(self, params, actor, request_id):
         job = params.get('job')
         if job is None:
-            question = params.get('question', '')
-            if not isinstance(question,str) or not 1 <= len(question.strip()) <= 6000 or not actor or not request_id:
-                raise ValueError('Holmes needs a question and an active operator request')
-            with self.lock:
-                label = hashlib.sha256((actor + request_id).encode()).hexdigest()[:24]
-                existing = json.loads(self._kube('-n','ax-diagnostics','get','jobs',
-                    '-l','popot.dev/operator-request=' + label,'-o','json'))['items']
-                if existing:
-                    job = existing[0]['metadata']['name']
-                else:
-                    active = json.loads(self._kube('-n','ax-diagnostics','get','jobs',
-                        '-l','popot.dev/operator-session=' + actor,'-o','json'))['items']
-                    if sum(not r.get('status',{}).get('completionTime') and not r.get('status',{}).get('failed') for r in active) >= 2:
-                        raise ValueError('two Holmes investigations are already active; inspect them first')
-                    self._kube('apply','--server-side','-f','-',payload={'apiVersion':'v1','kind':'List',
-                        'items':manifests(AX_CONFIG)})
-                    self._kube('apply','--server-side','-f','-',payload={'apiVersion':'v1','kind':'Secret',
-                        'metadata':{'name':'holmes-omniroute','namespace':'ax-diagnostics'},'type':'Opaque',
-                        'stringData':{'api-key':os.environ['OMNIROUTE_API_KEY']}})
-                    spec = investigation_job(question, os.environ['HOLMES_MODEL'])
-                    spec['metadata']['labels'] = {'popot.dev/operator-session': actor,
-                                                  'popot.dev/operator-request': label}
-                    job = json.loads(self._kube('create','-f','-','-o','json',payload=spec))['metadata']['name']
+            job = self._start_holmes(params, actor, request_id)
         if not isinstance(job,str) or not re.fullmatch(r'holmes-ax-[a-z0-9-]{1,50}',job):
             raise ValueError('invalid Holmes job name')
         saved = json.loads(self._kube('-n','ax-diagnostics','get','job',job,'-o','json'))
@@ -253,6 +282,46 @@ class ProjectOperations:
             result['report'] = 'Holmes pod is not ready yet. Poll this job in a later tool call.'
         return result
 
+    def _connect_models(self, source, before, models):
+        # Preserve actual connection IDs without exposing credentials.
+        connections = {t['providerId']: t.get('connectionId') for c in source.values()
+                       for t in c['models'] if t.get('connectionId')}
+        connections.update({t['providerId']:t['connectionId'] for t in before['models'] if t.get('connectionId')})
+        if any(t['providerId'] not in connections for t in models):
+            # Other managed combos already carry the provisioned account IDs.
+            # Never inspect provider credentials to resolve a model target.
+            rows = self._gateway().request('GET',COMBOS_PATH)['combos']
+            connections.update({t['providerId']:t['connectionId'] for c in rows if c['name'] in source
+                                for t in c['models'] if t.get('connectionId')})
+        for target in models:
+            if connections.get(target['providerId']):
+                target['connectionId'] = connections[target['providerId']]
+
+    def _combo_change(self, change):
+        name = change.get('name')
+        source = self._combos()
+        if name not in source:
+            raise ValueError('only managed combos may be changed')
+        models = change.get('models')
+        if not isinstance(models,list) or not models \
+                or any(not isinstance(m,str) or m not in self.catalog for m in models) \
+                or len(models) != len(set(models)):
+            raise ValueError('use a nonempty list of approved models from the managed config')
+        before = self.read_combo(name)
+        after = copy.deepcopy(before)
+        after['models'] = [copy.deepcopy(self.catalog[m]) for m in models]
+        after['strategy'] = 'priority'
+        self._connect_models(source, before, after['models'])
+        return name, before, after, source
+
+    def _deployment_change(self, change):
+        action = change['action']
+        name = change.get('service')
+        current = self._deployment(name)
+        before = current['spec']['template']['spec']['containers'][0].get('resources',{})
+        after = validate_resources(change.get('resources')) if action == 'set_resources' else {'restart':True}
+        return name, before, after, load_monitoring(self.root)
+
     def propose(self, actor, change):
         with self.lock:
             self.plans = {k:v for k,v in self.plans.items() if time.monotonic() < v['expires']}
@@ -261,39 +330,9 @@ class ProjectOperations:
             change = copy.deepcopy(change)
             action = change.get('action')
             if action == 'configure_combo':
-                name = change.get('name')
-                source = self._combos()
-                if name not in source:
-                    raise ValueError('only managed combos may be changed')
-                models = change.get('models')
-                if not isinstance(models,list) or not models \
-                        or any(not isinstance(m,str) or m not in self.catalog for m in models) \
-                        or len(models) != len(set(models)):
-                    raise ValueError('use a nonempty list of approved models from the managed config')
-                before = self.read_combo(name)
-                after = copy.deepcopy(before)
-                after['models'] = [copy.deepcopy(self.catalog[m]) for m in models]
-                after['strategy'] = 'priority'
-                # Preserve actual connection IDs without exposing credentials.
-                connections = {t['providerId']: t.get('connectionId') for c in source.values()
-                               for t in c['models'] if t.get('connectionId')}
-                connections.update({t['providerId']:t['connectionId'] for t in before['models'] if t.get('connectionId')})
-                if any(t['providerId'] not in connections for t in after['models']):
-                    # Other managed combos already carry the provisioned account IDs.
-                    # Never inspect provider credentials to resolve a model target.
-                    rows = self._gateway().request('GET','/api/combos')['combos']
-                    connections.update({t['providerId']:t['connectionId'] for c in rows if c['name'] in source
-                                        for t in c['models'] if t.get('connectionId')})
-                for target in after['models']:
-                    if connections.get(target['providerId']):
-                        target['connectionId'] = connections[target['providerId']]
-                baseline = source
-            elif action in {'set_resources','restart_service'}:
-                name = change.get('service')
-                current = self._deployment(name)
-                before = current['spec']['template']['spec']['containers'][0].get('resources',{})
-                after = validate_resources(change.get('resources')) if action == 'set_resources' else {'restart':True}
-                baseline = load_monitoring(self.root)
+                name, before, after, baseline = self._combo_change(change)
+            elif action in {'set_resources', 'restart_service'}:
+                name, before, after, baseline = self._deployment_change(change)
             else:
                 raise ValueError('supported actions: configure_combo, set_resources, restart_service')
             plan_id = 'change-' + uuid.uuid4().hex[:24]
@@ -302,6 +341,47 @@ class ProjectOperations:
             self.plans[plan_id] = {**result,'actor':actor,'expires':time.monotonic()+900,
                                    'baseline':baseline,'result':None}
             return copy.deepcopy(result)
+
+    def _check_baseline(self, plan):
+        name = plan['target']
+        if plan['action'] == 'configure_combo':
+            if self.read_combo(name) != plan['before'] or self._combos() != plan['baseline']:
+                raise ValueError('configuration changed; request a new plan')
+            return None
+        current = self._deployment(name)
+        if current['spec']['template']['spec']['containers'][0].get('resources', {}) != plan['before'] \
+                or load_monitoring(self.root) != plan['baseline']:
+            raise ValueError('configuration changed; request a new plan')
+        return current
+
+    def _apply_combo(self, name, after):
+        self.write_combo(name, after)
+        config = self._combos()
+        config[name] = copy.deepcopy(after)
+        for target in config[name]['models']:
+            target.pop('connectionId',None)
+        self._save('omniroute/combos.json',config)
+
+    def _apply_deployment(self, plan, current):
+        name, action = plan['target'], plan['action']
+        path = '/spec/template/spec/containers/0/resources'
+        value = plan['after']
+        if action == 'restart_service':
+            path = '/spec/template/metadata/annotations'
+            value = {**current['spec']['template']['metadata'].get('annotations',{}),
+                     'popot.dev/restarted-at':datetime.now(timezone.utc).isoformat()}
+        self._kube('-n','otel-system','patch','deployment',name,'--type=json','-p',json.dumps([
+            {'op':'test','path':'/metadata/resourceVersion','value':current['metadata']['resourceVersion']},
+            {'op':'add','path':path,'value':value}]))
+        if action == 'set_resources':
+            config = load_monitoring(self.root)
+            config.setdefault(name, {})['resources'] = plan['after']
+            self._save('monitoring.json',config)
+        verified = self._deployment(name)
+        actual = (verified['spec']['template']['spec']['containers'][0].get('resources',{})
+                  if action == 'set_resources' else verified['spec']['template']['metadata'].get('annotations',{}))
+        if actual != value:
+            raise RuntimeError('Kubernetes change could not be verified')
 
     def apply(self, actor, plan_id, *, approved, authorize=None):
         with self.lock:
@@ -315,14 +395,7 @@ class ProjectOperations:
             if plan['result'] is not None:
                 return copy.deepcopy(plan['result'])
             name, action = plan['target'], plan['action']
-            if action == 'configure_combo':
-                if self.read_combo(name) != plan['before'] or self._combos() != plan['baseline']:
-                    raise ValueError('configuration changed; request a new plan')
-            else:
-                current = self._deployment(name)
-                if current['spec']['template']['spec']['containers'][0].get('resources',{}) != plan['before'] \
-                        or load_monitoring(self.root) != plan['baseline']:
-                    raise ValueError('configuration changed; request a new plan')
+            current = self._check_baseline(plan)
             if authorize:
                 grant = authorize()
                 if grant.approved_change != plan_id:
@@ -332,31 +405,9 @@ class ProjectOperations:
                               'message':'Inspect current state before proposing another change.'}
             try:
                 if action == 'configure_combo':
-                    self.write_combo(name, plan['after'])
-                    config = self._combos()
-                    config[name] = copy.deepcopy(plan['after'])
-                    for target in config[name]['models']:
-                        target.pop('connectionId',None)
-                    self._save('omniroute/combos.json',config)
+                    self._apply_combo(name, plan['after'])
                 else:
-                    path = '/spec/template/spec/containers/0/resources'
-                    value = plan['after']
-                    if action == 'restart_service':
-                        path = '/spec/template/metadata/annotations'
-                        value = {**current['spec']['template']['metadata'].get('annotations',{}),
-                                 'popot.dev/restarted-at':datetime.now(timezone.utc).isoformat()}
-                    self._kube('-n','otel-system','patch','deployment',name,'--type=json','-p',json.dumps([
-                        {'op':'test','path':'/metadata/resourceVersion','value':current['metadata']['resourceVersion']},
-                        {'op':'add','path':path,'value':value}]))
-                    if action == 'set_resources':
-                        config = load_monitoring(self.root)
-                        config.setdefault(name, {})['resources'] = plan['after']
-                        self._save('monitoring.json',config)
-                    verified = self._deployment(name)
-                    actual = (verified['spec']['template']['spec']['containers'][0].get('resources',{})
-                              if action == 'set_resources' else verified['spec']['template']['metadata'].get('annotations',{}))
-                    if actual != value:
-                        raise RuntimeError('Kubernetes change could not be verified')
+                    self._apply_deployment(plan, current)
                 plan['result'] = {'plan_id':plan_id,'status':'applied','target':name,'after':plan['after'],
                                   'note':'Configuration verified. Check service readiness separately.'}
             except Exception as exc:

@@ -1,4 +1,5 @@
 """Regressions from a review published before its MCP response failed."""
+import asyncio
 import io
 import json
 import os
@@ -301,6 +302,48 @@ class AgentReliabilityTests(unittest.TestCase):
             output = mcp_client.call_tool({}, 'submit_review', {})
         self.assertEqual(output, 'Review submitted: review-123')
         self.assertEqual(calls, ['submit_review'])
+
+    def test_mcp_cleanup_timeout_preserves_success_and_error_receipts(self):
+        for is_error in (False, True):
+            with self.subTest(is_error=is_error):
+                calls, closed = [], []
+                class Client:
+                    def __init__(self, *args): pass
+                    async def __aenter__(self): return self
+                    async def __aexit__(self, *args):
+                        try:
+                            await asyncio.Event().wait()
+                        finally:
+                            closed.append(True)
+                    async def call_tool(self, name, arguments):
+                        calls.append(name)
+                        return SimpleNamespace(is_error=is_error, content=[SimpleNamespace(
+                            type='text', text='Review receipt: review-123')])
+                with patch('mcp.Client', Client), redirect_stderr(io.StringIO()) as logs:
+                    if is_error:
+                        with self.assertRaises(mcp_client.MCPToolError) as caught:
+                            mcp_client.call_tool({}, 'submit_review', {}, timeout_seconds=0.02)
+                        self.assertIs(type(caught.exception), mcp_client.MCPToolError)
+                        self.assertEqual(str(caught.exception), 'MCPToolError: Review receipt: review-123')
+                    else:
+                        output = mcp_client.call_tool({}, 'submit_review', {}, timeout_seconds=0.02)
+                        self.assertEqual(output, 'Review receipt: review-123')
+                self.assertEqual(calls, ['submit_review'])
+                self.assertEqual(closed, [True])
+                self.assertIn('mcp_cleanup_failed', logs.getvalue())
+
+    def test_mcp_timeout_before_receipt_remains_unknown_and_cleans_up(self):
+        closed = []
+        class Client:
+            def __init__(self, *args): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): closed.append(True)
+            async def call_tool(self, name, arguments):
+                await asyncio.Event().wait()
+        with patch('mcp.Client', Client):
+            with self.assertRaisesRegex(mcp_client.MCPTransportError, 'outcome is unknown'):
+                mcp_client.call_tool({}, 'submit_review', {}, timeout_seconds=0.02)
+        self.assertEqual(closed, [True])
 
     def test_transport_failure_returns_to_the_same_agent_for_readback(self):
         body_log, operations, state = [], [], {}

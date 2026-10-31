@@ -17,13 +17,21 @@ class ComposeProvisioningTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('docker'), 'Docker Compose CLI is required')
     def test_gateway_health_and_successful_provision_are_required_before_api(self):
         with tempfile.TemporaryDirectory() as temporary:
-            env_file = Path(temporary) / '.env'
-            env_file.write_text('')
+            project = Path(temporary) / 'project'
+            ax = project / 'ax_local'
+            ax.mkdir(parents=True)
+            for name in ('compose.yaml', 'compose.omniroute.yaml'):
+                shutil.copyfile(SOURCE.parent / name, ax / name)
+            env_file = project / '.env'
+            env_file.write_text('POPOT_DB_PASSWORD=compose-test\n')
             result = subprocess.run([
                 'bash', str(SOURCE.parent.parent / 'compose.sh'), '--env-file', str(env_file),
-                '-f', str(SOURCE.parent / 'compose.yaml'),
-                '-f', str(SOURCE.parent / 'compose.omniroute.yaml'),
+                '-f', str(ax / 'compose.yaml'),
+                '-f', str(ax / 'compose.omniroute.yaml'),
                 '--profile', 'omniroute', 'config', '--format', 'json'],
+                cwd=temporary,
+                env={key: value for key, value in os.environ.items()
+                     if not key.startswith('COMPOSE_')},
                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         services = json.loads(result.stdout)['services']
@@ -33,6 +41,16 @@ class ComposeProvisioningTests(unittest.TestCase):
                          'service_healthy')
         self.assertTrue(all(mount['read_only'] for mount in services['omniroute-init']['volumes']))
         self.assertNotIn('env_file', services['omniroute-init'])
+        self.assertEqual(services['omniroute']['depends_on']['omniroute-tls-init']['condition'],
+                         'service_completed_successfully')
+        self.assertEqual(services['omniroute-init']['environment']['OMNIROUTE_URL'], 'https://omniroute:20128')
+        self.assertEqual(services['omniroute']['environment']['OMNIROUTE_TLS_KEY'], '/run/popot-tls/key.pem')
+        for name in ('api', 'omniroute-init'):
+            trust = next(mount for mount in services[name]['volumes'] if mount['target'] == '/run/popot-tls')
+            self.assertTrue(trust['read_only'])
+            self.assertEqual(trust['volume']['subpath'], 'trust')
+            self.assertEqual(services[name]['environment']['SSL_CERT_FILE'], '/run/popot-tls/ca-bundle.pem')
+        self.assertEqual(services['omniroute']['ports'][0]['host_ip'], '127.0.0.1')
 
 
 class UpScriptTests(unittest.TestCase):
@@ -156,12 +174,15 @@ class UpScriptTests(unittest.TestCase):
 
     def test_operator_prepares_holmes_without_starting_an_investigation(self):
         (self.root / 'config/roles/project_operator.json').write_text(json.dumps({'agent':'omniroute'}))
+        (self.ax / 'omniroute_tls.py').write_text(
+            "import os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==['export']\n"
+            "with Path(os.environ['CALLS']).open('a') as f:f.write('tls-export\\n')\n")
         (self.ax / 'cluster/holmes.py').write_text(
             "import os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==['--prepare']\n"
             "with Path(os.environ['CALLS']).open('a') as f:f.write('holmes-prepare\\n')\n")
         result=self.run_up()
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(self.calls.read_text().splitlines()[-1],'holmes-prepare')
+        self.assertEqual(self.calls.read_text().splitlines()[-2:],['tls-export','holmes-prepare'])
 
     def test_omniroute_roles_select_provisioning_dependency(self):
         result = self.run_up()

@@ -46,13 +46,13 @@ async def _streams(config: dict):
         token = _bearer_token(config)
         if not token:
             raise ValueError(f"required MCP environment variable is missing or not selected: {token_name}")
-        import httpx2 as httpx
+        import httpx2
         from mcp.client.streamable_http import streamable_http_client
 
-        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"},
+        async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"},
                                      follow_redirects=False,
                                      # Outer discovery/tool deadlines still apply.
-                                     timeout=httpx.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
+                                     timeout=httpx2.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
                                          read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client:
             async with streamable_http_client(config["url"], http_client=client) as (read, write):
                 yield read, write
@@ -175,11 +175,12 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
     try:
         async with Client(_streams(config)) as client:
             result = await client.call_tool(native_name, arguments=arguments)
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         if result is None:
             raise
         # A completed RPC must not become an unknown write when closing its
-        # transport fails. Preserve the received result, including is_error.
+        # transport fails or the outer deadline cancels cleanup. Preserve the
+        # received result, including is_error; cancellation before it propagates.
         trace_event('mcp_cleanup_failed', tool=native_name,
                     error=_error_text(config, exc), result_received=True)
     parts = []
@@ -194,7 +195,7 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
         elif kind == "resource_link":
             parts.append(f"Resource link (content not loaded): {item.uri}")
     output = "\n".join(parts) or json.dumps(
-        result.structured_content or {}, ensure_ascii=False)
+        getattr(result, "structured_content", None) or {}, ensure_ascii=False)
     if result.is_error:
         raise MCPToolError(output)
     return preserve_tool_output(output)

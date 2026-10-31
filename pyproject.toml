@@ -2,43 +2,29 @@
 name = "popot-agents"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["psycopg[binary]==3.3.6"]
-
-[project.optional-dependencies]
-ax = ["a2a-sdk[http-server]==1.2.2", "uvicorn==0.54.0"]
-
 [dependency-groups]
+build = ["pip==26.2.2"]
 mcp = ["mcp==2.3.0"]
-ci = ["pytest==9.1.1", "coverage==7.16.2", {include-group = "mcp"}]
 browser = ["playwright==1.64.0"]
 harness2 = [
     "harness2 @ git+https://github.com/google-research/harness2@1cfe254e8d25b15f37048c3730134686abe60335",
 ]
-# Official Fetch/Git servers still require SDK 1.x; install in a separate venv.
-mcp-tools = [
-    "mcp==1.30.0",
-    "mcp-server-fetch==2026.8.18",
-    "mcp-server-git==2026.8.18",
+worker = [
+    {include-group = "mcp"},
+    "mcp-server-fetch==2026.10.19",
+    "mcp-server-git==2026.10.19",
 ]
-
-[tool.popot.build]
-AX_VERSION = "v0.3.1"
-AX_COMMIT = "e70162a34037c221fe6fadefd98308c05a4ad8f3"
-SUBSTRATE_COMMIT = "672533541dbfcd29084e4de2475267088bda3651"
-KO_VERSION = "v0.19.1"
-KUBECTL_VERSION = "v1.35.3"
-OMNIROUTE_VERSION = "3.8.51"
-HOLMES_VERSION = "0.43.0"
-GRAFANA_VERSION = "12.4.11"
-KUBE_STATE_METRICS_VERSION = "v2.19.1"
-COGNEE_VERSION = "main-b32d8af"
-COGNEE_COMMIT = "b32d8afc59e1064d9291b9828a8a147be9cc8bab"
-COGNEE_SOURCE_SHA256 = "167b0866ed0f019bccea5a655544c400845b5d2878af622452189b3bd890860b"
-POSTGRES_VERSION = "17"
-NGINX_VERSION = "1.28-alpine"
-PYTHON_IMAGE = "python:3.12-slim"
-GO_IMAGE = "golang:1.27.1-bookworm"
-NODE_IMAGE = "node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"
+orchestrator = ["psycopg[binary]==3.3.6"]
+ax = ["a2a-sdk[http-server]==1.2.3", "uvicorn==0.54.0"]
+ci = [
+    {include-group = "harness2"},
+    {include-group = "build"},
+    {include-group = "worker"},
+    {include-group = "orchestrator"},
+    {include-group = "ax"},
+    "pytest==9.1.1",
+    "coverage==7.16.2",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "ax_local/tests"]
@@ -60,3 +46,22 @@ output = "reports/coverage.xml"
 
 [tool.coverage.html]
 directory = "reports/coverage-html"
+
+[tool.popot.build]
+AX_VERSION = "v0.3.1"
+AX_COMMIT = "e70162a34037c221fe6fadefd98308c05a4ad8f3"
+SUBSTRATE_COMMIT = "672533541dbfcd29084e4de2475267088bda3651"
+KO_VERSION = "v0.19.1"
+KUBECTL_VERSION = "v1.35.3"
+OMNIROUTE_VERSION = "3.8.51"
+HOLMES_VERSION = "0.43.0"
+GRAFANA_VERSION = "12.4.11"
+KUBE_STATE_METRICS_VERSION = "v2.19.1"
+COGNEE_VERSION = "main-b32d8af"
+COGNEE_COMMIT = "b32d8afc59e1064d9291b9828a8a147be9cc8bab"
+COGNEE_SOURCE_SHA256 = "167b0866ed0f019bccea5a655544c400845b5d2878af622452189b3bd890860b"
+POSTGRES_VERSION = "17"
+NGINX_VERSION = "1.28-alpine"
+PYTHON_IMAGE = "python:3.12-slim"
+GO_IMAGE = "golang:1.27.1-bookworm"
+NODE_IMAGE = "node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"

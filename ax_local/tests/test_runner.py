@@ -13,6 +13,12 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_control_socket_is_outside_the_tool_owned_workspace(self):
+        manifest = self.runner.task_manifest('0123456789abcdef', {'tools': ['bash']})
+        env = {item['name']: item['value'] for item in manifest['spec']['env']}
+        self.assertEqual(env['HARNESS_SOCKET_PATH'], '/run/popot/chat.sock')
+        self.assertEqual(env['POPOT_TOOLS_UID'], '10001')
+
     def test_chunked_restore_uses_one_deadline_and_stops_before_consuming_on_timeout(self):
         payload = {'action': 'restore', 'messages': ['x' * 100000]}
         with patch('ax_local.api.ax_runner.time.monotonic', side_effect=[0, 1, 3, 11]), \

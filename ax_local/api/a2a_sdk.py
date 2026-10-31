@@ -146,30 +146,31 @@ class DelegationBoundary:
         return await self.app(scope, replay, send)
 
 
+def execute_operation(service, token, body):
+    grant = service.authorized_operator(token)
+    if not isinstance(body, dict) or not isinstance(body.get('params', {}), dict):
+        raise ValueError('operator request must contain an object')
+    params = body.get('params', {})
+    method = body.get('method')
+    if method == 'inspect':
+        return service.operations.inspect(params.get('kind'), params.get('parameters', {}),
+            actor=grant.session_id, request_id=str(body.get('request_id', ''))[:200])
+    if method == 'propose_change':
+        return service.operations.propose(grant.session_id, params)
+    if method == 'apply_change':
+        return service.operations.apply(grant.session_id, params.get('plan_id'),
+            approved=grant.approved_change, authorize=lambda: service.authorized_operator(token))
+    raise ValueError('unknown operator method')
+
+
 def create_a2a_app(service):
     async def operations(call):
         from .project_operator import safe_result
         authorization = call.headers.get('authorization', '')
         token = authorization[7:] if authorization.startswith('Bearer ') else ''
 
-        def execute(body):
-            grant = service.authorized_operator(token)
-            if not isinstance(body, dict) or not isinstance(body.get('params', {}), dict):
-                raise ValueError('operator request must contain an object')
-            params = body.get('params', {})
-            method = body.get('method')
-            if method == 'inspect':
-                return service.operations.inspect(params.get('kind'), params.get('parameters', {}),
-                    actor=grant.session_id, request_id=str(body.get('request_id', ''))[:200])
-            if method == 'propose_change':
-                return service.operations.propose(grant.session_id, params)
-            if method == 'apply_change':
-                return service.operations.apply(grant.session_id, params.get('plan_id'),
-                    approved=grant.approved_change, authorize=lambda: service.authorized_operator(token))
-            raise ValueError('unknown operator method')
-
         try:
-            result = safe_result(await asyncio.to_thread(execute, await call.json()))
+            result = safe_result(await asyncio.to_thread(execute_operation, service, token, await call.json()))
             encoded = json.dumps(result, ensure_ascii=False)
             if len(encoded) > RUNTIME['limits']['tool_output_chars']:
                 result = {'truncated':True,'preview':encoded[:RUNTIME['limits']['tool_output_chars']-300],
