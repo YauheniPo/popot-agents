@@ -12,6 +12,7 @@ DEFAULT_PATH = Path(__file__).resolve().parents[1] / "config" / "runtime.json"
 FIELDS = {
     "sessions": {"default_idle_seconds", "retention_days", "prune_interval_seconds"},
     "timeouts": {"model_request_seconds", "mcp_discovery_seconds", "mcp_tool_seconds",
+                 "mcp_http_seconds", "mcp_sse_read_seconds",
                  "mcp_upstream_seconds", "tool_command_seconds", "git_clone_seconds",
                  "file_action_seconds", "file_download_seconds", "postgres_connect_seconds",
                  "turn_seconds", "max_turn_seconds", "min_turn_seconds", "turn_response_margin_seconds",
@@ -19,6 +20,7 @@ FIELDS = {
                  "memory_session_finish_seconds", "memory_summary_seconds",
                  "memory_capture_min_seconds", "memory_capture_margin_seconds", "memory_recall_min_seconds", "memory_tool_request_seconds",
                  "memory_skill_import_seconds"},
+    "mcp": {"discovery_attempts", "discovery_backoff_seconds"},
     "limits": {"request_bytes", "message_chars", "history_bytes", "socket_message_bytes", "tool_output_chars",
                "write_file_bytes", "download_bytes", "skill_prompt_bytes"},
     "logging": {"mcp_body_max_bytes"},
@@ -73,7 +75,7 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
     with config_path.open(encoding="utf-8") as file:
         settings = json.load(file)
     if not isinstance(settings, dict) or set(settings) != set(FIELDS) | {"role_env_names"}:
-        raise ValueError("runtime config must define sessions, timeouts, limits, logging, model, memory and role_env_names")
+        raise ValueError("runtime config must define sessions, timeouts, mcp, limits, logging, model, memory and role_env_names")
     try:
         validate_role_env_names(settings["role_env_names"])
     except ValueError as exc:
@@ -98,7 +100,7 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
                 valid = True
             elif field in {"timeouts.turn_seconds", "timeouts.max_turn_seconds", "timeouts.turn_response_margin_seconds"}:
                 valid = type(value) is int and value > 0
-            elif section == "timeouts":
+            elif section == "timeouts" or field == "mcp.discovery_backoff_seconds":
                 valid = type(value) in (int, float) and math.isfinite(value) and value > 0
             else:
                 valid = type(value) is int and value > 0

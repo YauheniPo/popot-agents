@@ -27,6 +27,7 @@ class OmniRouteTests(unittest.TestCase):
             'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
             'OPENROUTER_MODEL': 'direct-provider-model',
             'OPENROUTER_API_KEY': 'direct-provider-key',
+            'OLLAMA_CLOUD_MODEL': 'deepseek-v4.1-flash:1017', 'OLLAMA_API_KEY': 'test-ollama-key',
         }
         with patch.dict(os.environ, environment, clear=True), \
              patch('ax_local.api.server.create_server') as create:
@@ -35,8 +36,7 @@ class OmniRouteTests(unittest.TestCase):
             self.addCleanup(configured_runner.shutdown_worker_queue)
         runner = create.call_args.args[0]['omniroute']
         self.assertEqual(create.call_args.kwargs['roles']['analyst']['agent'], 'omniroute')
-        for name in ('backend_engineer', 'frontend_engineer', 'code_reviewer'):
-            self.assertEqual(create.call_args.kwargs['roles'][name]['agent'], 'omniroute_code')
+        self.assertEqual(create.call_args.kwargs['roles']['frontend_engineer']['agent'], 'omniroute_code')
         self.assertEqual(create.call_args.args[0]['omniroute_code'].model, 'ax-code-free')
         proxy = start_proxy(server.provider_routes, host='127.0.0.1', port=0)
         self.addCleanup(proxy.server_close)

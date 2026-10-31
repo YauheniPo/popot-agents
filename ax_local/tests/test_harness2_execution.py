@@ -54,6 +54,17 @@ class Harness2ExecutionTests(unittest.TestCase):
         self.assertEqual(self.service.worker_environment(probe.session_id, probe.config), {})
         self.assertEqual(self.roles['backend_engineer']['allowed_roles'], ['qa_engineer', 'tech_lead'])
 
+    def test_partial_probe_does_not_retain_a_sandbox_or_allow_continuation(self):
+        self.runner.callback = lambda *_: {'answer': 'Probe incomplete', 'outcome': {'status': 'partial'}}
+        with self.service.turn(self.actor, 5):
+            task = self.probe()
+            result = self.wait_task(task['id'], token=self.environment['AX_HARNESS2_TOKEN'],
+                                    role='backend_engineer')
+        self.assertEqual(result['metadata']['outcome']['status'], 'partial')
+        self.assertFalse(result['metadata']['resumable'])
+        self.assertTrue(self.runner.chats[-1].closed)
+        self.assertNotIn(task['id'], self.service.retained)
+
     def test_probe_retries_are_deduplicated_and_four_probe_limit_is_independent_of_delegation(self):
         with self.service.turn(self.actor, 5):
             first = self.probe()

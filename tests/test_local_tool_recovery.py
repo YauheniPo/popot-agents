@@ -61,10 +61,12 @@ class LocalToolRecoveryTests(unittest.TestCase):
             self.assertIsNone(re.fullmatch(pattern, value))
 
     def test_repeated_invalid_arguments_exhaust_round_budget(self):
-        with self.assertRaisesRegex(RuntimeError, 'tool-call limit'):
-            self.run_turn(['../repo', '../repo'], rounds=2)
+        answer = self.run_turn(['../repo', '../repo'], rounds=2)
+        self.assertIn('Partial result', answer)
         self.command.assert_not_called()
-        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(self.requests[-1]['tool_choice'], 'none')
+        self.assertNotIn('tools', self.requests[-1])
 
     def test_disallowed_tool_never_executes_and_model_receives_the_rejection(self):
         self.assertEqual(self.run_turn(['repo'], allowed=[]), 'done')

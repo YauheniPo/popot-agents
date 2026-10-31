@@ -12,6 +12,25 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class WorkerDelegationTests(unittest.TestCase):
+    def test_continuation_sends_native_task_id_and_preserves_partial_outcome(self):
+        session = '0123456789abcdef'
+        tools = make_tools({'AX_DELEGATION_URL': 'http://api:8005',
+                            'AX_DELEGATION_TOKEN': 'test-capability',
+                            'AX_DELEGATION_ROLES': '["code_reviewer"]'})
+        task = {'id': session, 'contextId': 'parent', 'status': {'state': 'TASK_STATE_COMPLETED'},
+                'metadata': {'outcome': {'status': 'partial', 'reason': 'work_budget_exhausted'},
+                             'resumable': True},
+                'artifacts': [{'artifactId': 'answer', 'parts': [{'text': 'Remaining checks'}]}]}
+        response = httpx.Response(200, json={'jsonrpc': '2.0', 'id': 1, 'result': {'task': task}})
+        with patch('httpx.AsyncHTTPTransport.handle_async_request', return_value=response) as send:
+            result = json.loads(tools['delegate_task']['call'](
+                {'role': 'code_reviewer', 'session_id': session, 'task': 'Continue checks'},
+                timeout_seconds=5, call_id='continue'))
+        self.assertEqual(json.loads(send.call_args.args[0].content)['params']['message']['taskId'], session)
+        self.assertEqual(result['outcome']['status'], 'partial')
+        self.assertTrue(result['resumable'])
+        self.assertEqual(result['answer'], 'Remaining checks')
+
     def test_tool_explains_each_allowed_specialist_and_handoff(self):
         tools = make_tools({"AX_DELEGATION_URL": "http://api:8005",
                             "AX_DELEGATION_TOKEN": "private-token",
@@ -40,7 +59,7 @@ class WorkerDelegationTests(unittest.TestCase):
                 "metadata": {"failure": failure}}
         response = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
                                              "result": {"task": task}})
-        with patch("httpx.AsyncHTTPTransport.handle_async_request", return_value=response):
+        with patch("httpx.AsyncHTTPTransport.handle_async_request", return_value=response) as send:
             result = json.loads(tools["delegate_task"]["call"](
                 {"role": "backend_engineer", "task": "delegate onward"},
                 timeout_seconds=5, call_id="call-1"))
@@ -49,6 +68,9 @@ class WorkerDelegationTests(unittest.TestCase):
         self.assertEqual(result["error"], "MCP server fetch failed during discovery")
         self.assertEqual(result["failure"], failure)
         self.assertTrue(result['isError'])
+        metadata = json.loads(send.call_args.args[0].content)['params']['message']['metadata']
+        self.assertGreater(metadata.get('timeout_seconds', 0), 0)
+        self.assertLessEqual(metadata['timeout_seconds'], 5)
 
     def test_empty_or_truncated_completed_task_is_reported_as_incomplete(self):
         tools = make_tools({'AX_DELEGATION_URL': 'http://api:8005',

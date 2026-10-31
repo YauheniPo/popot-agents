@@ -32,12 +32,23 @@ def main() -> None:
     action = sys.argv[1]
     arguments = json.load(sys.stdin)
     path = workspace_path(arguments["path"])
-    if action == "read":
+    if action == 'read_tool_output' and ((WORKSPACE_ROOT / '.tool-results').is_symlink()
+            or (WORKSPACE_ROOT / arguments['path']).is_symlink()):
+        raise ValueError('saved tool output must not be a symlink')
+    if action in {"read", "read_tool_output"}:
+        offset, limit = arguments.get('offset', 0), arguments.get('limit', MAX_TOOL_OUTPUT)
         with path.open(encoding="utf-8") as file:
-            content = file.read(MAX_TOOL_OUTPUT + 1)
-        sys.stdout.write(content[:MAX_TOOL_OUTPUT])
-        if len(content) > MAX_TOOL_OUTPUT:
-            sys.stdout.write("\n[output truncated]")
+            remaining = offset
+            while remaining:
+                skipped = file.read(min(remaining, 65536))
+                if not skipped:
+                    break
+                remaining -= len(skipped)
+            content = file.read(limit + 1)
+        sys.stdout.write(content[:limit])
+        if len(content) > limit:
+            reader = 'read_tool_output' if action == 'read_tool_output' else 'read_file'
+            sys.stdout.write(f"\n[output truncated; continue with {reader} offset={offset + limit} limit={limit}]")
     elif action == "write":
         _atomic_write(path, arguments["content"].encode("utf-8"))
         sys.stdout.write(f"wrote {path.relative_to(WORKSPACE_ROOT.resolve())}")

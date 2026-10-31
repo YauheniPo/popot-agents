@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -62,8 +63,10 @@ def _tool(name, description, properties, required):
 TOOL_SCHEMAS.update({
     "bash": _tool("bash", "Run a bash command in the writable workspace and return output and exit code.",
                   {"command": {"type": "string"}}, ["command"]),
-    "read_file": _tool("read_file", "Read a UTF-8 file inside the workspace.",
-                       {"path": {"type": "string"}}, ["path"]),
+    "read_file": _tool("read_file", "Read a UTF-8 file in pages; offset counts characters from zero.",
+                       {"path": {"type": "string"},
+                        "offset": {"type": "integer", "minimum": 0},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": MAX_TOOL_OUTPUT}}, ["path"]),
     "write_file": _tool("write_file", "Write a UTF-8 file inside the workspace, creating parent directories.",
                         {"path": {"type": "string"}, "content": {"type": "string"}},
                         ["path", "content"]),
@@ -82,6 +85,11 @@ TOOL_SCHEMAS.update({
                            ["url", "path"]),
 })
 
+TOOL_SCHEMAS['read_tool_output'] = _tool(
+    'read_tool_output', 'Read a saved .tool-results output in pages; offset counts characters from zero.',
+    TOOL_SCHEMAS['read_file']['function']['parameters']['properties'], ['path'])
+
+
 _BINARY = {ast.Add: operator.add, ast.Sub: operator.sub,
            ast.Mult: operator.mul, ast.Div: operator.truediv}
 _UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
@@ -94,7 +102,11 @@ def safe_tool_env() -> dict[str, str]:
              if key in {"PATH", "LANG", "LC_ALL", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR",
                         "PLAYWRIGHT_BROWSERS_PATH"}
              or key in names}
-            | {"HOME": str(WORKSPACE_ROOT), "GIT_TERMINAL_PROMPT": "0"})
+            | {"HOME": str(WORKSPACE_ROOT), "GIT_TERMINAL_PROMPT": "0",
+               "NPM_CONFIG_PREFIX": str(WORKSPACE_ROOT / '.local'),
+               "PATH": os.pathsep.join(dict.fromkeys([
+                   *os.environ.get('PATH', os.defpath).split(os.pathsep),
+                   str(WORKSPACE_ROOT / '.local' / 'bin')]))})
 
 
 def workspace_path(path: str) -> Path:
@@ -154,6 +166,16 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
     return completed.stdout
 
 
+def preserve_tool_output(output: str) -> str:
+    """Keep large MCP results in the sandbox instead of losing their tail."""
+    if len(output) <= MAX_TOOL_OUTPUT:
+        return output
+    path = f".tool-results/{uuid.uuid4().hex}.txt"
+    _file_action('write', {'path': path, 'content': output})
+    return (output[:MAX_TOOL_OUTPUT] + f"\n[preview truncated; total_chars={len(output)}]"
+            f"\nFull output: {path}\nRead with read_tool_output path={path} offset={MAX_TOOL_OUTPUT} limit={MAX_TOOL_OUTPUT}.")
+
+
 def _evaluate(node):
     if isinstance(node, ast.Constant) and type(node.value) in {int, float}:
         value = node.value
@@ -181,11 +203,22 @@ def execute_tool(name: str, arguments: dict, allowed: list[str],
         timeout = RUNTIME["timeouts"]["tool_command_seconds"]
         return _run_command(["bash", "--noprofile", "--norc", "-c", arguments["command"]],
                             timeout=min(timeout, timeout_seconds) if timeout_seconds is not None else timeout)
-    if name == "read_file":
-        if set(arguments) != {"path"}:
-            raise ToolInputError("read_file requires path")
-        workspace_path(arguments["path"])
-        return _file_action("read", arguments, timeout_seconds)
+    if name in {"read_file", "read_tool_output"}:
+        if name == 'read_tool_output' and (not isinstance(arguments.get('path'), str)
+                or not re.fullmatch(r'\.tool-results/[a-f0-9]{32}\.txt', arguments['path'])):
+            raise ToolInputError('read_tool_output requires a saved .tool-results output path')
+        if 'path' not in arguments or set(arguments) - {'path', 'offset', 'limit'}:
+            raise ToolInputError("read_file requires path and optional offset/limit")
+        if type(arguments.get('offset', 0)) is not int or arguments.get('offset', 0) < 0:
+            raise ToolInputError("read_file offset must be a non-negative integer")
+        limit = arguments.get('limit', MAX_TOOL_OUTPUT)
+        if type(limit) is not int or not 1 <= limit <= MAX_TOOL_OUTPUT:
+            raise ToolInputError(f"read_file limit must be between 1 and {MAX_TOOL_OUTPUT}")
+        # Private artifacts belong to UID 10001; inspect them in the file worker.
+        if name == 'read_file':
+            workspace_path(arguments["path"])
+        return _file_action('read_tool_output' if name == 'read_tool_output' else 'read',
+                            arguments, timeout_seconds)
     if name == "write_file":
         if set(arguments) != {"path", "content"} or not isinstance(arguments["content"], str) \
                 or len(arguments["content"].encode("utf-8")) > RUNTIME["limits"]["write_file_bytes"]:

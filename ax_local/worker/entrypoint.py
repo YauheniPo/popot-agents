@@ -51,15 +51,18 @@ def main() -> None:
         root_mode = os.stat("/").st_mode & 0o7777
         if root_mode & 0o111 != 0o111:
             os.chmod("/", root_mode | 0o111)
-        # Pin the mount rather than following a replacement path or symlink.
-        descriptor = os.open("/workspace", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            tool_user = os.getenv("POPOT_TOOLS_UID") == "10001"
-            os.fchmod(descriptor, 0o700)
-            if tool_user:
-                os.fchown(descriptor, 10001, 10001)
-        finally:
-            os.close(descriptor)
+        # AX creates /dev/shm as root:0755. All tools share UID 10001, so
+        # their POSIX semaphores need no access from other unprivileged users.
+        # Pin each directory rather than following a replacement or symlink.
+        tool_user = os.getenv("POPOT_TOOLS_UID") == "10001"
+        for path in ("/workspace", "/dev/shm"):
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fchmod(descriptor, 0o700)
+                if tool_user:
+                    os.fchown(descriptor, 10001, 10001)
+            finally:
+                os.close(descriptor)
     prepare_socket(SOCKET_PATH)
     tools = make_tools()
     tools.update(make_project_tools())

@@ -79,7 +79,8 @@ def make_server():
         runners[name] = AxAgentRunner(
             image=image, model=selected.model, base_url=os.environ['AX_LOCAL_BASE_URL'],
             context=AX_CONFIG['context'], proxy_token=token,
-            model_parameters=profile.get('model_parameters'), worker_queue=queue)
+            model_parameters=profile.get('model_parameters'), worker_queue=queue,
+            upstream_host=urlsplit(selected.base_url).hostname)
     configure_harness2(roles, profiles, runners, routes)
     policy = AX_CONFIG["delegation"]
     for name, config in roles.items():

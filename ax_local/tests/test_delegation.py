@@ -25,13 +25,20 @@ class FakeChat:
     def __init__(self, runner, session_id, config):
         self.runner, self.session_id, self.config = runner, session_id, config
         self.closed = False
+        self.suspended = False
+        self.files = {}
 
     def send(self, task, *, timeout_seconds=None):
         with self.runner.delegation.turn(self.session_id, timeout_seconds):
             self.runner.entered.set()
             if self.runner.callback:
-                self.runner.callback(self, task)
+                result = self.runner.callback(self, task)
+                if isinstance(result, dict):
+                    return result
             return {"answer": "child result: " + task}
+
+    def after_turn(self):
+        self.suspended = True
 
     def close(self):
         self.closed = True
@@ -56,6 +63,118 @@ class FakeRunner:
 
 
 class DelegationTests(unittest.TestCase):
+    def test_partial_child_resumes_same_sandbox_and_preserves_transcript(self):
+        def callback(chat, task):
+            if task == 'implement':
+                chat.files['work.txt'] = 'verified state'
+                return {'answer': 'Tests remain to run',
+                        'outcome': {'status': 'partial', 'reason': 'work_budget_exhausted'}}
+            self.assertEqual(chat.files['work.txt'], 'verified state')
+            return {'answer': 'Checks passed', 'outcome': {'status': 'completed'}}
+        self.runner.callback = callback
+        with self.service.turn(self.parent, 5):
+            first = self.wait_task(self.send()['id'])
+            self.assertEqual(first['metadata']['outcome']['status'], 'partial')
+            self.assertTrue(first['metadata']['resumable'])
+            self.assertTrue(self.runner.chats[0].suspended)
+            self.assertFalse(self.runner.chats[0].closed)
+            params = {'message': {'messageId': 'continue-1', 'role': 'ROLE_USER',
+                                  'taskId': first['id'], 'parts': [{'text': 'Run the remaining checks'}]}}
+            resumed = self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)['task']
+            self.assertEqual(resumed['id'], first['id'])
+            result = self.wait_task(first['id'])
+            duplicate = self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)['task']
+            self.assertEqual(duplicate['id'], first['id'])
+            self.assertEqual(self.service.grants[self.parent].run.calls, 2)
+        self.assertEqual(result['metadata']['outcome']['status'], 'completed')
+        self.assertEqual(len(self.runner.chats), 1)
+        self.assertEqual(len(self.store.get(first['id'])['messages']), 4)
+        self.assertTrue(self.runner.chats[0].closed)
+
+    def test_continuation_enforces_parent_role_call_limit_and_missing_checkpoint(self):
+        self.runner.callback = lambda *_: {'answer': 'Incomplete', 'outcome': {'status': 'partial'}}
+        with self.service.turn(self.parent, 5):
+            first = self.wait_task(self.send()['id'])
+            params = {'message': {'messageId': 'continue', 'role': 'ROLE_USER',
+                                  'taskId': first['id'], 'parts': [{'text': 'Continue'}]}}
+            other = '1111111111111111'
+            env = self.service.worker_environment(other, self.roles['tech_lead'])
+            with self.service.turn(other, 5), self.assertRaisesRegex(A2AError, 'not found'):
+                self.service.dispatch(env['AX_DELEGATION_TOKEN'], 'backend_engineer', 'SendMessage', params)
+            self.roles['tech_lead']['allowed_roles'].append('qa_engineer')
+            with self.assertRaisesRegex(A2AError, 'not found'):
+                self.service.dispatch(self.token, 'qa_engineer', 'SendMessage', params)
+            with patch.dict(self.policy, {'max_calls_per_turn': 1}), self.assertRaisesRegex(A2AError, 'call limit'):
+                self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)
+            chat, touched = self.service.retained.pop(first['id'])
+            with self.assertRaisesRegex(A2AError, 'empty replacement'):
+                self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)
+            chat.close()
+        self.assertEqual(len(self.runner.chats), 1)
+
+    def test_concurrent_continuation_has_one_execution_and_duplicate_is_idempotent(self):
+        entered, finish = threading.Event(), threading.Event()
+        self.addCleanup(finish.set)
+        def callback(chat, task):
+            if task != 'implement':
+                entered.set()
+                finish.wait(2)
+            return {'answer': 'Incomplete', 'outcome': {'status': 'partial'}}
+        self.runner.callback = callback
+        with self.service.turn(self.parent, 5):
+            first = self.wait_task(self.send()['id'])
+            params = {'message': {'messageId': 'continue-1', 'role': 'ROLE_USER',
+                                  'taskId': first['id'], 'parts': [{'text': 'Continue'}]}}
+            self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)
+            self.assertTrue(entered.wait(1))
+            duplicate = self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)['task']
+            self.assertEqual(duplicate['id'], first['id'])
+            params['message']['messageId'] = 'continue-2'
+            with self.assertRaisesRegex(A2AError, 'already active'):
+                self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)
+            self.assertEqual(self.service.grants[self.parent].run.calls, 2)
+            finish.set()
+            self.wait_task(first['id'])
+        self.assertEqual(len(self.runner.chats), 1)
+
+    def test_native_sdk_continuation_reuses_child_session(self):
+        from ax_local.worker.delegation import make_tools
+        self.runner.callback = lambda chat, task: {
+            'answer': task, 'outcome': {'status': 'partial' if task == 'start' else 'completed'}}
+        server = start_a2a_server(self.service, '127.0.0.1', 0)
+        self.addCleanup(server.server_close)
+        env = self.service.worker_environment(self.parent, self.roles['tech_lead'])
+        env['AX_DELEGATION_POLL_SECONDS'] = '0.01'
+        tool = make_tools(env)['delegate_task']['call']
+        with self.service.turn(self.parent, 5):
+            first = json.loads(tool({'role': 'backend_engineer', 'task': 'start'},
+                                    timeout_seconds=3, call_id='start'))
+            self.assertEqual(first['outcome']['status'], 'partial')
+            second = json.loads(tool({'role': 'backend_engineer', 'session_id': first['sessionId'],
+                                      'task': 'finish'}, timeout_seconds=3, call_id='continue'))
+        self.assertEqual(second.get('outcome', {}).get('status'), 'completed', second)
+        self.assertEqual(second['sessionId'], first['sessionId'])
+        self.assertEqual(len(self.runner.chats), 1)
+
+    def test_parent_can_continue_child_in_a_later_turn_until_checkpoint_expires(self):
+        self.runner.callback = lambda *_: {'answer': 'Incomplete', 'outcome': {'status': 'partial'}}
+        with self.service.turn(self.parent, 5):
+            first = self.wait_task(self.send()['id'])
+        with self.service.turn(self.parent, 5):
+            params = {'message': {'messageId': 'later-turn', 'role': 'ROLE_USER',
+                                  'taskId': first['id'], 'parts': [{'text': 'Continue'}]}}
+            self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)
+            self.assertTrue(self.wait_task(first['id'])['metadata']['resumable'])
+            chat, _ = self.service.retained[first['id']]
+            self.service.retained[first['id']] = (chat, time.monotonic() - 10000)
+            self.service.maintenance()
+            self.assertTrue(chat.closed)
+            self.assertFalse(self.wait_task(first['id'])['metadata']['resumable'])
+            params['message']['messageId'] = 'expired-turn'
+            with self.assertRaisesRegex(A2AError, 'empty replacement'):
+                self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', params)
+        self.assertEqual(len(self.runner.chats), 1)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -104,6 +223,33 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(saved["messages"][-1]["content"], "child result: implement")
         self.assertTrue(self.runner.chats[0].closed)
         self.assertNotIn(self.token, str(saved))
+
+    def test_child_deadline_uses_call_budget_and_cannot_extend_parent_deadline(self):
+        remaining = []
+        self.runner.callback = lambda chat, _: remaining.append(
+            self.service.grants[chat.session_id].deadline - time.monotonic())
+        with self.service.turn(self.parent, 50):
+            for index, budget in enumerate((2, 500)):
+                task = self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', {
+                    'message': {'messageId': f'budget-{index}', 'role': 'ROLE_USER',
+                                'parts': [{'text': 'review'}], 'metadata': {'timeout_seconds': budget}},
+                    'configuration': {'returnImmediately': True},
+                })['task']
+                self.assertEqual(self.wait_task(task['id'])['status']['state'], 'TASK_STATE_COMPLETED')
+        self.assertGreater(remaining[0], 0)
+        self.assertLessEqual(remaining[0], 2)
+        self.assertLessEqual(remaining[1], 50)
+
+    def test_invalid_call_budget_does_not_start_a_child(self):
+        with self.service.turn(self.parent, 50):
+            for budget in (0, -1, True, '2', float('nan'), float('inf')):
+                with self.subTest(budget=budget), self.assertRaisesRegex(A2AError, 'timeout_seconds'):
+                    self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', {
+                        'message': {'messageId': 'bad-budget', 'role': 'ROLE_USER',
+                                    'parts': [{'text': 'review'}], 'metadata': {'timeout_seconds': budget}},
+                        'configuration': {'returnImmediately': True},
+                    })
+        self.assertFalse(self.runner.chats)
 
     def test_child_uses_its_role_profile_instead_of_the_parent_provider(self):
         child_runner = FakeRunner()

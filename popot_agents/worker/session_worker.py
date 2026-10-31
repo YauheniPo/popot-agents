@@ -27,7 +27,7 @@ class Conversation:
         self.answer = answer
         self.messages = []
 
-    def ask(self, message: str) -> str:
+    def ask(self, message: str, *, timeout_seconds: float | None = None) -> str:
         if not isinstance(message, str) or not message.strip() \
                 or len(message) > RUNTIME["limits"]["message_chars"]:
             raise ValueError(f"message must be a nonempty string up to {RUNTIME['limits']['message_chars']} characters")
@@ -38,7 +38,8 @@ class Conversation:
         started_at = time.monotonic()
         _trace("turn_started", turn=turn)
         try:
-            answer = self.answer(candidate)
+            answer = (self.answer(candidate) if timeout_seconds is None else
+                      self.answer(candidate, timeout_seconds=timeout_seconds))
             if not isinstance(answer, str) or not answer.strip():
                 raise RuntimeError("harness returned an empty answer")
             completed = candidate + [{"role": "assistant", "content": answer}]
@@ -66,7 +67,8 @@ class Conversation:
         self.messages = [dict(item) for item in messages]
 
 
-def answer_with_cli(messages: list[dict[str, str]], instructions: str = "") -> str:
+def answer_with_cli(messages: list[dict[str, str]], instructions: str = "", *,
+                    timeout_seconds: float | None = None) -> str:
     if len(messages) == 1:
         prompt = messages[0]["content"]
     else:
@@ -75,15 +77,18 @@ def answer_with_cli(messages: list[dict[str, str]], instructions: str = "") -> s
         ) + "\n\nAssistant:"
     if instructions:
         prompt = f"Instructions: {instructions}\n\n{prompt}"
-    return run_harness(prompt)
+    return (run_harness(prompt) if timeout_seconds is None else
+            run_harness(prompt, timeout_seconds=timeout_seconds))
 
 
 def serve(*, extra_tools: dict | None = None) -> None:
     role_config = prepare_role_config(json.loads(os.getenv("HARNESS_ROLE_JSON", "{}")))
+    harness_state = {}
     if os.getenv("HARNESS_SESSION_MODE") == "http":
-        answer = lambda messages: run_http(messages, role_config, extra_tools=extra_tools)
+        answer = lambda messages, **options: run_http(messages, role_config, extra_tools=extra_tools,
+                                                      state=harness_state, **options)
     else:
-        answer = lambda messages: answer_with_cli(messages, role_config.get("instructions", ""))
+        answer = lambda messages, **options: answer_with_cli(messages, role_config.get("instructions", ""), **options)
     conversation = Conversation(answer)
 
     class Handler(socketserver.StreamRequestHandler):
@@ -102,9 +107,20 @@ def serve(*, extra_tools: dict | None = None) -> None:
                         except OSError:
                             pass  # A disconnected observer must not stop agent work.
                     with observe_progress(notify if payload.get('progress') is True else None):
-                        result = {"answer": conversation.ask(payload.get("message"))}
+                        result = {"answer": conversation.ask(payload.get("message"),
+                                  timeout_seconds=payload.get('timeout_seconds'))}
+                        if payload.get('result_details') is True:
+                            result['outcome'] = harness_state.get('outcome', {
+                                'status': 'completed', 'reason': 'answer_returned'})
+                            if result['outcome']['status'] in {'partial', 'blocked', 'failed'}:
+                                result['checkpoint'] = harness_state
                 elif payload.get("action") == "restore":
+                    checkpoint = payload.get('checkpoint', {})
+                    if not isinstance(checkpoint, dict) or len(json.dumps(checkpoint, ensure_ascii=False).encode()) > MAX_HISTORY_BYTES:
+                        raise ValueError('invalid harness checkpoint')
                     conversation.restore(payload.get("messages"))
+                    harness_state.clear()
+                    harness_state.update(checkpoint)
                     _trace("session_restored", turns=len(conversation.messages) // 2)
                     result = {"status": "ok"}
                 else:

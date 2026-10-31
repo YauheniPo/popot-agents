@@ -92,8 +92,9 @@ class UpScriptTests(unittest.TestCase):
             "raise SystemExit(int(os.environ.get('DEPLOYMENT_CLEANUP_FAIL', '0')))\n")
         (cluster / 'resource_monitoring.py').write_text(
             "import os, sys\nfrom pathlib import Path\n"
-            "assert sys.argv[1:] == ['install']\n"
-            "with Path(os.environ['CALLS']).open('a') as f: f.write('resource-monitoring\\n')\n"
+            "assert sys.argv[1:] in (['install'], ['ensure-forward'])\n"
+            "event = 'resource-monitoring' if sys.argv[1] == 'install' else 'grafana-forward-check'\n"
+            "with Path(os.environ['CALLS']).open('a') as f: f.write(event + '\\n')\n"
             "raise SystemExit(int(os.environ.get('MONITORING_FAIL', '0')))\n")
         (self.root / "ax_local/config.json").write_text(
             json.dumps({"context": "kind-popot-ax", "route_timeout_seconds": 330}), encoding="utf-8")
@@ -256,9 +257,16 @@ class UpScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text().splitlines()
         self.assertIn("worker-health", calls)
-        self.assertIn("up --build --force-recreate -d --wait --wait-timeout 300 mcp-server", calls[-3])
-        self.assertIn('compose.omniroute.yaml --profile omniroute', calls[-3])
-        self.assertEqual(calls[-2:], ['deployment-cleanup', 'resource-monitoring'])
+        self.assertIn("up --build --force-recreate -d --wait --wait-timeout 300 api mcp-server", calls[-4])
+        self.assertIn('compose.omniroute.yaml --profile omniroute', calls[-4])
+        self.assertEqual(calls[-3:], ['grafana-forward-check', 'deployment-cleanup', 'resource-monitoring'])
+        self.calls.write_text("")
+        self.env["MONITORING_FAIL"] = "1"
+        result = subprocess.run(["bash", str(self.ax / "rebuild-worker.sh")], env=self.env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls.read_text().splitlines()[-1], 'grafana-forward-check')
+        self.env.pop("MONITORING_FAIL")
         self.calls.write_text("")
         self.env["HEALTH_FAIL"] = "1"
         result = subprocess.run(["bash", str(self.ax / "rebuild-worker.sh")], env=self.env,

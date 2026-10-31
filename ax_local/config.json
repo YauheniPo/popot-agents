@@ -23,7 +23,7 @@
   "restore_timeout_seconds": 30,
   "response_margin_seconds": 10,
   "delete_timeout_seconds": 5,
-  "suspend_retention_seconds": 7200,
+  "suspend_retention_seconds": 86400,
   "snapshot_mode": "data",
   "max_workers": 10,
   "worker_queue_timeout_seconds": 3600,
@@ -38,7 +38,7 @@
   "proxy": {
     "port": 8004,
     "response_margin_seconds": 5,
-    "max_request_bytes": 2097152,
+    "max_request_bytes": 8388608,
     "max_response_bytes": 4194304
   }
 }

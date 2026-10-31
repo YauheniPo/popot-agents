@@ -16,6 +16,170 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_capture_keeps_model_parameters_and_waits_within_the_turn_deadline(self):
+        parameters = {'reasoning': {'enabled': False}, 'chat_template_kwargs': {'enable_thinking': False},
+                      'max_tokens': 8192}
+        for turn_seconds, expected_timeout in ((180, 120), (60, 55)):
+            with self.subTest(turn_seconds=turn_seconds):
+                client = Mock()
+                client.recall.return_value = []
+                bodies, timeouts = [], []
+                def respond(call, *, timeout):
+                    bodies.append(json.loads(call.data))
+                    timeouts.append(timeout)
+                    if len(bodies) == 1:
+                        content = 'Review remains incomplete'
+                    else:
+                        if timeout < 40:
+                            raise TimeoutError('provider needs 40 seconds')
+                        content = json.dumps({'memories': [
+                            {'kind': 'constraint', 'text': 'Review requested', 'source': 'user', 'quote': 'Review'}]})
+                    return io.BytesIO(json.dumps({'choices': [{'message': {'content': content}}]}).encode())
+                with patch.dict(os.environ, {**ENV, 'HARNESS_TURN_TIMEOUT_SECONDS': str(turn_seconds),
+                     'HARNESS_MODEL_PARAMETERS_JSON': json.dumps(parameters)}, clear=True), \
+                     patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+                     patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+                     patch('popot_agents.worker.http_harness.time.monotonic', return_value=0), \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
+                    self.assertEqual(run_http(TASK, ROLE), 'Review remains incomplete')
+                self.assertEqual(bodies[1].get('reasoning'), parameters['reasoning'])
+                self.assertEqual(bodies[1].get('chat_template_kwargs'), parameters['chat_template_kwargs'])
+                self.assertEqual(bodies[1].get('tool_choice'), 'none')
+                self.assertEqual(bodies[1].get('response_format'), {'type': 'json_object'})
+                self.assertEqual(bodies[1]['max_tokens'], 2000)
+                self.assertEqual(timeouts[1], expected_timeout)
+                client.remember.assert_called_once()
+
+    def test_ollama_cloud_capture_disables_thinking_only_for_summary(self):
+        client = Mock()
+        client.recall.return_value = []
+        bodies = []
+        def respond(call, **kwargs):
+            body = json.loads(call.data)
+            bodies.append(body)
+            content = 'done' if len(bodies) == 1 else '{"memories":[]}'
+            return io.BytesIO(json.dumps({'choices': [{'finish_reason': 'stop',
+                'message': {'content': content}}]}).encode())
+        parameters = {'reasoning': {'effort': 'high'}, 'temperature': 0.7}
+        with patch.dict(os.environ, {**ENV, 'HARNESS_BASE_URL': 'http://proxy.test/v1',
+             'HARNESS_UPSTREAM_HOST': 'ollama.com',
+             'HARNESS_MODEL_PARAMETERS_JSON': json.dumps(parameters)}, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
+            self.assertEqual(run_http(TASK, ROLE), 'done')
+        self.assertEqual(bodies[0]['reasoning'], {'effort': 'high'})
+        self.assertEqual(bodies[0]['temperature'], 0.7)
+        self.assertEqual(bodies[1]['reasoning_effort'], 'none')
+        self.assertNotIn('reasoning', bodies[1])
+        self.assertNotIn('response_format', bodies[1])
+        self.assertEqual(bodies[1]['temperature'], 0)
+        client.remember.assert_not_called()
+
+    def test_truncated_summary_is_retried_even_if_its_json_parses(self):
+        for recovered in (True, False):
+            with self.subTest(recovered=recovered):
+                client = Mock()
+                client.recall.return_value = []
+                note = json.dumps({'memories': [{'kind': 'constraint', 'text': 'Review requested',
+                    'source': 'user', 'quote': 'Review'}]})
+                replies = [{'choices': [{'message': {'content': 'done'}}]}] + [
+                    {'choices': [{'finish_reason': reason, 'message': {
+                        'content': note, 'reasoning': 'private reasoning must not be logged'}}]}
+                    for reason in ('length', 'stop' if recovered else 'length')]
+                with patch.dict(os.environ, ENV, clear=True), \
+                     patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+                     patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+                     patch('popot_agents.worker.http_harness._trace') as trace, \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=lambda *a, **kw:
+                           io.BytesIO(json.dumps(replies.pop(0)).encode())) as model:
+                    self.assertEqual(run_http(TASK, ROLE), 'done')
+                self.assertEqual(model.call_count, 3)
+                self.assertEqual(client.remember.call_count, int(recovered))
+                response_events = [c.kwargs for c in trace.call_args_list
+                                   if c.args[0] == 'memory_summary_response']
+                self.assertEqual(response_events[0]['finish_reason'], 'length')
+                self.assertEqual(response_events[0]['content_chars'], len(note))
+                self.assertNotIn('private reasoning must not be logged', str(trace.call_args_list))
+                self.assertIn('truncated_summary', str(trace.call_args_list))
+
+    def test_recall_distinguishes_useful_empty_and_warming_up(self):
+        for result, outcome, count in [
+                ([{'text': 'Verified fact'}], 'useful', 1),
+                ([], 'empty', 0),
+                ({'status': 'empty', 'memories': []}, 'empty', 0),
+                ([{'source': 'system', 'status': 'memory_warming_up',
+                   'text': 'Memory is still warming up'}], 'warming_up', 0)]:
+            with self.subTest(outcome=outcome), patch.dict(os.environ, ENV, clear=True), \
+                 patch('popot_agents.worker.turn_memory.trace') as trace:
+                client = Mock()
+                client.recall.return_value = result
+                memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=client)
+                context = memory.context(60)
+                self.assertEqual(bool(context), bool(count))
+                self.assertEqual(memory.tools[-1]['recall_outcome'], outcome)
+                self.assertEqual(memory.tools[-1]['chunks'], count)
+                trace.assert_called_with('memory_recalled', dataset=memory.dataset,
+                                         chunks=count, outcome=outcome)
+
+    def test_incomplete_results_save_only_evidence_backed_findings(self):
+        for status, rounds in (('partial', 40), ('blocked', 40), ('partial', 1)):
+            with self.subTest(status=status, rounds=rounds):
+                client = Mock()
+                client.recall.return_value = []
+                state = {}
+                replies = [
+                    {'tool_calls': [{'id': 'proof', 'function': {
+                        'name': 'calculate', 'arguments': '{"expression":"2+2"}'}}]},
+                    {'content': json.dumps({'status': status, 'answer': 'Verification pending',
+                        'evidence': ['4'], 'remaining_work': ['publish'], 'errors': []})},
+                    {'content': json.dumps({'memories': [
+                        {'kind': 'check', 'text': 'Calculation returned 4', 'source': 'proof', 'quote': '4'},
+                        {'kind': 'fact', 'text': 'Invented', 'source': 'proof', 'quote': 'not observed'}]})}]
+                with patch.dict(os.environ, ENV, clear=True), \
+                     patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+                     patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=lambda *a, **kw:
+                           io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())):
+                    run_http(TASK, {**ROLE, 'tools': ['calculate'], 'max_tool_rounds': rounds}, state=state)
+                client.remember.assert_called_once()
+                record = json.loads(client.remember.call_args.args[0])
+                self.assertEqual(record['task_status'], status)
+                self.assertEqual(len(record['memories']), 1)
+                self.assertEqual(state['outcome']['status'], status)
+                self.assertEqual(client.session_event.call_args.args[0]['memories_saved'], 1)
+
+    def test_blocked_result_survives_capture_timeout_or_exhausted_budget(self):
+        for exhausted in (False, True):
+            with self.subTest(exhausted=exhausted):
+                client = Mock()
+                client.recall.return_value = []
+                state, clock = {}, [0]
+                report = {'status': 'blocked', 'answer': 'Missing permission',
+                          'evidence': [], 'remaining_work': ['publish'], 'errors': []}
+                def respond(*args, **kwargs):
+                    clock[0] = 55 if exhausted else 0
+                    return io.BytesIO(json.dumps({'choices': [{'message': {
+                        'content': json.dumps(report)}}]}).encode())
+                with patch.dict(os.environ, ENV, clear=True), \
+                     patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+                     patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+                     patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: clock[0]), \
+                     patch('popot_agents.worker.http_harness._trace') as trace, \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond) as model:
+                    # The summary endpoint fails independently of the task response.
+                    def dispatch(*args, **kwargs):
+                        if model.call_count > 1:
+                            raise TimeoutError()
+                        return respond(*args, **kwargs)
+                    model.side_effect = dispatch
+                    self.assertEqual(run_http(TASK, ROLE, state=state), 'Missing permission')
+                self.assertEqual(state['outcome']['status'], 'blocked')
+                client.remember.assert_not_called()
+                events = [call.args[0] for call in trace.call_args_list]
+                self.assertIn('memory_skipped' if exhausted else 'memory_capture_failed', events)
+                self.assertEqual(model.call_count, 1 if exhausted else 2)
+
     def test_role_default_project_enables_memory_without_a_task_tag(self):
         with patch.dict(os.environ, ENV, clear=True):
             memory = TurnMemory({**ROLE,'memory_project':'popot-agents'},
@@ -239,6 +403,17 @@ class TurnMemoryTests(unittest.TestCase):
                 run_http(TASK, ROLE)
         client.remember.assert_not_called()
         self.assertEqual(client.session_event.call_args.args[0]['status'], 'failed')
+
+    def test_recall_failure_reports_redacted_cause_and_remains_optional(self):
+        client = Mock()
+        client.recall.side_effect = RuntimeError('HTTP 503 private-password')
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.trace') as trace:
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=client)
+            self.assertEqual(memory.context(10), '')
+        event = next(c.kwargs for c in trace.call_args_list if c.args[0] == 'memory_recall_failed')
+        self.assertIn('HTTP 503', event['error'])
+        self.assertNotIn('private-password', event['error'])
 
     def test_optional_model_recall_failure_is_recoverable(self):
         client = Mock()

@@ -10,6 +10,28 @@ from unittest.mock import patch
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_mcp_transport_and_retry_settings_validate(self):
+        from popot_agents.runtime_config import load_runtime_config
+
+        settings = load_runtime_config()
+        settings['mcp'] = {'discovery_attempts': 1, 'discovery_backoff_seconds': .25}
+        settings['timeouts'].update(mcp_http_seconds=11.5, mcp_sse_read_seconds=45.25)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'runtime.json'
+            path.write_text(json.dumps(settings))
+            self.assertEqual(load_runtime_config(path), settings)
+            for section, field, invalid_values in (
+                    ('mcp', 'discovery_attempts', (0, -1, True, 1.5, '3')),
+                    ('mcp', 'discovery_backoff_seconds', (0, -1, True, '1', float('inf'), float('nan'))),
+                    ('timeouts', 'mcp_http_seconds', (0, -1, True, float('inf'))),
+                    ('timeouts', 'mcp_sse_read_seconds', (0, -1, True, float('nan')))):
+                for value in invalid_values:
+                    invalid = json.loads(json.dumps(settings))
+                    invalid[section][field] = value
+                    path.write_text(json.dumps(invalid))
+                    with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, field):
+                        load_runtime_config(path)
+
     def test_ax_budgets_validate_against_same_custom_runtime(self):
         from popot_agents.runtime_config import load_runtime_config
         from ax_local.config import load_ax_config
@@ -78,9 +100,12 @@ class RuntimeConfigTests(unittest.TestCase):
              patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
              patch('popot_agents.worker.http_harness.execute_tool', return_value='ok') as tool:
-            self.assertEqual(run_http('task', {'tools':['utc_time']}), 'done')
+            answer = run_http('task', {'tools':['utc_time']})
+        self.assertIn('Partial result', answer)
+        self.assertTrue(answer.endswith('done'))
         tool.assert_called_once()
-        self.assertIn('tools', requests[-1])
+        self.assertNotIn('tools', requests[-1])
+        self.assertEqual(requests[-1]['tool_choice'], 'none')
 
     def test_memory_budget_validation_rejects_impossible_capture_and_nonfinite_timeouts(self):
         from popot_agents.runtime_config import load_runtime_config

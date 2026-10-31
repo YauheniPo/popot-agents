@@ -35,7 +35,8 @@ class AxAgentRunner:
     def __init__(self, image: str, model: str, base_url: str,
                  context: str = AX_CONFIG["context"],
                  proxy_token: str | None = None, model_parameters: dict | None = None,
-                 worker_queue: WorkerQueue | None = None) -> None:
+                 worker_queue: WorkerQueue | None = None,
+                 upstream_host: str | None = None) -> None:
         if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image):
             raise ValueError("AX worker image must be pinned by sha256 digest")
         if not context.startswith("kind-") or not re.fullmatch(r"[a-z0-9-]+", context):
@@ -45,6 +46,7 @@ class AxAgentRunner:
         self.image = image
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.upstream_host = upstream_host
         self.context = context
         self.snapshot_mode = AX_CONFIG['snapshot_mode']
         self.proxy_token = proxy_token
@@ -105,6 +107,8 @@ class AxAgentRunner:
                 "timeout_seconds", RUNTIME["timeouts"]["turn_seconds"])
                 - RUNTIME["timeouts"]["turn_response_margin_seconds"])),
         }
+        if self.upstream_host:
+            env['HARNESS_UPSTREAM_HOST'] = self.upstream_host
         if self.model_parameters:
             env['HARNESS_MODEL_PARAMETERS_JSON'] = json.dumps(self.model_parameters)
         if role_config.get('harness2', {}).get('enabled'):
@@ -278,6 +282,9 @@ class AxAgentRunner:
                    *, deadline: float | None = None, cancel_event=None) -> AxChat:
         if not re.fullmatch(r"[0-9a-f]{16}", chat_id):
             raise ValueError("invalid session ID")
+        if (role_config or {}).get('_ax_delegation') and self.delegation \
+                and chat_id not in self.delegation.jobs:
+            raise AgentRunError('Delegated sessions must continue through delegate_task with role and session_id')
         task_name = f"popot-chat-{chat_id}"
         emit_progress('waiting_for_worker')
         lease = self.worker_queue.acquire(task_name, deadline=deadline, cancel_event=cancel_event)
@@ -428,6 +435,8 @@ class AxAgentRunner:
             return result
 
     def maintenance(self) -> None:
+        if self.delegation:
+            self.delegation.maintenance()
         with self._cleanup_lock:
             pending = tuple(self._cleanup_pending.items())
         for task_name, lease in pending:
@@ -465,6 +474,7 @@ class AxChat:
     _close_lock: object = field(default_factory=threading.RLock, repr=False)
     _messages: list[dict[str, str]] = field(default_factory=list, repr=False)
     _snapshot_issue: str | None = field(default=None, repr=False)
+    _checkpoint: dict = field(default_factory=dict, repr=False)
 
     @property
     def idle_timeout_seconds(self) -> int:
@@ -508,7 +518,7 @@ class AxChat:
                         raise AgentRunError("AX task could not suspend")
                     time.sleep(min(AX_CONFIG["startup_probe_interval_seconds"],
                                    max(0, deadline - time.monotonic())))
-            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError) as exc:
+            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError, TimeoutError) as exc:
                 # A timeout leaves the phase uncertain. Require an explicit
                 # resume/check before the next turn, retaining files and lease.
                 self.suspended = True
@@ -518,7 +528,7 @@ class AxChat:
                       f"reason={type(exc).__name__}; task retained for retry",
                       file=sys.stderr, flush=True)
 
-    def resume(self) -> None:
+    def resume(self, *, timeout_seconds: float | None = None) -> None:
         with self._close_lock:
             if self.closed:
                 raise AgentRunError("AX chat worker is closed")
@@ -527,6 +537,8 @@ class AxChat:
             emit_progress('resuming')
             started = time.monotonic()
             deadline = started + AX_CONFIG["startup_timeout_seconds"]
+            if timeout_seconds is not None:
+                deadline = min(deadline, started + timeout_seconds)
 
             def remaining(limit):
                 budget = deadline - time.monotonic()
@@ -596,7 +608,8 @@ class AxChat:
     def restore(self, messages: list[dict[str, str]], *, timeout_seconds: float | None = None) -> None:
         messages = [dict(item) for item in messages]
         result = self.runner.remote(self.container_name,
-                                    {"action": "restore", "messages": messages},
+                                    {"action": "restore", "messages": messages,
+                                     **({'checkpoint': self._checkpoint} if self._checkpoint else {})},
                                     timeout=(AX_CONFIG["restore_timeout_seconds"]
                                              if timeout_seconds is None else timeout_seconds))
         if result.get("status") != "ok":
@@ -604,14 +617,22 @@ class AxChat:
         self._messages = messages
 
     def send(self, message: str, *, timeout_seconds: float | None = None) -> dict[str, str]:
-        self.resume()
         timeout = self.timeout_seconds if timeout_seconds is None else min(
             self.timeout_seconds, timeout_seconds)
+        started = time.monotonic()
+        was_suspended = self.suspended
+        self.resume(timeout_seconds=timeout)
+        if was_suspended:
+            timeout -= time.monotonic() - started
+        if timeout <= 0:
+            raise AgentRunError('AX continuation deadline exceeded during resume')
         service = self.runner.delegation
         with (service.turn(self.container_name.removeprefix("popot-chat-"), timeout, message=message)
               if service else nullcontext()):
             callback = progress_observer()
-            payload = {"action": "message", "message": message}
+            payload = {"action": "message", "message": message, 'result_details': True,
+                       "timeout_seconds": min(timeout, max(RUNTIME['timeouts']['min_turn_seconds'],
+                           timeout - RUNTIME['timeouts']['turn_response_margin_seconds']))}
             if callback:
                 payload['progress'] = True
             result = self.runner.remote(self.container_name,
@@ -627,7 +648,8 @@ class AxChat:
                 {'role': 'user', 'content': message.strip()},
                 {'role': 'assistant', 'content': result['answer']},
             ]
-        return {"answer": result["answer"]}
+        self._checkpoint = result.get('checkpoint', {})
+        return {key: result[key] for key in ('answer', 'outcome') if key in result}
 
     def close(self) -> None:
         with self._close_lock:

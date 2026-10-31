@@ -182,6 +182,13 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(remote.call_args_list[0].args[1]["action"], "restore")
         self.assertEqual(remote.call_args_list[1].args[1]["message"], "again")
 
+    def test_chat_passes_shortened_turn_budget_to_worker(self):
+        chat = AxChat(self.runner, "popot-chat-0123456789abcdef", 900)
+        with patch.object(self.runner, 'remote', return_value={'answer': 'partial'}) as remote:
+            chat.send('review', timeout_seconds=45)
+        self.assertEqual(remote.call_args.args[1].get('timeout_seconds'),
+                         45 - RUNTIME['timeouts']['turn_response_margin_seconds'])
+
     def test_probe_reports_safe_ssh_failure_category(self):
         chat = AxChat(self.runner, "popot-chat-0123456789abcdef", 12)
         with patch.object(self.runner, "remote",

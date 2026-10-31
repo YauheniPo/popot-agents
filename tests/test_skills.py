@@ -88,7 +88,10 @@ class SkillTests(unittest.TestCase):
                 with patch.dict(os.environ, dict(self.env, HARNESS_SESSION_MODE=mode)), \
                         patch("popot_agents.worker.session_worker.socketserver.UnixStreamServer") as server, \
                         patch("popot_agents.worker.http_harness.request.urlopen",
-                              side_effect=lambda *a, **kw: self.model_response()) as request, \
+                              side_effect=lambda *a, **kw: io.BytesIO(json.dumps({'choices': [{'message': {
+                                  'content': json.dumps({'status': 'completed', 'answer': 'done',
+                                                        'evidence': [], 'remaining_work': [], 'errors': []})
+                              }}]}).encode())) as request, \
                         patch("popot_agents.worker.session_worker.run_harness", return_value="done") as cli:
                     session_worker.serve()
                     (self.skill / "references.md").write_text("Changed after startup.")

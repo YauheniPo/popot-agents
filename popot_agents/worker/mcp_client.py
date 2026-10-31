@@ -9,11 +9,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.tools import MAX_TOOL_OUTPUT, safe_tool_env
+from popot_agents.progress import trace_event
+from popot_agents.tools import MAX_TOOL_OUTPUT, preserve_tool_output, safe_tool_env
 
 
 class MCPToolError(RuntimeError):
     """The server returned isError: the model may correct its tool arguments."""
+
+
+class MCPTransportError(MCPToolError):
+    """No confirmed response; external effects must be checked before retrying."""
 
 
 def _bearer_token(config):
@@ -45,7 +50,10 @@ async def _streams(config: dict):
         from mcp.client.streamable_http import streamable_http_client
 
         async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"},
-                                     follow_redirects=False) as client:
+                                     follow_redirects=False,
+                                     # Outer discovery/tool deadlines still apply.
+                                     timeout=httpx2.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
+                                         read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client:
             async with streamable_http_client(config["url"], http_client=client) as (read, write):
                 yield read, write
     else:
@@ -104,6 +112,40 @@ async def _discover_one(alias: str, config: dict) -> dict:
     return result
 
 
+def _retryable_discovery_error(exc: Exception) -> bool:
+    try:
+        import httpx2 as httpx
+    except ImportError:
+        return False  # Preserve the original configuration/dependency failure.
+
+    children = getattr(exc, 'exceptions', ())
+    if children:
+        return all(_retryable_discovery_error(child) for child in children)
+    return isinstance(exc, (httpx.NetworkError, httpx.TimeoutException,
+                            httpx.RemoteProtocolError))
+
+
+async def _discover_with_retry(alias: str, config: dict) -> dict:
+    policy = RUNTIME['mcp']
+    for attempt in range(1, policy['discovery_attempts'] + 1):
+        trace_event('mcp_discovery_started', server=alias, attempt=attempt)
+        try:
+            result = await _discover_one(alias, config)
+        except Exception as exc:
+            if 'url' not in config or attempt == policy['discovery_attempts'] or not _retryable_discovery_error(exc):
+                raise
+            delay = policy['discovery_backoff_seconds'] * attempt
+            trace_event('mcp_discovery_retry', server=alias, attempt=attempt,
+                        delay_seconds=delay, error=_error_text(config, exc))
+            # Only handshake/list_tools are replayed. Sleep and connection
+            # cleanup share the caller's existing discovery deadline.
+            await asyncio.sleep(delay)
+        else:
+            trace_event('mcp_discovery_completed', server=alias, attempt=attempt,
+                        tool_count=len(result))
+            return result
+
+
 def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> dict:
     discovered = {}
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
@@ -116,10 +158,12 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> di
                     raise TimeoutError
                 timeout = min(timeout, remaining)
             discovered.update(asyncio.run(asyncio.wait_for(
-                _discover_one(alias, config), timeout)))
+                _discover_with_retry(alias, config), timeout)))
         except (TimeoutError, asyncio.TimeoutError) as exc:
+            trace_event('mcp_discovery_failed', server=alias, reason='deadline_exceeded')
             raise RuntimeError(f"MCP server {alias} timed out during discovery") from exc
         except Exception as exc:
+            trace_event('mcp_discovery_failed', server=alias, error=_error_text(config, exc))
             raise RuntimeError(f"MCP server {alias} failed during discovery: {_error_text(config, exc)}") from None
     return discovered
 
@@ -127,8 +171,18 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> di
 async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
     from mcp import Client
 
-    async with Client(_streams(config)) as client:
-        result = await client.call_tool(native_name, arguments=arguments)
+    result = None
+    try:
+        async with Client(_streams(config)) as client:
+            result = await client.call_tool(native_name, arguments=arguments)
+    except (Exception, asyncio.CancelledError) as exc:
+        if result is None:
+            raise
+        # A completed RPC must not become an unknown write when closing its
+        # transport fails or the outer deadline cancels cleanup. Preserve the
+        # received result, including is_error; cancellation before it propagates.
+        trace_event('mcp_cleanup_failed', tool=native_name,
+                    error=_error_text(config, exc), result_received=True)
     parts = []
     for item in result.content:
         kind = getattr(item, "type", None)
@@ -144,7 +198,7 @@ async def _call_one(config: dict, native_name: str, arguments: dict) -> str:
         getattr(result, "structured_content", None) or {}, ensure_ascii=False)
     if result.is_error:
         raise MCPToolError(output)
-    return output[:MAX_TOOL_OUTPUT] + ("\n[output truncated]" if len(output) > MAX_TOOL_OUTPUT else "")
+    return preserve_tool_output(output)
 
 
 def call_tool(config: dict, native_name: str, arguments: dict,
@@ -159,6 +213,6 @@ def call_tool(config: dict, native_name: str, arguments: dict,
         # Redact before truncation so a token cut in the middle cannot leak.
         raise MCPToolError(_error_text(config, exc)[:MAX_TOOL_OUTPUT]) from None
     except (TimeoutError, asyncio.TimeoutError) as exc:
-        raise RuntimeError("MCP tool call timed out") from exc
+        raise MCPTransportError("MCP tool call timed out; outcome is unknown") from None
     except Exception as exc:
-        raise RuntimeError(f"MCP tool {native_name} failed: {_error_text(config, exc)}") from None
+        raise MCPTransportError(f"MCP tool {native_name} failed: {_error_text(config, exc)}") from None

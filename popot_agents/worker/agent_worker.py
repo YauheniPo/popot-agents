@@ -10,7 +10,7 @@ from popot_agents.skills import prepare_role_config
 from popot_agents.runtime_config import RUNTIME
 
 
-def run_harness(task: str) -> str:
+def run_harness(task: str, *, timeout_seconds: float | None = None) -> str:
     try:
         command = json.loads(os.environ["HARNESS_COMMAND_JSON"])
     except (KeyError, json.JSONDecodeError) as exc:
@@ -32,6 +32,10 @@ def run_harness(task: str) -> str:
                              str(RUNTIME["timeouts"]["turn_seconds"])))
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("HARNESS_TURN_TIMEOUT_SECONDS must be positive and finite")
+    if timeout_seconds is not None:
+        if type(timeout_seconds) not in {int, float} or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError('timeout_seconds must be positive and finite')
+        timeout = min(timeout, timeout_seconds)
     command = [
         task if arg == "{task}" else os.environ["HARNESS_MODEL"] if arg == "{model}"
         else str(max_turns) if arg == "{max_turns}" else arg

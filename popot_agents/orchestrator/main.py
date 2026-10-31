@@ -701,6 +701,7 @@ def create_server(
                 "sessionId": session_id, "container": record.worker.container_name,
                 "answer": result["answer"], "role": record.role, "agent": record.agent,
                 "workspace": getattr(record.worker, "workspace_path", None),
+                **({'outcome': result['outcome']} if 'outcome' in result else {}),
             })
 
         def do_POST(self) -> None:

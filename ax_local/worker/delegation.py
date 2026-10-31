@@ -5,6 +5,7 @@ from functools import partial
 import hashlib
 import json
 import os
+import re
 import time
 from urllib.parse import urlsplit
 
@@ -36,7 +37,9 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
         raise ValueError("invalid AX delegation endpoint")
     schema = {"type": "function", "function": {
         "name": "delegate_task",
-        "description": "Start a separate AX agent with an allowed role and wait for its result. "
+        "description": "Start an AX agent or continue its unfinished task with the same role and session_id. "
+                       "Continuation restores that session's sandbox and tool context. Inspect outcome and evidence. "
+                       "Give corrective instructions for remaining work; do not repeat uncertain external actions. "
                        "Give it the task and all required context explicitly. Its workspace and "
                        "conversation are separate. Select by the role descriptions below. "
                        "For code review, send requirements, the diff and relevant source, test "
@@ -44,7 +47,13 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
                        "Use its result in your final answer. Available specialists:\n" + catalog,
         "parameters": {"type": "object", "properties": {
             "role": {"type": "string", "enum": allowed},
-            "task": {"type": "string", "description": "Task with requirements and relevant input data"}},
+            "task": {"type": "string", "description": "Task or corrective instructions with requirements and relevant input data"},
+            "session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
+                           "description": "Existing unfinished child sessionId; omit only for a new task"},
+            "replaces_session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
+                "description": "Failed non-resumable child being replaced for the same subtask. "
+                               "Runtime carries its prior result and resolves that failure on success. "
+                               "Never combine with session_id; resumable children must be continued."}},
             "required": ["role", "task"], "additionalProperties": False}}}
     poll_interval = float(environ.get("AX_DELEGATION_POLL_SECONDS", "0.5"))
 
@@ -53,7 +62,10 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
 
 
 def delegate(arguments, *, timeout_seconds, call_id, url, token, allowed, poll_interval, probe):
-    if not isinstance(arguments, dict) or set(arguments) != {"role", "task"} \
+    if not isinstance(arguments, dict) or not {'role', 'task'} <= set(arguments) \
+            or set(arguments) - {'role', 'task', 'session_id'} \
+            or ('session_id' in arguments and (probe is not None or not isinstance(arguments['session_id'], str)
+                or not re.fullmatch(r'[0-9a-f]{16}', arguments['session_id']))) \
             or arguments["role"] not in allowed or not isinstance(arguments["task"], str) \
             or not arguments["task"].strip() \
             or len(arguments["task"]) > RUNTIME["limits"]["message_chars"]:
@@ -65,6 +77,11 @@ def delegate(arguments, *, timeout_seconds, call_id, url, token, allowed, poll_i
 
 def delegated_result(task, role, probe):
     result = {"sessionId": task.id, "role": role, "state": types.TaskState.Name(task.status.state)}
+    metadata = MessageToDict(task).get('metadata', {})
+    outcome = metadata.get('outcome')
+    result['outcome'] = outcome if isinstance(outcome, dict) else {
+        'status': 'failed', 'reason': 'missing_or_invalid_outcome'}
+    result['resumable'] = metadata.get('resumable') is True
     if probe is not None:
         result['activity'] = MessageToDict(task).get('metadata', {}).get('activity', [])
     if task.status.state == types.TASK_STATE_COMPLETED:
@@ -72,6 +89,10 @@ def delegated_result(task, role, probe):
                            for part in artifact.parts if part.HasField("text"))
         limit = RUNTIME["limits"]["tool_output_chars"]
         result.update(answer=answer[:limit], truncated=len(answer) > limit)
+        if result['outcome'].get('status') != 'completed':
+            result.update(isError=True, error='delegated task is incomplete; inspect evidence and '
+                          'remaining work. Resume the same session only for required work '
+                          'when enough time remains; otherwise report partial.')
         if not answer.strip() or result['truncated']:
             result.update(isError=True, error='delegated answer is empty or truncated; '
                           'inspect the child session before repeating external actions')
@@ -127,13 +148,20 @@ class DelegationRequest:
             configuration=types.SendMessageConfiguration(return_immediately=True))
         if self.probe is not None:
             params.message.metadata.update({'harness2': self.probe})
+        if self.arguments.get('session_id'):
+            params.message.task_id = self.arguments['session_id']
+
+        async def send(context):
+            params.message.metadata.update({'timeout_seconds': self.deadline - time.monotonic()})
+            return await transport.send_message(params, context=context)
+
         try:
-            return await self.invoke(lambda ctx: transport.send_message(params, context=ctx))
+            return await self.invoke(send)
         except (A2AClientError, asyncio.TimeoutError) as exc:
             # Retry transport failures with the same message ID to deduplicate side effects.
             if not isinstance(exc, asyncio.TimeoutError) and not isinstance(exc.__cause__, httpx.RequestError):
                 raise
-            return await self.invoke(lambda ctx: transport.send_message(params, context=ctx))
+            return await self.invoke(send)
 
     async def poll(self, task, transport):
         self.task_id = task.id
@@ -173,7 +201,7 @@ class DelegationRequest:
                 issue = (str(exc)[:300] if type(exc) is ValueError or
                          isinstance(exc, SDKError) and not isinstance(exc, A2AClientError)
                          else "delegation failed or exceeded the turn deadline")
-                return json.dumps({"sessionId": self.task_id, "role": self.arguments["role"],
+                return json.dumps({"sessionId": self.task_id or self.arguments.get('session_id'), "role": self.arguments["role"],
                                    "isError": True, "error": issue})
 
 

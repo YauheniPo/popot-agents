@@ -11,6 +11,104 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class ModelTimeoutTests(unittest.TestCase):
+    def test_transient_work_and_final_failures_keep_tool_results_and_checkpoint(self):
+        for failure in (TimeoutError(), HTTPError('http://model', 503, 'unavailable', {}, io.BytesIO())):
+            with self.subTest(failure=type(failure).__name__):
+                state = {}
+                first = {'choices': [{'message': {'tool_calls': [
+                    {'id': 'write-proof', 'function': {'name': 'write_file',
+                     'arguments': '{"path":"proof.txt","content":"saved"}'}}]}}]}
+                with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1', 'HARNESS_MODEL': 'example'}, clear=True), \
+                     patch.dict(RUNTIME['model'], {'request_retries': 0}), \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=[
+                         io.BytesIO(json.dumps(first).encode()), failure, failure]) as model, \
+                     patch('popot_agents.worker.http_harness.execute_tool', return_value='saved') as tool, \
+                     redirect_stderr(io.StringIO()):
+                    answer = run_http('Write then verify', {'tools': ['write_file']}, state=state)
+                self.assertIn('model request failed', answer)
+                self.assertEqual(state['outcome']['status'], 'partial')
+                self.assertEqual(state['outcome']['reason'], 'model_request_failed')
+                self.assertTrue(state['outcome']['errors'])
+                self.assertTrue(any(item.get('tool_call_id') == 'write-proof' for item in state['messages']))
+                self.assertEqual(model.call_count, 3)
+                self.assertEqual(json.loads(model.call_args.args[0].data)['tool_choice'], 'none')
+                tool.assert_called_once()
+
+    def test_exhausted_work_request_timeout_still_saves_a_partial_checkpoint(self):
+        now, bodies, state = [0.0], [], {}
+        def respond(call, timeout):
+            body = json.loads(call.data)
+            bodies.append(body)
+            if len(bodies) == 1:
+                return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
+                    {'id': 'write-proof', 'function': {'name': 'write_file',
+                     'arguments': '{"path":"proof.txt","content":"saved"}'}}]}}]}).encode())
+            if len(bodies) == 2:
+                # Socket timeouts can return just before the work deadline.
+                now[0] = 39.999
+                raise TimeoutError()
+            self.assertEqual(body['tool_choice'], 'none')
+            return io.BytesIO(json.dumps({'choices': [{'message': {'content': json.dumps({
+                'status': 'partial', 'answer': 'File saved; verification remains.',
+                'evidence': ['write-proof saved proof.txt'], 'remaining_work': ['verify file'],
+                'errors': ['model request timed out']})}}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1', 'HARNESS_MODEL': 'example',
+                                     'HARNESS_TURN_TIMEOUT_SECONDS': '60'}, clear=True), \
+             patch.dict(RUNTIME['model'], {'request_retries': 0}), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='saved') as tool, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('Write then verify', {'tools': ['write_file']}, state=state)
+        self.assertIn('File saved', answer)
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertEqual(state['outcome']['evidence'], ['write-proof saved proof.txt'])
+        self.assertTrue(any(item.get('tool_call_id') == 'write-proof' for item in state['messages']))
+        self.assertEqual(len(bodies), 3)
+        tool.assert_called_once()
+
+    def test_per_message_budget_reserves_final_answer_inside_parent_deadline(self):
+        now = [0.0]
+        requests, timeouts = [], []
+
+        def respond(call, timeout):
+            requests.append(json.loads(call.data))
+            timeouts.append(timeout)
+            if len(requests) == 1:
+                now[0] = 2.1
+                return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
+                    {'id': 'read', 'function': {'name': 'utc_time', 'arguments': '{}'}}]}}]}).encode())
+            return io.BytesIO(b'{"choices":[{"message":{"content":"Verified partial result"}}]}')
+
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1', 'HARNESS_MODEL': 'example',
+                                     'HARNESS_TURN_TIMEOUT_SECONDS': '900'}, clear=True), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool') as tool, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('review', {'tools': ['utc_time']}, timeout_seconds=3)
+        self.assertIn('Verified partial result', answer)
+        self.assertEqual(timeouts[0], 2)
+        self.assertAlmostEqual(timeouts[-1], 0.9)
+        self.assertNotIn('tools', requests[-1])
+        tool.assert_not_called()
+
+    def test_per_message_budget_cannot_extend_configured_timeout(self):
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1', 'HARNESS_MODEL': 'example',
+                                     'HARNESS_TURN_TIMEOUT_SECONDS': '3'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen',
+                   return_value=io.BytesIO(b'{"choices":[{"message":{"content":"ok"}}]}')) as call, \
+             redirect_stderr(io.StringIO()):
+            self.assertEqual(run_http('review', timeout_seconds=900), 'ok')
+        self.assertLessEqual(call.call_args.kwargs['timeout'], 3)
+
+    def test_invalid_per_message_budget_is_rejected_before_model_request(self):
+        with patch('popot_agents.worker.http_harness.request.urlopen') as call:
+            for timeout in (0, -1, float('nan'), float('inf'), True, '3'):
+                with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, 'timeout_seconds'):
+                    run_http('review', timeout_seconds=timeout)
+        call.assert_not_called()
+
     def setUp(self):
         # Explicit test budgets, independent of the operator's runtime.json values.
         for settings, overrides in ((RUNTIME['model'], {'request_retries': 1}),

@@ -46,7 +46,7 @@ class Harness2RoleTests(unittest.TestCase):
         config = Path(__file__).resolve().parents[1] / 'config'
         roles = load_roles(config / 'roles', load_agents(config / 'agents.json'))
         enabled = [name for name, config in roles.items() if config.get('harness2', {}).get('enabled')]
-        self.assertEqual(enabled, ['analyst', 'backend_engineer', 'code_reviewer', 'frontend_engineer', 'qa_engineer'])
+        self.assertEqual(enabled, ['analyst', 'frontend_engineer'])
         self.assertTrue(all(roles[name]['harness2']['mode'] == 'execution' for name in enabled))
 
     def test_worker_applies_addendum_once_and_preserves_original_configuration(self):

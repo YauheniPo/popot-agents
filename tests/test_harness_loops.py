@@ -19,7 +19,134 @@ def tool_call(identifier, name, arguments):
 
 
 class HttpRecoveryLoopTests(unittest.TestCase):
-    def test_reviewer_returns_partial_status_on_its_last_round_without_more_tools(self):
+    def test_final_report_reads_tool_history_as_evidence_without_continuing_the_tool_loop(self):
+        requests, state = [], {}
+        report = {'status': 'completed', 'answer': 'Verified calculation; publication remains.',
+                  'evidence': ['calculation returned 4'], 'remaining_work': ['publish'], 'errors': []}
+        def respond(call, **kwargs):
+            body = json.loads(call.data)
+            requests.append(body)
+            if len(requests) == 1:
+                message = {'tool_calls': [tool_call('proof', 'calculate', {'expression': '2+2'})]}
+            elif any(item['role'] == 'tool' for item in body['messages']):
+                # Reproduce the provider returning its report through bash echo.
+                message = {'tool_calls': [tool_call('echo-report', 'bash', {'command': 'echo report'})]}
+            else:
+                message = {'content': json.dumps(report)}
+            return io.BytesIO(json.dumps({'choices': [{'message': message}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='4') as execute, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('Calculate and publish', {'tools': ['calculate', 'bash'], 'max_tool_rounds': 1},
+                              state=state)
+        self.assertIn('Verified calculation', answer)
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertEqual(state['outcome']['evidence'], ['calculation returned 4'])
+        self.assertEqual(len(requests), 2)
+        execute.assert_called_once()
+        transcript = json.loads(requests[-1]['messages'][-1]['content'])
+        proof = {'role': 'tool', 'tool_call_id': 'proof', 'content': '4'}
+        self.assertIn({'source': 'tool_result', 'tool': 'calculate',
+                       'call_id': 'proof', 'content': '4'}, transcript)
+        self.assertIn(proof, state['messages'])
+        self.assertNotIn('tools', requests[-1])
+        self.assertEqual(requests[-1]['tool_choice'], 'none')
+
+    def test_structured_status_is_language_independent_and_unfinished_work_cannot_be_complete(self):
+        for text in ('Completed', 'Готово', '完了'):
+            with self.subTest(text=text):
+                state = {}
+                response = {'choices': [{'message': {'content': json.dumps({
+                    'status': 'completed', 'answer': text, 'evidence': ['diff read'],
+                    'remaining_work': ['verify tests'], 'errors': []})}}]}
+                with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+                     patch('popot_agents.worker.http_harness.request.urlopen',
+                           return_value=io.BytesIO(json.dumps(response).encode())), \
+                     redirect_stderr(io.StringIO()):
+                    self.assertEqual(run_http('review', {}, state=state), text)
+                self.assertEqual(state['outcome']['status'], 'partial')
+                self.assertEqual(state['outcome']['remaining_work'], ['verify tests'])
+
+    def test_partial_checkpoint_restores_tool_evidence_without_replaying_tools(self):
+        checkpoint, requests = {}, []
+        replies = [
+            {'tool_calls': [tool_call('proof', 'calculate', {'expression': '2+2'})]},
+            {'content': json.dumps({'status': 'partial', 'answer': 'Still need to verify the result.',
+                                   'evidence': ['calculation returned 4'], 'remaining_work': ['verify'], 'errors': []})},
+            {'content': json.dumps({'status': 'completed', 'answer': 'Verified the earlier evidence: 4.',
+                                   'evidence': ['verified 4'], 'remaining_work': [], 'errors': []})},
+        ]
+        def respond(call, **kwargs):
+            requests.append(json.loads(call.data))
+            return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='4') as execute, \
+             redirect_stderr(io.StringIO()):
+            run_http('Calculate and verify', {'tools': ['calculate'], 'max_tool_rounds': 1}, state=checkpoint)
+            self.assertEqual(checkpoint['outcome']['status'], 'partial')
+            restored = json.loads(json.dumps(checkpoint))
+            answer = run_http('Continue verification', {'tools': ['calculate']}, state=restored)
+        self.assertEqual(answer, 'Verified the earlier evidence: 4.')
+        self.assertEqual(restored['outcome']['status'], 'completed')
+        self.assertIn({'role': 'tool', 'tool_call_id': 'proof', 'content': '4'}, requests[-1]['messages'])
+        self.assertNotIn('tool_choice', requests[-1])
+        execute.assert_called_once()
+
+    def test_every_role_gets_one_final_answer_after_its_tool_round_budget(self):
+        for role in ({}, {'_ax_role': 'backend_engineer'}, {'_ax_role': 'qa_engineer'},
+                     {'_ax_role': 'code_reviewer'}, {'name': 'project_operator'}):
+            with self.subTest(role=role):
+                requests = []
+                def respond(call, **kwargs):
+                    body = json.loads(call.data)
+                    requests.append(body)
+                    message = ({'content': 'Verified checks; remaining work is incomplete.'}
+                               if body.get('tool_choice') == 'none' else
+                               {'tool_calls': [tool_call(f'call-{len(requests)}', 'calculate',
+                                                        {'expression': '1+1'})]})
+                    return io.BytesIO(json.dumps({'choices': [{'message': message}]}).encode())
+                with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+                     patch('popot_agents.worker.http_harness.execute_tool', return_value='2') as execute, \
+                     redirect_stderr(io.StringIO()):
+                    answer = run_http('task', {**role, 'tools': ['calculate'], 'max_tool_rounds': 2})
+                self.assertIn('Partial result', answer)
+                self.assertIn('Verified checks', answer)
+                self.assertEqual(execute.call_count, 2)
+                self.assertEqual(len(requests), 3)
+                self.assertNotIn('tools', requests[-1])
+                self.assertEqual(requests[-1]['tool_choice'], 'none')
+                transcript = json.loads(requests[-1]['messages'][-1]['content'])
+                self.assertEqual(transcript[-1]['content'], '2')
+
+    def test_final_round_does_not_execute_requested_writes_or_capture_complete_memory(self):
+        requests = []
+        def respond(call, **kwargs):
+            requests.append(json.loads(call.data))
+            return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
+                tool_call(f'write-{len(requests)}', 'write_file', {'path': 'a.txt', 'content': 'fixture'})]
+            }}]}).encode())
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='written') as execute, \
+             patch('popot_agents.worker.http_harness.TurnMemory') as memory_class, \
+             redirect_stderr(io.StringIO()):
+            memory = memory_class.return_value
+            memory.context.return_value = None
+            memory.enabled = False
+            memory.run_complete = True
+            answer = run_http('task', {'tools': ['write_file'], 'max_tool_rounds': 1})
+        execute.assert_called_once()
+        self.assertIn('Partial result', answer)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[-1]['tool_choice'], 'none')
+        self.assertNotIn('tools', requests[-1])
+        memory.finish_session.assert_called_once_with(False)
+        memory.save.assert_not_called()
+
+    def test_reviewer_returns_partial_status_after_its_tool_rounds_without_more_tools(self):
         requests = []
         def respond(call, **kwargs):
             body = json.loads(call.data)
@@ -34,11 +161,11 @@ class HttpRecoveryLoopTests(unittest.TestCase):
             answer = run_http('Review PR', {'_ax_role': 'code_reviewer', 'tools': ['calculate'], 'max_tool_rounds': 2})
         self.assertIn('Partial result', answer)
         self.assertIn('Review remains pending', answer)
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 3)
         self.assertEqual(requests[-1]['tool_choice'], 'none')
         self.assertNotIn('tools', requests[-1])
 
-    def test_operator_reserves_its_last_round_for_an_explicit_no_tools_answer(self):
+    def test_operator_gets_an_explicit_no_tools_answer_after_its_tool_rounds(self):
         requests=[]
         def respond(call,**kwargs):
             body=json.loads(call.data);requests.append(body)
@@ -51,7 +178,7 @@ class HttpRecoveryLoopTests(unittest.TestCase):
              redirect_stderr(io.StringIO()):
             answer=run_http('Inspect project',{'name':'project_operator','tools':['calculate'],'max_tool_rounds':2})
         self.assertIn('Verified the current state',answer)
-        self.assertEqual(len(requests),2)
+        self.assertEqual(len(requests),3)
         self.assertEqual(requests[-1]['tool_choice'],'none')
         self.assertNotIn('tools',requests[-1])
 
@@ -65,9 +192,9 @@ class HttpRecoveryLoopTests(unittest.TestCase):
                  patch('popot_agents.worker.http_harness.request.urlopen',
                        side_effect=lambda *a, **k: io.BytesIO(json.dumps(reply).encode())) as model, \
                  redirect_stderr(io.StringIO()):
-                with self.assertRaisesRegex(RuntimeError, 'tool-call limit'):
-                    run_http('task', {'tools': ['calculate'], **role})
-                self.assertEqual(model.call_count, expected)
+                answer = run_http('task', {'tools': ['calculate'], **role})
+                self.assertIn('Partial result', answer)
+                self.assertEqual(model.call_count, expected + 1)
 
     def run_messages(self, messages, allowed):
         self.requests = []
@@ -140,6 +267,15 @@ class HttpRecoveryLoopTests(unittest.TestCase):
 
 
 class CliLoopBudgetTests(unittest.TestCase):
+    def test_cli_uses_shorter_per_message_timeout(self):
+        for requested, expected in ((3, 3), (900, 30)):
+            with self.subTest(requested=requested), patch.dict(os.environ, {
+                'HARNESS_COMMAND_JSON': '["example"]', 'HARNESS_TURN_TIMEOUT_SECONDS': '30',
+            }, clear=True), patch('popot_agents.worker.agent_worker.subprocess.run') as run:
+                run.return_value = subprocess.CompletedProcess([], 0, 'done', '')
+                self.assertEqual(run_harness('task', timeout_seconds=requested), 'done')
+                self.assertEqual(run.call_args.kwargs['timeout'], expected)
+
     def test_cli_inherits_runtime_rounds_when_role_omits_override(self):
         with patch.dict(RUNTIME['model'], {'default_max_tool_rounds': 7}), \
              patch.dict(os.environ, {

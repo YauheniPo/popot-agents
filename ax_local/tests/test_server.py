@@ -75,6 +75,7 @@ class AxServerTests(unittest.TestCase):
             'AX_LOCAL_SESSION_BACKEND': 'file',
             'OPENROUTER_MODEL': 'role-cloud-model',
             'OPENROUTER_API_KEY': 'private-cloud-key',
+            'OLLAMA_CLOUD_MODEL': 'deepseek-v4.1-flash:1017', 'OLLAMA_API_KEY': 'private-ollama-key',
             'OMNIROUTE_MODEL': 'ax-free',
             'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_OPS_MODEL': 'ax-ops-free',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
@@ -89,8 +90,12 @@ class AxServerTests(unittest.TestCase):
         roles = create.call_args.kwargs['roles']
         self.assertEqual(roles['analyst']['agent'], 'omniroute')
         runners = create.call_args.args[0]
-        self.assertEqual(set(runners), {'omniroute', 'omniroute_code', 'omniroute_ops'})
-        for name in ('chat', 'planner', 'tech_lead', 'qa_engineer', 'cron_demo'):
+        self.assertEqual(set(runners), {'omniroute', 'omniroute_code', 'omniroute_ops', 'ollama_cloud'})
+        for name in ('backend_engineer', 'code_reviewer', 'qa_engineer'):
+            self.assertEqual(roles[name]['agent'], 'ollama_cloud')
+        self.assertEqual(runners['ollama_cloud'].model, 'deepseek-v4.1-flash:1017')
+        self.assertIs(runners['omniroute'].worker_queue, runners['ollama_cloud'].worker_queue)
+        for name in ('chat', 'planner', 'tech_lead', 'cron_demo'):
             self.assertEqual(roles[name]['agent'], 'omniroute')
         self.assertEqual(runners['omniroute'].model, 'ax-free')
         self.assertEqual(runners['omniroute_code'].model, 'ax-code-free')
@@ -110,8 +115,13 @@ class AxServerTests(unittest.TestCase):
             self.assertEqual(server.provider_routes[runner.proxy_token].name, name)
             self.assertIs(runner.delegation, server.delegation)
             manifest = runner.task_manifest('0123456789abcdef')
+            env = {item['name']: item['value'] for item in manifest['spec']['env']}
+            from urllib.parse import urlsplit
+            self.assertEqual(env['HARNESS_UPSTREAM_HOST'],
+                             urlsplit(server.provider_routes[runner.proxy_token].base_url).hostname)
             self.assertNotIn('private-cloud-key', json.dumps(manifest))
             self.assertNotIn('private-gateway-key', json.dumps(manifest))
+            self.assertNotIn('private-ollama-key', json.dumps(manifest))
             runner.shutdown_worker_queue()
 
     def test_missing_used_model_is_reported_without_falling_back_to_another_provider(self):
@@ -122,7 +132,7 @@ class AxServerTests(unittest.TestCase):
             'OPENROUTER_MODEL': 'cloud-model', 'OPENROUTER_API_KEY': 'test-key',
         }
         with patch.dict(os.environ, environment, clear=True), \
-             self.assertRaisesRegex(ValueError, 'omniroute.*OMNIROUTE_MODEL'):
+             self.assertRaisesRegex(ValueError, 'ollama_cloud.*OLLAMA_CLOUD_MODEL'):
             make_server()
 
     def test_control_plane_host_follows_ax_context(self):
@@ -134,6 +144,7 @@ class AxServerTests(unittest.TestCase):
             "AX_LOCAL_WORKER_IMAGE": "localhost:5001/popot-agent-ax@sha256:" + "a" * 64,
             "OPENROUTER_MODEL": "selected-model",
             "OPENROUTER_API_KEY": "test-key",
+            "OLLAMA_CLOUD_MODEL": "deepseek-v4.1-flash:1017", "OLLAMA_API_KEY": "test-ollama-key",
             "OMNIROUTE_MODEL": "ax-free",
             "OMNIROUTE_CODE_MODEL": "ax-code-free", "OMNIROUTE_OPS_MODEL": "ax-ops-free",
             "OMNIROUTE_API_KEY": "gateway-key",
@@ -144,9 +155,9 @@ class AxServerTests(unittest.TestCase):
         with patch.dict(os.environ, environment), patch("ax_local.api.server.create_server") as create:
             server = make_server()
         roles = create.call_args.kwargs["roles"]
-        self.assertEqual(roles["backend_engineer"]["agent"], "omniroute_code")
+        self.assertEqual(roles["backend_engineer"]["agent"], "ollama_cloud")
         self.assertIn("bash", roles["backend_engineer"]["tools"])
-        self.assertEqual(set(create.call_args.args[0]), {"omniroute", "omniroute_code", "omniroute_ops"})
+        self.assertEqual(set(create.call_args.args[0]), {"omniroute", "omniroute_code", "omniroute_ops", "ollama_cloud"})
         self.assertNotIn("allowed_roles", server.delegation.policy)
         self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer"])
         env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
@@ -162,6 +173,7 @@ class AxServerTests(unittest.TestCase):
             "AX_LOCAL_WORKER_IMAGE": "localhost:5001/popot-agent-ax@sha256:" + "a" * 64,
             "OPENROUTER_MODEL": "selected-model",
             "OPENROUTER_API_KEY": "test-key",
+            "OLLAMA_CLOUD_MODEL": "deepseek-v4.1-flash:1017", "OLLAMA_API_KEY": "test-ollama-key",
             "OMNIROUTE_MODEL": "ax-free",
             "OMNIROUTE_CODE_MODEL": "ax-code-free", "OMNIROUTE_OPS_MODEL": "ax-ops-free",
             "OMNIROUTE_API_KEY": "gateway-key",
