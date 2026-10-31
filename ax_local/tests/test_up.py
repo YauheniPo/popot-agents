@@ -45,6 +45,13 @@ class ComposeProvisioningTests(unittest.TestCase):
                          'service_completed_successfully')
         self.assertEqual(services['omniroute-init']['environment']['OMNIROUTE_URL'], 'https://omniroute:20128')
         self.assertEqual(services['omniroute']['environment']['OMNIROUTE_TLS_KEY'], '/run/popot-tls/key.pem')
+        self.assertNotIn('CALL_LOG_PIPELINE_MAX_SIZE_KB', services['omniroute']['environment'])
+        logging = next(m for m in services['omniroute']['volumes']
+                       if m['target'] == '/app/popot-omniroute-settings.json')
+        self.assertTrue(logging['read_only'])
+        patch = next(m for m in services['omniroute']['volumes']
+                     if m['target'] == '/app/popot-conversation-fallback.mjs')
+        self.assertTrue(patch['read_only'])
         for name in ('api', 'omniroute-init'):
             trust = next(mount for mount in services[name]['volumes'] if mount['target'] == '/run/popot-tls')
             self.assertTrue(trust['read_only'])

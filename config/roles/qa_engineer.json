@@ -16,7 +16,11 @@
     "git_clone",
     "download_file"
   ],
-  "allowed_roles": [],
+  "allowed_roles": [
+    "analyst",
+    "code_reviewer",
+    "project_operator"
+  ],
   "env_names": [
     "GITHUB_PERSONAL_ACCESS_TOKEN",
     "COGNEE_API_URL",

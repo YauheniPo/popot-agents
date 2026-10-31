@@ -11,7 +11,10 @@
     "calculate",
     "utc_time"
   ],
-  "allowed_roles": [],
+  "allowed_roles": [
+    "analyst",
+    "qa_engineer"
+  ],
   "env_names": [
     "COGNEE_API_URL",
     "COGNEE_PASSWORD"

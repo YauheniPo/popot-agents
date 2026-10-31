@@ -56,24 +56,21 @@ def _require_target(role: str | None, agent: str | None,
     for name, value in (("role", role), ("agent", agent)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{name} must be a nonempty string")
-    if session_id is None and role is None and agent is None:
-        raise ValueError("To start a chat, provide role or agent; "
-                         "to continue, provide session_id")
+
+
+def _call_request_id(context):
+    meta = context.request_context.meta if context is not None else None
+    value = (meta.get('callId') or meta.get('call_id')) if meta else None
+    return value if isinstance(value, str) and 0 < len(value) <= 256 else None
 
 
 def _describe_chat_tool_schema(schema: dict, names: tuple[str, ...]) -> None:
     """Advertise the alternatives MCPServer cannot infer from optional arguments."""
-    schema["anyOf"] = [
-        {"required": [name],
-         "properties": {name: {"type": "string", "minLength": 1,
-                                "pattern": r"\S"}}}
-        for name in names
-    ]
+    schema.pop('anyOf', None)
     properties = schema.setdefault("properties", {})
     descriptions = {
-        "role": "Configured role for a new session. Use 'chat' for general questions; "
-                "'project_operator' for local services, Holmes, model routing, metrics and memory. "
-                "Ask the user if the intended role is unclear.",
+        "role": "Configured role to start. Omit to use mcp.default_role from runtime.json. "
+                "Choose the role matching the task; each role coordinates its own workflow and can delegate to other permitted roles.",
         "agent": "Configured agent profile for a new session; use this instead of role "
                  "only when the user specifies an agent profile.",
         "sessionId": "Existing session ID returned by run_task; omit when starting a new session.",
@@ -193,12 +190,16 @@ class OrchestratorClient:
         return result
 
     def run_task(self, task: str, role: str | None = None,
-                 agent: str | None = None, session_id: str | None = None) -> dict:
+                 agent: str | None = None, session_id: str | None = None, request_id: str | None = None) -> dict:
         session_id = _normalized_session_id(session_id)
+        if session_id is None and role is None and agent is None:
+            role = RUNTIME['mcp']['default_role']
         _require_target(role, agent, session_id)
         if session_id is not None:
-            return self.send_message(task, session_id=session_id, role=role, agent=agent)
+            return self.send_message(task, session_id=session_id, role=role, agent=agent, request_id=request_id)
         payload = {"task": task}
+        if request_id is not None:
+            payload['requestId'] = request_id
         if role is not None:
             payload["role"] = role
         if agent is not None:
@@ -206,10 +207,14 @@ class OrchestratorClient:
         return self._request("POST", "/tasks", payload)
 
     def send_message(self, message: str, session_id: str | None = None,
-                     role: str | None = None, agent: str | None = None) -> dict:
+                     role: str | None = None, agent: str | None = None, request_id: str | None = None) -> dict:
         session_id = _normalized_session_id(session_id)
+        if session_id is None and role is None and agent is None:
+            role = RUNTIME['mcp']['default_role']
         _require_target(role, agent, session_id)
         payload = {"message": message}
+        if request_id is not None:
+            payload['requestId'] = request_id
         if session_id is not None:
             payload["sessionId"] = session_id
         if role is not None:
@@ -328,8 +333,10 @@ def main() -> None:
     async def run_task(task: str, role: str | None = None, agent: str | None = None,
                        sessionId: str | None = None, session_id: str | None = None,
                        ctx: Context = None) -> dict:
-        """Start a task with role (use chat for general questions) or agent. For a follow-up,
-        pass the returned sessionId or session_id instead. If the role is unclear, ask the user.
+        """Start a task with a configured role or agent; omit both to use the configured default role.
+        All roles coordinate tasks, select permitted specialists and continue checkpoints,
+        and return a final result or blocker. Do not manually continue a running workflow.
+        For a follow-up, pass the returned sessionId or session_id instead.
         For clients that hide progress notifications, monitor the running call with
         list_chats then get_chat; poll every 15-30 seconds and report changed progress.
         Do not repeat run_task to check status. Progress does not prove task completion.
@@ -339,10 +346,14 @@ def main() -> None:
         if sessionId is not None and session_id is not None and sessionId != session_id:
             raise ValueError("sessionId and session_id must match")
         selected = sessionId if sessionId is not None else session_id
+        if selected is None and role is None and agent is None:
+            role = RUNTIME['mcp']['default_role']
         if ctx is None:
             return await _tool_call(asyncio.to_thread(client.run_task, task, role=role, agent=agent, session_id=selected))
         _require_target(role, agent, selected)
         payload = {'message' if selected else 'task': task}
+        if request_id := _call_request_id(ctx):
+            payload['requestId'] = request_id
         if selected:
             payload['sessionId'] = selected
         if role is not None:
@@ -357,14 +368,19 @@ def main() -> None:
                            role: str | None = None, agent: str | None = None,
                            ctx: Context = None) -> dict:
         """Continue a chat with its returned session_id. For a new chat, use run_task;
-        if starting here, provide role or agent. Ask the user when the role is unclear.
+        Omit role/agent for a new session with the configured default role. Do not send manual
+        continuation instructions to an already running workflow; poll get_chat instead.
         """
         selected = _normalized_session_id(session_id)
+        if selected is None and role is None and agent is None:
+            role = RUNTIME['mcp']['default_role']
         if ctx is None:
             return await _tool_call(asyncio.to_thread(
                 client.send_message, message, session_id=selected, role=role, agent=agent))
         _require_target(role, agent, selected)
         payload = {'message': message}
+        if request_id := _call_request_id(ctx):
+            payload['requestId'] = request_id
         if selected:
             payload['sessionId'] = selected
         if role is not None:
@@ -386,6 +402,9 @@ def main() -> None:
         Progress includes the latest action, last error, elapsed time and model/tool
         call counts. Report changed progress, without inferring unreported checks.
         Poll every 15-30 seconds while another task call is still running.
+        For autonomous jobs, workflow.state is authoritative even if the worker is
+        stopped between turns. A terminal workflow.result contains the answer/outcome
+        after a client disconnect. Never send continuation instructions to a running workflow.
         """
         return client.get_chat(session_id)
 

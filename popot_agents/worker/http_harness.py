@@ -174,6 +174,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             'description': render_prompt('delegation/scope')}
         extra_tools['delegate_task'] = delegation
     instructions = role_config.get("instructions", "")
+    if role_config.get('_workflow_coordinator'):
+        instructions += '\n\n' + render_prompt('workflow/coordinator')
     allowed = role_config.get("tools", [])
     if 'bash' in allowed:
         instructions += '\n\n' + render_prompt('tools/inspection')
@@ -309,6 +311,24 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 _trace('memory_capture_failed', dataset=memory.dataset, error_type=type(exc).__name__)
 
     def save_result(answer, status, reason, report=None):
+        if role_config.get('_workflow_coordinator') and status == 'completed' and not (report or {}).get('evidence'):
+            status, reason = 'partial', 'workflow_verification_missing'
+            report = {**(report or {}), 'evidence': [], 'errors': (report or {}).get('errors', []),
+                      'remaining_work': (report or {}).get('remaining_work', []) +
+                          ['Verify requested deliverables and provide matching evidence']}
+        if role_config.get('_workflow_coordinator') and status == 'completed':
+            children = list(completed_delegations.values())
+            if any(child.get('role') in {'backend_engineer', 'frontend_engineer'} for child in children):
+                verified = {child.get('role') for child in children
+                            if child.get('outcome', {}).get('status') == 'completed'
+                            and child.get('outcome', {}).get('evidence')}
+                missing = sorted({'code_reviewer', 'qa_engineer'} - verified)
+                if missing:
+                    status, reason = 'partial', 'workflow_validation_missing'
+                    report = {**(report or {}), 'evidence': (report or {}).get('evidence', []),
+                              'errors': (report or {}).get('errors', []),
+                              'remaining_work': (report or {}).get('remaining_work', []) +
+                                  ['Obtain independent verification receipts from ' + ', '.join(missing)]}
         outcome = {'status': status, 'reason': reason,
             **({key: list(dict.fromkeys(item.strip() for item in report[key]
                     if isinstance(item, str) and item.strip()))

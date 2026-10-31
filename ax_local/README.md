@@ -521,7 +521,7 @@ Compose API/MCP. Уже запущенные контейнеры Compose при
 Роль выбирает профиль через `agent` в `config/roles/`. Профиль из
 `config/agents.json` задаёт endpoint, имя переменной модели (`model_env`) и
 параметры модели. Значение модели берётся из `.env`: например,
-`backend_engineer / frontend_engineer / code_reviewer / qa_engineer → omniroute_cloud → OMNIROUTE_CLOUD_MODEL`,
+`planner / backend_engineer / frontend_engineer / code_reviewer / qa_engineer → omniroute_cloud → OMNIROUTE_CLOUD_MODEL`,
 `frontend_engineer → omniroute_cloud → OMNIROUTE_CLOUD_MODEL`,
 `analyst → omniroute_free → OMNIROUTE_FREE_MODEL`,
 `chat → openrouter → OPENROUTER_MODEL`. Общего провайдера или модели AX нет.
@@ -600,8 +600,8 @@ bundle через ConfigMap; проверки TLS у Python, Node и Holmes ос
 
 | Комбо | Роли | Порядок моделей |
 | --- | --- | --- |
-| `ax-free` | `chat`, `analyst`, `planner`, `tech_lead`, `cron_demo`, `project_operator`, Holmes, Harness² | OpenRouter North Mini Code `:free` → NVIDIA Nemotron 3.5 Lightning |
-| `ax-ollama` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | DeepSeek V4 Pro 0813 → DeepSeek V4.1 Flash 1017 → GLM 5.3 Flash |
+| `ax-free` | `chat`, `analyst`, `tech_lead`, `cron_demo`, `project_operator`, Holmes, Harness² | OpenRouter North Mini Code `:free` → NVIDIA Nemotron 3.5 Lightning |
+| `ax-ollama` | `planner`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | DeepSeek V4 Pro 0813 → DeepSeek V4.1 Flash 1017 → GLM 5.3 Flash |
 
 Точные бесплатные model IDs: `nvidia/nemotron-3.5-lightning-30b-a3b` у NVIDIA
 и `cohere/north-mini-code:free` у OpenRouter. Отдельных комбо для кода,
@@ -629,6 +629,17 @@ HTTP harness ждёт ответ до 900 секунд. RPM и параллел�
 ответов в артефактах OmniRoute для просмотра диалогов. Эти артефакты могут
 содержать пользовательские данные; маскирование credentials не удаляет весь
 приватный текст. Старые диалоги без артефактов автоматически не восстанавливаются.
+Секция `logging` в `config/omniroute/settings.json` задаёт `pipelineMaxSizeKB=32768`
+для целого артефакта (32 МиБ) и `textLimitChars=8388608` для отдельного текста.
+Startup проверяет значения и передаёт их как `CALL_LOG_PIPELINE_MAX_SIZE_KB` и
+`CHAT_LOG_TEXT_LIMIT`. Артефакт содержит несколько копий запроса и ответа. Прежние 512 КиБ приводили
+к удалению `pipeline` уже при истории в несколько сотен килобайт.
+Для закреплённой версии 3.8.51 `omniroute_conversation_fallback.mjs` через штатный
+Node load hook добавляет чтение сохранённого `requestBody` в обработчик дерева.
+Артефакты и файлы образа не переписываются; штатная аутентификация сохраняется.
+Shim проверяет версию и структуру обработчика до запуска. При обновлении образа
+его нужно проверить или убрать после исправления upstream. Если в артефакте
+удалён и `requestBody`, восстановить текст из него невозможно.
 North Mini оставлен первым и для общих задач: в новой AX-сессии он вызвал
 `utc_time` и `calculate` и вернул их результаты. В прежней сессии Lightning
 пропустил эти инструменты и выдал выдуманные значения. После изменения маршрутов
@@ -795,6 +806,42 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest ax_local.tests.test_omniroute_prov
 # Отдельный экземпляр без внешней сети и реальных ключей; нужен Docker и Python-образ из pyproject.toml.
 AX_TEST_OMNIROUTE_LIVE=1 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest ax_local.tests.test_omniroute_provision_live
 ```
+
+## Автономное выполнение
+
+MCP может запускать любую настроенную роль: `run_task(role="backend_engineer", task=...)`.
+Если роль/профиль не указаны, используется `config/runtime.json → mcp.default_role`
+(сейчас `planner`). Это выбор по умолчанию, а не ограничение координации.
+
+Каждая роль автоматически координирует свою задачу, в том числе дочерняя:
+делегирует дальше, собирает результаты и продолжает `partial`. Каждая роль обращается
+только к специалистам своего списка `allowed_roles`, согласно обязанностям в команде. Циклы запрещены, глубина
+A2A ограничена; инструменты и внешние права специалистов сохраняются.
+Дочерний координатор наследует deadline родителя и использует общий пул worker,
+без дополнительного слота корневых задач. Ответ возвращается вызывающему родителю;
+к MCP-клиенту обращается только корневой агент.
+
+Переключателя enable/disable нет. Необязательная секция роли
+`"coordination": {"turn_seconds": 900, "max_turns": 4}` переопределяет только лимиты.
+Если секции нет, применяются общие значения.
+
+`config/runtime.json → workflow` задаёт общие лимиты: один процесс, четыре хода,
+900 секунд на ход, 3600 секунд вместе со стартом и остановка после двух одинаковых
+результатов без новых tool receipts. Роль может переопределить `max_turns`,
+`total_seconds`, `turn_seconds`, `max_no_progress` в секции `coordination`;
+`max_concurrent` всегда общий. После делегированной реализации нужны завершённые
+отчёты reviewer и QA; соответствие проверок ревизии оценивает владелец задачи.
+
+`get_chat` возвращает `workflow` и сохранённый конечный `workflow.result`, даже
+если клиент отключился. После рестарта API возобновляется checkpoint завершённого
+хода. Прерванная операция с неизвестным эффектом блокируется без слепого повтора.
+Повторный MCP `callId` / HTTP `requestId` возвращает результат последней операции
+без нового запуска; это не журнал всех прошлых запросов.
+
+При глубине A2A 5 один координатор требует места для цепочки из 6 worker;
+конфигурация проверяется относительно общего пула 10 worker. Прямые вызовы
+специалистов используют тот же пул. Таймаут MCP-клиента должен превышать час:
+для Codex установлен `tool_timeout_sec = 4500`; переподключите MCP для применения.
 
 ## Планировщик и спецификации
 

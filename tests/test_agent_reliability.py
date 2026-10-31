@@ -14,6 +14,27 @@ from popot_agents.worker.delegation_policy import delegation_instructions
 
 
 class AgentReliabilityTests(unittest.TestCase):
+    def test_coordinator_keeps_checkpoint_when_claimed_completion_has_no_evidence(self):
+        message = self.result()
+        report = json.loads(message['content']); report['evidence'] = []
+        message['content'] = json.dumps(report)
+        _, state, _ = self.run_sequence([message], role={'_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertTrue(state['messages'])
+
+    def test_coordinator_cannot_finish_implementation_without_review_and_qa_receipts(self):
+        state = {'messages': [{'role': 'user', 'content': 'Implement a fix'}],
+                 'outcome': {'status': 'partial'},
+                 'completed_delegations': {'a'*16: {'sessionId': 'a'*16,
+                     'role': 'backend_engineer', 'answer': 'Patch ready',
+                     'outcome': {'status': 'completed', 'evidence': ['patch'],
+                                 'remaining_work': [], 'errors': []}}}}
+        _, state, _ = self.run_sequence([self.result()], state=state,
+            role={'name': 'planner', '_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertIn('code_reviewer', ' '.join(state['outcome']['remaining_work']))
+        self.assertIn('qa_engineer', ' '.join(state['outcome']['remaining_work']))
+
     def test_review_routing_depends_on_available_role_and_current_owner(self):
         from ax_local.worker.delegation import make_tools
         for role, allowed, delegate_review in (

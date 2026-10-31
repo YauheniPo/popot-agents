@@ -21,6 +21,8 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.orchestrator.workflow import WorkflowRun
+from popot_agents.workflow_config import role_policy
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
 from popot_agents.progress import emit_progress, observe_progress, scoped_progress
 
@@ -196,7 +198,7 @@ class DelegationService:
             role = saved.get("role") if saved else None
         if role in self.roles:
             config["_ax_role"] = role
-            if self.roles[role].get("allowed_roles"):
+            if self.roles[role].get("allowed_roles") and not config.get("_workflow_coordinator"):
                 config["timeout_seconds"] = max(config.get("timeout_seconds", 60),
                                                 self.policy["turn_timeout_seconds"])
         return config
@@ -615,12 +617,40 @@ class DelegationService:
             self._remaining(job)
             self._save(job, "TASK_STATE_WORKING")
             runner = self.runners[job.config['agent']]
+            policy = None if job.config.get('_ax_harness2_probe') else role_policy(job.config)
+            workflow = WorkflowRun(policy, job.task) if policy else None
+            if workflow:
+                workflow.deadline = min(workflow.deadline, job.deadline)
+                job.deadline = workflow.deadline
+                job.config['_workflow_coordinator'] = True
+                job.config['timeout_seconds'] = policy['turn_seconds']
             if job.chat is None:
                 job.chat = runner.start_chat(job.session_id, job.config,
                                              deadline=job.deadline, cancel_event=job.canceled)
             stage = "worker_message"
-            emit_progress('turn_started')
-            result = job.chat.send(job.task, timeout_seconds=self._remaining(job))
+            # Adapters without checkpoint support retain their one-turn contract.
+            if not hasattr(job.chat, 'get_checkpoint'):
+                workflow = None
+            message = job.task
+            while True:
+                if workflow:
+                    workflow.begin()
+                emit_progress('turn_started')
+                result = job.chat.send(message, timeout_seconds=min(
+                    self._remaining(job), policy['turn_seconds']) if workflow else self._remaining(job))
+                if workflow:
+                    terminal = workflow.record(result, job.chat.get_checkpoint())
+                    job.config['_ax_delegation']['workflow'] = {
+                        key: workflow.meta[key] for key in ('state', 'turns')}
+                    if terminal is None:
+                        job.messages += [{'role': 'user', 'content': message},
+                                         {'role': 'assistant', 'content': result['answer']}]
+                        self._save(job, 'TASK_STATE_WORKING')
+                        message = workflow.continuation()
+                        emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
+                        continue
+                    result = terminal
+                break
             answer = result['answer']
             outcome = result.get('outcome', {'status': 'completed', 'reason': 'answer_returned'})
             if not isinstance(outcome, dict) or outcome.get('status') not in {'completed', 'partial', 'blocked', 'failed'}:

@@ -605,7 +605,15 @@ class AxChat:
             self.probe_issue = "AX ssh OS error"
             return False
 
-    def restore(self, messages: list[dict[str, str]], *, timeout_seconds: float | None = None) -> None:
+    def get_checkpoint(self) -> dict:
+        return json.loads(json.dumps(self._checkpoint))
+
+    def restore(self, messages: list[dict[str, str]], *, timeout_seconds: float | None = None,
+                checkpoint: dict | None = None) -> None:
+        if checkpoint is not None:
+            if not isinstance(checkpoint, dict) or len(json.dumps(checkpoint).encode()) > RUNTIME['limits']['history_bytes']:
+                raise AgentRunError('invalid workflow checkpoint')
+            self._checkpoint = checkpoint
         messages = [dict(item) for item in messages]
         result = self.runner.remote(self.container_name,
                                     {"action": "restore", "messages": messages,

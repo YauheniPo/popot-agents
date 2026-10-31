@@ -430,6 +430,30 @@ class DelegationTests(unittest.TestCase):
                 self.send(task="changed input")
         self.assertEqual(len(self.runner.chats), 1)
 
+    def test_nested_coordinators_continue_partial_without_returning_to_parent(self):
+        counts = {'backend_engineer': 0, 'qa_engineer': 0}
+        received = []
+        def callback(chat, task):
+            role = chat.config['_ax_role']
+            counts[role] += 1
+            if counts[role] == 1:
+                return {'answer': 'more work', 'outcome': {'status': 'partial',
+                    'evidence': [], 'errors': [], 'remaining_work': ['finish ' + role]}}
+            if role == 'backend_engineer':
+                token = self.service.worker_environment(chat.session_id, chat.config)['AX_DELEGATION_TOKEN']
+                received.append(self.wait_task(self.send(token=token, role='qa_engineer')['id'],
+                                               token=token, role='qa_engineer'))
+            return {'answer': role + ' verified', 'outcome': {'status': 'completed',
+                'evidence': [role + ' diagnostic'], 'errors': [], 'remaining_work': []}}
+        self.runner.callback = callback
+        with patch.object(FakeChat, 'get_checkpoint', return_value={'messages': []}, create=True), \
+             self.service.turn(self.parent, 5):
+            result = self.wait_task(self.send()['id'])
+        self.assertEqual(counts, {'backend_engineer': 2, 'qa_engineer': 2})
+        self.assertEqual(result['metadata']['outcome']['status'], 'completed')
+        self.assertEqual(received[0]['metadata']['outcome']['status'], 'completed')
+        self.assertTrue(all(chat.closed for chat in self.runner.chats))
+
     def test_nested_delegation_and_cycle_rejection(self):
         nested = []
         def callback(chat, _task):
@@ -456,7 +480,8 @@ class DelegationTests(unittest.TestCase):
                                                'NotFound' if args[0] == 'get' else '')
         with patch.object(runner, '_run', side_effect=cli) as run, \
              patch.object(runner, '_wait_for_chat', side_effect=lambda chat, *_args: chat), \
-             patch.object(AxChat, 'send', return_value={'answer': 'child result'}):
+             patch.object(AxChat, 'send', return_value={'answer': 'child result', 'outcome': {
+                 'status': 'completed', 'evidence': ['queue fixture result'], 'remaining_work': [], 'errors': []}}):
             try:
                 with self.service.turn(self.parent, 5):
                     tasks = [self.send(message_id=f'child-{index}') for index in range(4)]
