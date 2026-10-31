@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
 FROM python-base
 LABEL com.popot.project="popot-agents"
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash build-essential ca-certificates curl git nodejs npm pkg-config ripgrep rsync unzip \
+    bash build-essential ca-certificates curl git jq nodejs npm pkg-config ripgrep rsync unzip \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml ./
@@ -38,11 +38,13 @@ COPY --from=ax-runner /ax-task-runner /usr/local/bin/ax-task-runner
 COPY --from=ax-runner /src/ax/cmd/ax-task-runner/antigravity_bootstrap.py /usr/local/bin/antigravity_bootstrap.py
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/
+COPY popot_agents/prompts.py /app/popot_agents/
 COPY popot_agents/progress.py /app/popot_agents/
 COPY skills /app/skills
 COPY popot_agents/worker /app/popot_agents/worker
 COPY ax_local/__init__.py /app/ax_local/
 COPY ax_local/worker /app/ax_local/worker
 COPY config/runtime.json /app/config/runtime.json
+COPY config/prompts /app/config/prompts
 ENV PYTHONPATH=/app
 ENTRYPOINT ["/usr/local/bin/ax-task-runner"]

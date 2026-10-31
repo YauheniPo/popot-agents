@@ -1,0 +1,147 @@
+{
+  "delegation/scope": {
+    "sha256": "1906268ff6061d09e1970fd5547154dd479679576fc2e9841576b39d8c88cb3e"
+  },
+  "reporting/result_contract": {
+    "sha256": "390f0f73e7f67c019d76ea356d8f71b13305c35da66bee83dcddfd0e83be6878"
+  },
+  "memory/lifecycle": {
+    "sha256": "75f50cb5547742f7fd62e2b67125aedae116351a1544174504a62178583fdaec"
+  },
+  "memory/unknown_project": {
+    "sha256": "9f104e149e0319d3338bb8cb8cef6b28bcbb62d293460d564f0e415ad2c39bd1"
+  },
+  "review/source_and_publication": {
+    "sha256": "a04a73f226d6ffdbea8385b51c11b6cbc49676de6e6cd43eefba7f90aa53f7fe"
+  },
+  "review/checkpoint_instructions": {
+    "sha256": "9589ce554975cc16f8bab8738bcd9758b352fe18a7b5cfdad7007c3d0e8c6506"
+  },
+  "memory/retry": {
+    "sha256": "97cc9cf0f89127e23eae0e10834f0f0be50edd60d873105b6b2c673805623909"
+  },
+  "review/checkpoint_request": {
+    "sha256": "297cace5d397f704c4d268745e4bf349d0146cc624ab9a3e7beb57313ea3c086"
+  },
+  "delegation/incomplete_result": {
+    "sha256": "8b340d451dc775b13b346947722572450e6ae57dab8bd84388bda3b1239e0dc2"
+  },
+  "delegation/previous_attempt": {
+    "sha256": "fbf1781dbd31cf3b235ada2c8d53f5d52894796127e2acefeddca3ee8e962498"
+  },
+  "reporting/final": {
+    "sha256": "3aa5b0b59d55b27a609f14ec94f064e7e89407eef29d7b2b812809d6201bd080",
+    "values": {
+      "result_contract": "CONTRACT"
+    }
+  },
+  "reporting/repair": {
+    "sha256": "39f6eb10ffc5276ece6e28642b3b9bfe2a13f1057daff67c34e337ecf4615b57",
+    "values": {
+      "reason": "invalid_json",
+      "result_contract": "CONTRACT"
+    }
+  },
+  "delegation/reviewer": {
+    "sha256": "f0ea9bc0ea448dd92ab8c2731ed954ac0a8200826a24bf3a3a35252ab6d29d3d"
+  },
+  "delegation/review_routing": {
+    "sha256": "675c26e2a2853c1c3d6c8ed7726c71994e70e393556d5052b59f00533ae9d71e"
+  },
+  "delegation/instructions": {
+    "sha256": "9685dd3480cc7415b60c729fe5aa14a9e9670a8140cb49b25fcd457d4328ced5",
+    "values": {
+      "role": "engineer",
+      "review_routing": "ROUTING ",
+      "description": "CAPABILITY"
+    }
+  },
+  "delegation/latest_request": {
+    "sha256": "1be35145eb04228225e8ad0a7e7c5ba8f206fa920341d80b954d2b8b66e7bb9b"
+  },
+  "delegation/handoff": {
+    "sha256": "467cc01ca6962083025ae561db1953968db3f9e2691f7d700d7fc1846b25db3d",
+    "values": {
+      "handoff": "TASK",
+      "context": "CONTEXT"
+    }
+  },
+  "review/tool": {
+    "sha256": "9bb6ea791c4c2919d5dd681ba1e1e0562076ccf8fe4cde7983e76a2836773cf5"
+  },
+  "review/focus": {
+    "sha256": "8eb3739a08b09b8514743053fe94707e77f7bbdbce3f13a1b2d58e97cc7e31f6"
+  },
+  "memory/context": {
+    "sha256": "ba4a5532ba77b121ef50fda37198b4a5a7eeedf477636f0af9bd435308b9b4de"
+  },
+  "memory/extract": {
+    "sha256": "9868d9db322dba4bc4c72fe05792231ef1042da0ea920a7cd2c199efac77c7eb",
+    "values": {
+      "max_memories": 5
+    }
+  },
+  "skills/references": {
+    "sha256": "29d5e883638177c635a8cf7431cfcda6a438d9ecef5615dac94e7af861d64970"
+  },
+  "delegation/tool": {
+    "sha256": "7fc8ace9f2915f5045ced599d4fb947f352af2577abb3e769cc0723ffd450d8f"
+  },
+  "harness2/addendum": {
+    "sha256": "2147be410baf221294e3d1b015b2bcce4a8b2a6e02464bfa964fab0569b10956"
+  },
+  "harness2/planning": {
+    "sha256": "1fb2cf1836acdbfa617d5bb2d12e3f7d2723fe82799b63a18e58e777a4af2c81"
+  },
+  "harness2/proposal_tool": {
+    "sha256": "33717eccf381f2ff1b3214fabfbe828bd981a181ffa56c5e926615873b537f77"
+  },
+  "harness2/seed": {
+    "sha256": "028690ece81d8e76d5f188ab64d9cb9d51ee4ad064d4a74a4c3ae70db03de7e4"
+  },
+  "harness2/work_execution": {
+    "sha256": "29f0b1a1a90f9a04dd208e8e1300c51881b30c778407316ad7206ccf3b6f1946"
+  },
+  "harness2/work_planning": {
+    "sha256": "a9d880800b4c8820aef18bf985b9e5f9cff0505617ec7f08b41066619dfcacde"
+  },
+  "harness2/selection_checks": {
+    "sha256": "8994a4b7d146a564183f25c35952ab88bc452f8145d54215bbd46e4eff6361d7"
+  },
+  "harness2/planning_guidance": {
+    "sha256": "e78f280913da742b5cee6f5e681d1ec61a7ae5a6c8a11e7197fb420fc93a437f"
+  },
+  "harness2/retry": {
+    "sha256": "0fc88d2e6bd1b411008bc93930d364bbe4f4b04c7aff6ec45d90667a9e636af5"
+  },
+  "harness2/proposal": {
+    "sha256": "0d73aa08107af9c17861ec5d1284350e2c14554ac741b66e9546ef281c107121"
+  },
+  "harness2/experience": {
+    "sha256": "f28fc86679fdbc166945703656c9b04d1368f46f78ad157263147c7f0e6a0484"
+  },
+  "harness2/selection": {
+    "sha256": "20104b88025312b1b751694963caa69e1d03624b20bad6ec9643531977c75c44",
+    "values": {
+      "subject": "plans"
+    }
+  },
+  "harness2/comparison_planning": {
+    "sha256": "ae6b1b19683c876c8662ec669761307575ff5ef1543bf25dc26d0b951fb895e8"
+  },
+  "harness2/comparison_execution": {
+    "sha256": "4833dda9adfc1e251ffe37f573d2d2c1c2455dedd3e8b15d3746c71a40379b40"
+  },
+  "harness2/improver": {
+    "sha256": "1266f743c59753e268140d24ef4758b0e3092b04f8e647258ff5ebce31b0c4e7",
+    "values": {
+      "comparison": "Compare planning behavior; actual task correctness has not been measured."
+    }
+  },
+  "holmes/diagnosis": {
+    "sha256": "9aeb11bca5ebc74441e338b7ffb230af34c750cb6bade97f48503323f67356df"
+  },
+  "holmes/final_report": {
+    "sha256": "bef5856e281efb2d556d3d5e16024fe1533dc4adb33bc4e7c8ff960584909a9b"
+  }
+}

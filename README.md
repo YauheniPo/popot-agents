@@ -421,7 +421,7 @@ unprivileged user inside the container. Model credentials are not forwarded to
 Bash or MCP subprocesses. The host project directory is not mounted into the sandbox. There is no Docker
 socket in the worker. Workspace files are restored from the retained AX snapshot;
 after Task deletion, only saved conversation history remains.
-The worker image includes `rsync`, `ripgrep`, `unzip`, C/C++ build tools, `make`
+The worker image includes `rsync`, `ripgrep`, `jq`, `unzip`, C/C++ build tools, `make`
 and `pkg-config`, alongside Python/venv/pip, Node/npm, Git and curl.
 Both `$HOME` and the tool user's passwd home point to the durable `/workspace`;
 tools that expand `~agent` (including Ansible local connections) use the same
@@ -431,6 +431,21 @@ packages can be installed without root. Project dependencies can be installed
 in virtual environments or locally through npm. Startup restores `/dev/shm` to mode `1777`
 inside the sandbox so the unprivileged tool user can create multiprocessing
 semaphores (including those needed by Ansible). Tools still run as UID 10001.
+
+Bash saves stdout/stderr in `.tool-results/` before returning a bounded preview,
+exit code and artifact path. Read the saved output with `read_tool_output` instead
+of rerunning a check to retrieve its failures. Timed-out commands return a
+recoverable error with the partial output. Logs stay in the workspace snapshot;
+commands that redirect or pipe away their output must preserve those logs themselves.
+Progress events include a SHA-256 command fingerprint to identify identical command
+text without printing the command or its output; this does not prove identical
+working directory, revision or environment.
+
+Review verification policy lives in
+[`config/prompts/review/verification.md`](config/prompts/review/verification.md).
+It requires explicit reasons for new checks/repeats and comparison of failure IDs
+and causes on head/base. These are model instructions, not an automatic proof of
+failure equivalence or a ban on justified reruns.
 
 The same role's `mcpServers` section starts the public reference
 [Fetch MCP server](https://github.com/modelcontextprotocol/servers/blob/main/src/fetch/README.md)
@@ -578,6 +593,14 @@ workspace (for example `popot-agents`), not `/workspace/popot-agents` or a neste
 path. Its schema exposes the naming constraints. Missing clone arguments,
 invalid directory names and existing destinations are returned as failed tool
 results so the model can correct them within the round/turn budget.
+For a pinned revision or PR head, pass `commit_sha` (the full commit SHA from
+metadata, not a file blob SHA). The tool clones without checking out the default
+branch, fetches the commit, checks it out detached and verifies `HEAD` before
+returning `verified_commit=<sha>`. All steps share the clone timeout. Failed
+fetches leave no default-branch source to mistake for the requested revision;
+any failure leaves the destination unverified and requires inspection before reuse.
+Clone timeouts return a failed tool result so the agent can inspect partial effects;
+the runtime never retries the clone automatically.
 
 Limits use existing settings: role `max_tool_rounds` (otherwise
 `config/runtime.json → model.default_max_tool_rounds`) and role
@@ -617,6 +640,13 @@ recursively appended to the user-facing result.
 Requests to resume an already completed child return its previous verified result
 with `continuation_skipped=true` and an explicit notice that no new work ran.
 Fresh verification requires a new task, not continuation of a completed session.
+The HTTP harness exposes `delegate_task.scope`: `subtask` (default) keeps parent
+tools available; `whole_task` means the child owns every requested deliverable.
+After a valid completed child outcome with evidence and no unresolved delegated
+failures, `whole_task` blocks later calls in the same batch and switches the parent
+to a tool-free final report. Partial children remain resumable. Scope selection is
+the model's responsibility; compound tasks with remaining parent work use `subtask`.
+This control is local to the HTTP parent and is not passed to the child API.
 
 `code_reviewer` has code-review, diagnosing-bugs, codebase-design, TDD and handoff
 skills, with GitHub tools for reading files, commits and PRs and publishing inline

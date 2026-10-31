@@ -1,6 +1,8 @@
 """Bound review work between explicit, model-reported progress checkpoints."""
+
 import json
 
+from popot_agents.prompts import render_prompt
 from popot_agents.tools import ToolInputError
 
 
@@ -9,10 +11,7 @@ INTERVAL = 6
 FIELDS = ('covered_files', 'decisions', 'remaining_work')
 SCHEMA = {'type': 'function', 'function': {
     'name': NAME,
-    'description': 'Record reviewed paths, accepted/rejected candidates with evidence, and concrete remaining work. '
-        'Paths and decisions accumulate: send only additions, citing new evidence and the earlier '
-        'decision when superseding it. remaining_work replaces the pending list. Include publication and read-back '
-        'in remaining_work. When nothing remains, pass [] to end tool use and return the final answer.',
+    'description': render_prompt('review/tool'),
     'parameters': {'type': 'object', 'properties': {
         key: {'type': 'array', 'maxItems': 100,
               'items': {'type': 'string', 'minLength': 1, 'maxLength': 2000}} for key in FIELDS},
@@ -48,10 +47,5 @@ class ReviewProgress:
                            'notice': 'Model-reported progress, not independent proof of completion.'})
 
     def focus(self):
-        return ('Continue the concrete remaining work in the checkpoint below. Do not restart '
-                'a completed area or reopen a rejected candidate without citing new evidence. '
-                'Read the relevant source or run one discriminating check before speculating; '
-                'do not enumerate hypothetical defects already rejected. If remaining work is '
-                'done, record [] immediately, without inventing one more optional pass. '
-                'Paths and decisions are cumulative model reports, not verification receipts.\n'
+        return (render_prompt('review/focus') + '\n'
                 + json.dumps(self.snapshot, ensure_ascii=False))

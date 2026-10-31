@@ -45,7 +45,11 @@ class HolmesRunnerTests(unittest.TestCase):
 
     def run_runner(self):
         output = io.StringIO()
-        settings = (RUNNER.parents[2] / 'config/holmes.json').read_text()
+        from popot_agents.prompts import render_prompt
+        settings = json.loads((RUNNER.parents[2] / 'config/holmes.json').read_text())
+        settings['prompts'] = {name: render_prompt('holmes/' + name)
+                              for name in ('diagnosis', 'final_report')}
+        settings = json.dumps(settings)
         with patch.dict(sys.modules, self.modules), \
              patch.dict(os.environ, {'HOLMES_MODEL': 'diagnostic-model',
                                      'OPENAI_API_KEY': 'test-provider-secret',
@@ -136,12 +140,12 @@ class HolmesRunnerTests(unittest.TestCase):
             module=ModuleType(name);module.__dict__.update(exports);modules[name]=module
         with patch.dict('sys.modules',modules):
             namespace=runpy.run_path(str(Path(__file__).parents[1]/'holmes/runner.py'))
-        model=namespace['FinishingLLM'](args={'max_tokens':8192})
+        model=namespace['FinishingLLM'](args={'max_tokens':8192}, final_report_prompt='Configured final report')
         normal=model.completion([{'role':'user','content':'Inspect'}],tools=[{'function':{}}],tool_choice='auto')
         self.assertNotIn('tool_choice',normal['args'])
         final=model.completion([{'role':'user','content':'Inspect'}],tools=None,tool_choice=None)
         self.assertEqual(final['args']['tool_choice'],'none')
-        self.assertIn('final report',final['messages'][-1]['content'])
+        self.assertEqual(final['messages'][-1]['content'], 'Configured final report')
         self.assertNotIn('tool_choice',model.args)
 
 

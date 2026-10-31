@@ -37,6 +37,7 @@ RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2
 COPY --from=ax-cli /ax /usr/local/bin/ax
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/
+COPY popot_agents/prompts.py /app/popot_agents/
 COPY popot_agents/progress.py /app/popot_agents/
 COPY skills /app/skills
 COPY popot_agents/orchestrator /app/popot_agents/orchestrator

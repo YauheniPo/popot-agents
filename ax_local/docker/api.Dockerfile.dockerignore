@@ -6,6 +6,7 @@
 !popot_agents/runtime_config.py
 !popot_agents/role_env.py
 !popot_agents/skills.py
+!popot_agents/prompts.py
 !popot_agents/progress.py
 !skills/
 !skills/**

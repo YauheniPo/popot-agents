@@ -76,10 +76,17 @@ class LocalToolRecoveryTests(unittest.TestCase):
         self.assertTrue(result['isError'])
         self.assertIn('not allowed: git_clone', result['error'])
 
-    def test_execution_failure_is_not_retried(self):
-        for failure in (RuntimeError('command timed out'), ValueError('invalid runtime config')):
-            with self.subTest(failure=str(failure)):
-                with self.assertRaisesRegex(RuntimeError, str(failure)):
-                    self.run_turn(['repo'], command_error=failure)
-                self.command.assert_called_once()
-                self.assertEqual(len(self.requests), 1)
+    def test_clone_timeout_returns_evidence_without_automatic_retry(self):
+        self.run_turn(['repo'], command_error=RuntimeError('command timed out'))
+        self.command.assert_called_once()
+        self.assertEqual(len(self.requests), 2)
+        result = json.loads(self.requests[-1]['messages'][-1]['content'])
+        self.assertTrue(result['isError'])
+        self.assertIn('command timed out', result['error'])
+        self.assertIn('checkout is unverified', result['error'])
+
+    def test_invalid_runtime_config_stops_without_retry(self):
+        with self.assertRaisesRegex(RuntimeError, 'invalid runtime config'):
+            self.run_turn(['repo'], command_error=ValueError('invalid runtime config'))
+        self.command.assert_called_once()
+        self.assertEqual(len(self.requests), 1)

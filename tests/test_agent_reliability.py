@@ -214,6 +214,80 @@ class AgentReliabilityTests(unittest.TestCase):
         self.assertEqual(state['completed_delegations']['a'*16], done)
         self.assertEqual(state['outcome']['status'], 'partial')
 
+    def test_whole_task_delegation_ends_tools_but_subtask_keeps_them(self):
+        from unittest.mock import Mock
+        done = {'sessionId': 'a'*16, 'role': 'qa_engineer', 'state': 'TASK_STATE_COMPLETED',
+                'answer': 'Tests verified', 'outcome': {'status': 'completed',
+                'evidence': ['test report'], 'remaining_work': [], 'errors': []}}
+        for scope in ('whole_task', 'subtask'):
+            with self.subTest(scope=scope):
+                call = self.delegate_call()
+                arguments = json.loads(call['tool_calls'][0]['function']['arguments'])
+                call['tool_calls'][0]['function']['arguments'] = json.dumps({**arguments, 'scope': scope})
+                call['tool_calls'].append({'id': 'irrelevant', 'function': {
+                    'name': 'calculate', 'arguments': '{"expression":"35035+9250"}'}})
+                delegate = Mock(return_value=json.dumps(done))
+                with patch('popot_agents.worker.http_harness.execute_tool', return_value='44285') as execute:
+                    _, state, bodies = self.run_sequence([call, self.result()], delegate=delegate)
+                self.assertEqual(execute.call_count, 0 if scope == 'whole_task' else 1)
+                self.assertEqual(bodies[-1].get('tool_choice') == 'none', scope == 'whole_task')
+                self.assertNotIn('scope', delegate.call_args.args[0])
+                self.assertEqual(state['outcome']['status'], 'completed')
+
+    def test_partial_whole_task_child_keeps_continuation_available(self):
+        from unittest.mock import Mock
+        call = self.delegate_call()
+        arguments = json.loads(call['tool_calls'][0]['function']['arguments'])
+        call['tool_calls'][0]['function']['arguments'] = json.dumps({**arguments, 'scope': 'whole_task'})
+        delegate = Mock(return_value=json.dumps({'sessionId': 'a'*16, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_COMPLETED', 'answer': 'Tests remain', 'resumable': True,
+            'outcome': {'status': 'partial', 'evidence': [], 'remaining_work': ['run tests'], 'errors': []}}))
+        _, state, bodies = self.run_sequence([call, self.result('partial', remaining=['run tests'])],
+                                             delegate=delegate)
+        self.assertIn('tools', bodies[-1])
+        self.assertEqual(state['outcome']['status'], 'partial')
+
+    def test_whole_task_requires_explicit_completed_outcome(self):
+        from unittest.mock import Mock
+        for outcome in (None, {'status': 'completed', 'evidence': [], 'errors': [], 'remaining_work': []}):
+            with self.subTest(outcome=outcome):
+                call = self.delegate_call()
+                arguments = json.loads(call['tool_calls'][0]['function']['arguments'])
+                call['tool_calls'][0]['function']['arguments'] = json.dumps({**arguments, 'scope': 'whole_task'})
+                delegate = Mock(return_value=json.dumps({'sessionId': 'a'*16, 'role': 'qa_engineer',
+                    'state': 'TASK_STATE_COMPLETED', 'answer': 'Done', 'outcome': outcome}))
+                _, _, bodies = self.run_sequence([call, self.result()], delegate=delegate)
+                self.assertIn('tools', bodies[-1])
+
+    def test_whole_task_final_format_repair_never_reopens_tools(self):
+        from unittest.mock import Mock
+        call = self.delegate_call()
+        arguments = json.loads(call['tool_calls'][0]['function']['arguments'])
+        call['tool_calls'][0]['function']['arguments'] = json.dumps({**arguments, 'scope': 'whole_task'})
+        delegate = Mock(return_value=json.dumps({'sessionId': 'a'*16, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_COMPLETED', 'answer': 'Done', 'outcome': {'status': 'completed',
+            'evidence': ['test report'], 'remaining_work': [], 'errors': []}}))
+        _, state, bodies = self.run_sequence([call, {'content': 'Invalid JSON'},
+            self.result('partial', remaining=['user requirement not covered by child'])], delegate=delegate)
+        self.assertTrue(all(body.get('tool_choice') == 'none' for body in bodies[1:]))
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertEqual(state['outcome']['reason'], 'agent_reported')
+        delegate.assert_called_once()
+
+    def test_invalid_reuse_of_completed_child_does_not_end_parent_tools(self):
+        from unittest.mock import Mock
+        done = {'sessionId': 'a'*16, 'role': 'qa_engineer', 'state': 'TASK_STATE_COMPLETED',
+                'answer': 'Tests verified', 'outcome': {'status': 'completed',
+                'evidence': ['test report'], 'remaining_work': [], 'errors': []}}
+        invalid = self.delegate_call()
+        invalid['tool_calls'][0]['function']['arguments'] = json.dumps({
+            'role': 'qa_engineer', 'task': 'Different work', 'scope': 'whole_task',
+            'session_id': 'a'*16, 'replaces_session_id': 'b'*16})
+        _, _, bodies = self.run_sequence([self.delegate_call(), invalid, self.result()],
+                                         delegate=Mock(return_value=json.dumps(done)))
+        self.assertIn('tools', bodies[-1])
+        self.assertIn('Replacement requires', bodies[-1]['messages'][-1]['content'])
+
     def test_mcp_cleanup_failure_preserves_the_received_result_without_repeating_write(self):
         calls = []
         class Client:

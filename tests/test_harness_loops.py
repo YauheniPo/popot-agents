@@ -240,8 +240,8 @@ class HttpRecoveryLoopTests(unittest.TestCase):
         self.assertIn('not allowed', event['error'])
 
     def test_failed_file_operation_can_be_repaired_by_next_step(self):
-        failure = subprocess.CompletedProcess([], 2, '', 'file not found')
-        success = subprocess.CompletedProcess([], 0, 'file contents', '')
+        failure = subprocess.CompletedProcess([], 2, b'', b'file not found')
+        success = subprocess.CompletedProcess([], 0, b'file contents', b'')
         with patch.object(tools, 'subprocess') as process:
             process.run.side_effect = [failure, success]
             self.assertEqual(self.run_messages([

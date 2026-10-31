@@ -16,6 +16,13 @@ TEST_MODEL = 'selected-free-combo'
 
 
 class HolmesTests(unittest.TestCase):
+    def test_prompt_templates_are_delivered_with_job_settings(self):
+        from popot_agents.prompts import render_prompt
+        data = next(o for o in manifests(CONFIG) if o['kind'] == 'ConfigMap')['data']
+        prompts = json.loads(data['settings.json'])['prompts']
+        self.assertEqual(prompts['diagnosis'], render_prompt('holmes/diagnosis'))
+        self.assertEqual(prompts['final_report'], render_prompt('holmes/final_report'))
+
     def setUp(self):
         bundle = patch('ax_local.cluster.holmes.omniroute_ca_bundle', return_value='public-ca-bundle')
         bundle.start()

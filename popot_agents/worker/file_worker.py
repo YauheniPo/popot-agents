@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from urllib import request
 
@@ -16,12 +17,13 @@ from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import MAX_TOOL_OUTPUT, WORKSPACE_ROOT, _public_url, workspace_path
 
 
-def _atomic_write(path, content: bytes) -> None:
+def _atomic_write(path, chunks) -> None:
     path.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as file:
-            file.write(content)
+            for chunk in chunks:
+                file.write(chunk)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -30,6 +32,14 @@ def _atomic_write(path, content: bytes) -> None:
 
 def main() -> None:
     action = sys.argv[1]
+    if action == 'save_output':
+        if (WORKSPACE_ROOT / '.tool-results').is_symlink():
+            raise ValueError('saved tool output directory must not be a symlink')
+        path = workspace_path(f'.tool-results/{uuid.uuid4().hex}.txt')
+        sys.stdin.reconfigure(encoding='utf-8', errors='replace', newline='')
+        _atomic_write(path, (chunk.encode('utf-8') for chunk in iter(lambda: sys.stdin.read(65536), '')))
+        sys.stdout.write(str(path.relative_to(WORKSPACE_ROOT.resolve())))
+        return
     arguments = json.load(sys.stdin)
     path = workspace_path(arguments["path"])
     if action == 'read_tool_output' and ((WORKSPACE_ROOT / '.tool-results').is_symlink()
@@ -37,7 +47,7 @@ def main() -> None:
         raise ValueError('saved tool output must not be a symlink')
     if action in {"read", "read_tool_output"}:
         offset, limit = arguments.get('offset', 0), arguments.get('limit', MAX_TOOL_OUTPUT)
-        with path.open(encoding="utf-8") as file:
+        with path.open(encoding="utf-8", newline="") as file:
             remaining = offset
             while remaining:
                 skipped = file.read(min(remaining, 65536))
@@ -50,7 +60,7 @@ def main() -> None:
             reader = 'read_tool_output' if action == 'read_tool_output' else 'read_file'
             sys.stdout.write(f"\n[output truncated; continue with {reader} offset={offset + limit} limit={limit}]")
     elif action == "write":
-        _atomic_write(path, arguments["content"].encode("utf-8"))
+        _atomic_write(path, [arguments["content"].encode("utf-8")])
         sys.stdout.write(f"wrote {path.relative_to(WORKSPACE_ROOT.resolve())}")
     elif action == "download":
         url = _public_url(arguments["url"])
@@ -59,7 +69,7 @@ def main() -> None:
             content = response.read(RUNTIME["limits"]["download_bytes"] + 1)
         if len(content) > RUNTIME["limits"]["download_bytes"]:
             raise ValueError(f"download exceeds {RUNTIME['limits']['download_bytes']} bytes")
-        _atomic_write(path, content)
+        _atomic_write(path, [content])
         sys.stdout.write(f"downloaded {len(content)} bytes to {path.relative_to(WORKSPACE_ROOT.resolve())}")
     else:
         raise ValueError("unknown file action")

@@ -15,8 +15,9 @@ script = r"""
 import json, multiprocessing, os, pwd, shutil, subprocess, tempfile
 from pathlib import Path
 assert os.geteuid() == 10001, os.geteuid()
-for tool in ('cc', 'make', 'pkg-config', 'rg', 'unzip', 'git', 'node', 'npm'):
+for tool in ('cc', 'make', 'pkg-config', 'rg', 'unzip', 'jq', 'git', 'node', 'npm'):
     assert shutil.which(tool), 'missing development tool: '+tool
+assert subprocess.check_output(['jq', '-r', '.ok'], input=b'{"ok":true}', timeout=5).strip() == b'true'
 print(json.dumps({'home':os.environ['HOME'], 'passwd_home':pwd.getpwuid(os.geteuid()).pw_dir}), flush=True)
 assert pwd.getpwuid(os.geteuid()).pw_dir == os.environ['HOME']
 shm = os.stat('/dev/shm')
