@@ -1,7 +1,7 @@
 # Навыки для агентов
 
-Импортированы 15 навыков из [mattpocock/skills](https://github.com/mattpocock/skills/tree/5beb35b040e3de97e54fa9e386d7e42d15c295c2/skills)
-на коммите `5beb35b040e3de97e54fa9e386d7e42d15c295c2` (проверен `main` 21 октября 2026).
+Импортированы 15 навыков из [mattpocock/skills](https://github.com/mattpocock/skills/tree/a496f5513d4a4cf889bc48e189e579f4b0bdf6aa/skills)
+на коммите `a496f5513d4a4cf889bc48e189e579f4b0bdf6aa` (проверен `main` 31 октября 2026).
 Исходные файлы скопированы без изменений вместе со
 справочниками, шаблонами и `agents/`. Лицензия: [MIT](LICENSE.mattpocock).
 Версия и SHA-256 каждого файла: [upstream.json](upstream.json).
