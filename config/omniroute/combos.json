@@ -109,5 +109,44 @@
       "maxSetRetries": 0,
       "compressionMode": "off"
     }
+  },
+  "ax-ollama": {
+    "name": "ax-ollama",
+    "description": "Paid Ollama Cloud routes: DeepSeek V4 Pro 0813 first, then GLM 5.3 Flash, MiniMax M2.7, DeepSeek V4.1 Flash and 1017. Catalog and tool cycles checked 2026-10-31.",
+    "strategy": "priority",
+    "models": [
+      {
+        "kind": "model",
+        "providerId": "ollama-cloud",
+        "model": "ollama-cloud/deepseek-v4-pro:0813"
+      },
+      {
+        "kind": "model",
+        "providerId": "ollama-cloud",
+        "model": "ollama-cloud/glm-5.3-flash"
+      },
+      {
+        "kind": "model",
+        "providerId": "ollama-cloud",
+        "model": "ollama-cloud/minimax-m2.7"
+      },
+      {
+        "kind": "model",
+        "providerId": "ollama-cloud",
+        "model": "ollama-cloud/deepseek-v4.1-flash"
+      },
+      {
+        "kind": "model",
+        "providerId": "ollama-cloud",
+        "model": "ollama-cloud/deepseek-v4.1-flash:1017"
+      }
+    ],
+    "config": {
+      "targetTimeoutMs": 60000,
+      "comboTimeoutMs": 105000,
+      "maxGlobalAttempts": 5,
+      "maxSetRetries": 0,
+      "compressionMode": "off"
+    }
   }
 }

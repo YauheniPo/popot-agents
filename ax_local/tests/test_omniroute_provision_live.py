@@ -40,6 +40,7 @@ class LiveProvisionTests(unittest.TestCase):
             'OMNIROUTE_API_KEY': 'sk-' + secrets.token_hex(24),
             'OPENROUTER_API_KEY': 'sk-test-' + secrets.token_hex(16),
             'NVIDIA_API_KEY': 'nvapi-test-' + secrets.token_hex(16),
+            'OLLAMA_API_KEY': 'ollama-test-' + secrets.token_hex(16),
         }
         cls.docker('run', '-d', '--name', cls.name, '--network', 'none', '-e', 'INITIAL_PASSWORD',
                    '-e', 'REQUIRE_API_KEY=true',
@@ -120,7 +121,7 @@ class InnerProvisionTests(unittest.TestCase):
         after = api.request('GET', '/api/settings/export-json')
         for field in ('providerConnections', 'combos', 'apiKeys'):
             self.assertEqual([x['id'] for x in before[field]], [x['id'] for x in after[field]])
-        self.assertEqual(len(after['providerConnections']), 2)
+        self.assertEqual(len(after['providerConnections']), len(config['providers']))
         self.assertEqual(len(after['combos']), len(combos))
         self.assertEqual(len(after['apiKeys']), 1)
         key = after['apiKeys'][0]

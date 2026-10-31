@@ -17,6 +17,30 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class ManagedConfigTests(unittest.TestCase):
+    def test_ollama_budget_is_separate_from_free_routes_and_provisions_idempotently(self):
+        root = Path(__file__).resolve().parents[2]
+        config = json.loads((root / 'config/omniroute/settings.json').read_text())
+        combos = json.loads((root / 'config/omniroute/combos.json').read_text())
+        budget = combos['ax-ollama']
+        self.assertEqual({target['providerId'] for target in budget['models']}, {'ollama-cloud'})
+        for name, combo in combos.items():
+            if name.endswith('-free'):
+                self.assertNotIn('ollama-cloud', {target['providerId'] for target in combo['models']})
+        environment = {item['apiKeyEnv']: 'test-' + provider
+                       for provider, item in config['providers'].items()}
+        environment.update(OMNIROUTE_INITIAL_PASSWORD='test-admin', OMNIROUTE_API_KEY='test-gateway')
+        gateway = Gateway()
+        provision(gateway, config, combos, environment)
+        ollama = next(c for c in gateway.state['providerConnections'] if c['provider'] == 'ollama-cloud')
+        self.assertEqual(ollama['apiKey'], environment['OLLAMA_API_KEY'])
+        actual = next(c for c in gateway.state['combos'] if c['name'] == budget['name'])
+        self.assertEqual([t['model'] for t in actual['models']], [t['model'] for t in budget['models']])
+        self.assertTrue(all(t['connectionId'] == ollama['id'] for t in actual['models']))
+        self.assertTrue({t['model'] for t in budget['models']} <= set(gateway.state['apiKeys'][0]['allowedModels']))
+        writes = len(gateway.writes)
+        provision(gateway, config, combos, environment)
+        self.assertEqual(len(gateway.writes), writes)
+
     def test_cooldown_budget_leaves_time_for_model_fallback(self):
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / 'config/omniroute/settings.json').read_text())
