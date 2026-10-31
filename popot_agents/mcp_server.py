@@ -330,6 +330,9 @@ def main() -> None:
                        ctx: Context = None) -> dict:
         """Start a task with role (use chat for general questions) or agent. For a follow-up,
         pass the returned sessionId or session_id instead. If the role is unclear, ask the user.
+        For clients that hide progress notifications, monitor the running call with
+        list_chats then get_chat; poll every 15-30 seconds and report changed progress.
+        Do not repeat run_task to check status. Progress does not prove task completion.
         """
         sessionId = _normalized_session_id(sessionId)
         session_id = _normalized_session_id(session_id)
@@ -372,12 +375,18 @@ def main() -> None:
 
     @server.tool()
     def list_chats() -> dict:
-        """List saved chats and their session IDs, roles, status, and expiry."""
+        """List chats with IDs, roles, status, expiry and compact worker progress.
+        Use during a running task to find its session and read its last action/error.
+        """
         return client.list_chats()
 
     @server.tool()
     def get_chat(session_id: str) -> dict:
-        """Get the status and metadata of one saved chat."""
+        """Read a chat's status and compact progress without waiting for its task.
+        Progress includes the latest action, last error, elapsed time and model/tool
+        call counts. Report changed progress, without inferring unreported checks.
+        Poll every 15-30 seconds while another task call is still running.
+        """
         return client.get_chat(session_id)
 
     server.run(

@@ -29,9 +29,9 @@ API на порту 8002 доступен только контейнерам Co
 {"role":"project_operator","task":"Проверь здоровье проекта через Holmes, метрики Prometheus, маршруты моделей и память Cognee. Найди причины сбоев и предложи улучшения. Ничего не меняй."}
 ```
 
-Роль использует профиль `omniroute_ops` и `OMNIROUTE_OPS_MODEL=ax-ops-free`
-из `.env`: Super VL первой, затем существующие бесплатные маршруты. Holmes
-также настроен на `HOLMES_MODEL=ax-ops-free`; состав комбо находится в
+Роль использует профиль `omniroute_ops` и `OMNIROUTE_FREE_MODEL=ax-free`
+из `.env`: North Mini Code первой, затем NVIDIA Lightning. Holmes
+также настроен на `HOLMES_MODEL=ax-free`; состав комбо находится в
 `config/omniroute/combos.json`. Маршруты остальных ролей не меняются. Для неё Harness²
 выключен: расследования и предложения изменений не нужно выполнять повторно.
 `chat`, `planner` и `tech_lead` могут передавать ей аналитические подзадачи.
@@ -163,7 +163,7 @@ GitHub отключены. Ключ GitHub доступен MCP-клиенту �
 Модель роли выполняет пробы, `HARNESS2_IMPROVER_MODEL` предлагает дополнения,
 сравнивает варианты и формирует reflection. Переменная обязательна, когда
 Harness² включён хотя бы у одной роли; резервной модели в коде нет.
-`HARNESS2_IMPROVER_MODEL=ax-harness-free` и состав комбо задаются в `.env` и
+`HARNESS2_IMPROVER_MODEL=ax-free` и состав комбо задаются в `.env` и
 `config/omniroute/combos.json`. Новые ключи провайдеров для этого режима не нужны.
 API выдаёт отдельные ограниченные токены для модели оптимизатора и запуска проб;
 пробные workers эти возможности не получают.
@@ -374,10 +374,12 @@ Cognee и совместимые Fetch/Git используют SDK 2.x. Пос�
 
 Параметры модели берутся из `model_parameters` выбранного провайдера в
 `config/agents.json` и передаются через `HARNESS_MODEL_PARAMETERS_JSON` всем
-его worker, включая дочерние A2A-задачи. Для профилей `omniroute`
-и `omniroute_code` thinking отключён, выход ограничен 8192 токенами.
-`backend_engineer` и `code_reviewer` используют `ollama_cloud` с
-`OLLAMA_CLOUD_MODEL=deepseek-v4.1-flash:1017`; reasoning остаётся по умолчанию провайдера.
+его worker, включая дочерние A2A-задачи. Для профиля `omniroute_free`
+thinking отключён, выход ограничен 8192 токенами. Профили `omniroute_cloud`
+и `ollama_cloud` используют `reasoning_effort=max` и `max_tokens=65536`.
+`backend_engineer`, `frontend_engineer`, `code_reviewer` и `qa_engineer` используют
+`omniroute_cloud` с `OMNIROUTE_CLOUD_MODEL=ax-ollama`. Запросы проходят через шлюз.
+Поддержка уровней thinking зависит от выбранной шлюзом модели.
 Для OpenRouter передаётся `reasoning.enabled=false`, для NVIDIA — нативный
 `chat_template_kwargs.enable_thinking=false`. Оба параметра проверены через
 шлюз 2026-10-20. Это предотвращает расход всего выходного бюджета только на
@@ -422,6 +424,18 @@ progress notifications. Если токен отсутствует, равен `
 а протокол `2026-07-28` может вернуть быстрый ответ без событий обычным JSON. Обычный HTTP API
 продолжает возвращать JSON; для потоковых событий запросите
 `Accept: application/x-ndjson` у `/tasks` или `/messages`.
+
+Если клиент скрывает MCP notifications, во время ожидающего вызова используйте
+`list_chats`, затем `get_chat(session_id)`. Сопоставляйте ID, роль и время создания,
+чтобы не принять соседнюю сессию за текущую. Поле `progress` содержит последнее
+действие, последнюю ошибку, время хода и счётчики событий `model_request`/`tool_call`.
+Чтение занятой сессии не ждёт завершения worker и не запускает его health probe.
+Клиенту следует опрашивать статус раз в 15–30 секунд и показывать изменившиеся
+данные обычным сообщением, без повторного запуска задачи. Это опрос, а не изменение
+нативного интерфейса Codex. Аргументы, вывод инструментов и reasoning в компактный
+статус не входят. Он хранится в памяти API, сбрасывается с новым ходом и становится
+`null` после рестарта API или удаления live-сессии. `completed` означает завершение
+хода; успешность проверок определяется итоговым ответом и их результатами.
 Обрыв соединения не повторяет и не откатывает действия агента.
 
 События дочерних агентов передаются в тот же поток с дополнительным полем
@@ -507,15 +521,15 @@ Compose API/MCP. Уже запущенные контейнеры Compose при
 Роль выбирает профиль через `agent` в `config/roles/`. Профиль из
 `config/agents.json` задаёт endpoint, имя переменной модели (`model_env`) и
 параметры модели. Значение модели берётся из `.env`: например,
-`backend_engineer / code_reviewer → ollama_cloud → OLLAMA_CLOUD_MODEL`,
-`frontend_engineer → omniroute_code → OMNIROUTE_CODE_MODEL`,
-`analyst → omniroute → OMNIROUTE_MODEL`,
+`backend_engineer / frontend_engineer / code_reviewer / qa_engineer → omniroute_cloud → OMNIROUTE_CLOUD_MODEL`,
+`frontend_engineer → omniroute_cloud → OMNIROUTE_CLOUD_MODEL`,
+`analyst → omniroute_free → OMNIROUTE_FREE_MODEL`,
 `chat → openrouter → OPENROUTER_MODEL`. Общего провайдера или модели AX нет.
 Дочерние A2A-задачи и cron также используют профиль своей роли. Все профили
 делят одну очередь с общим лимитом `max_workers`.
 
 Поддерживаются профили с OpenAI-совместимым HTTP API: `openrouter`, `ollama_local`,
-`ollama_cloud`, `nous`, `nvidia_nim`, `omniroute` и `omniroute_code`. CLI-профили `ollama_claude` и
+`ollama_cloud`, `nous`, `nvidia_nim`, `omniroute_free` и `omniroute_cloud`. CLI-профили `ollama_claude` и
 `ollama_claude_local` удалены: AX использует HTTP harness. API при старте проверяет
 модели и необходимые ключи только для профилей, используемых ролями; отсутствие
 этих настроек приводит к явной ошибке. Неиспользуемым профилям ключи не нужны.
@@ -551,7 +565,7 @@ WorkerPool в соответствующем пространстве.
 
 ## OmniRoute для AX
 
-Необязательный профиль `omniroute` использует цепочку
+Необязательный профиль `omniroute_free` использует цепочку
 `AX worker → AX API proxy → OmniRoute → провайдер`.
 Версия Docker-сервиса задаётся `OMNIROUTE_VERSION` в `pyproject.toml`, панель доступна только
 на `https://127.0.0.1:20128`. Настройки, ключи провайдеров и история шлюза хранятся
@@ -586,36 +600,35 @@ bundle через ConfigMap; проверки TLS у Python, Node и Holmes ос
 
 | Комбо | Роли | Порядок моделей |
 | --- | --- | --- |
-| `ax-free` | `chat`, `analyst`, `planner`, `tech_lead`, `qa_engineer`, `cron_demo` | OpenRouter North Mini Code `:free` → NVIDIA Nemotron 3.5 Lightning → OpenRouter Nemotron 3.5 Lightning `:free` |
-| `ax-ops-free` | `project_operator`, Holmes | OpenRouter Nemotron 3.5 Super VL `:free` → маршруты `ax-free` |
-| `ax-code-free` | `backend_engineer`, `frontend_engineer`, `code_reviewer` | OpenRouter North Mini Code `:free` → NVIDIA Nemotron 3.5 Lightning → OpenRouter Nemotron 3.5 Lightning `:free` |
-| `ax-harness-free` | Harness² improver | OpenRouter Nemotron 3.5 Super VL `:free` |
+| `ax-free` | `chat`, `analyst`, `planner`, `tech_lead`, `cron_demo`, `project_operator`, Holmes, Harness² | OpenRouter North Mini Code `:free` → NVIDIA Nemotron 3.5 Lightning |
+| `ax-ollama` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | DeepSeek V4 Pro 0813 → DeepSeek V4.1 Flash 1017 → GLM 5.3 Flash |
 
-Точные model IDs: `nvidia/nemotron-3.5-lightning-30b-a3b` у NVIDIA,
-`nvidia/nemotron-3.5-lightning:free`, `nvidia/nemotron-3.5-super-vl:free` и
-`cohere/north-mini-code:free` у OpenRouter.
+Точные бесплатные model IDs: `nvidia/nemotron-3.5-lightning-30b-a3b` у NVIDIA
+и `cohere/north-mini-code:free` у OpenRouter. Отдельных комбо для кода,
+операций и Harness² больше нет: используются только два маршрута выше.
 Комбо и fallback-цепочки заданы в `config/omniroute/combos.json`, настройки,
 cooldown, circuit breaker и ссылки на секреты — в `config/omniroute/settings.json`.
 При запуске AX сервис `omniroute-init` применяет оба файла через management API
 и проверяет результат перед стартом API/MCP. ID подключений подставляются из
 целевого окружения; локальные UUID в Git не сохраняются.
-Доступ ключа AX ограничен тремя подключениями, девятью моделями и пятью комбо,
+Доступ ключа AX ограничен тремя подключениями, пятью моделями и двумя комбо,
 включая платное Ollama Cloud-комбо ниже; Auto Combos отключены.
-В рабочих бесплатных комбо заданы ожидание одного target 45 секунд и бюджет каскада 105 секунд;
-разрешено не более трёх попыток без повторения исчерпанной цепочки. HTTP harness делает
-ноль повторов всей цепочки (`request_retries: 0`). Для `ax-harness-free` предусмотрен
-один target с ожиданием до 90 секунд и общим бюджетом 105 секунд.
-У `ax-ops-free` четыре targets: ожидание одного до 60 секунд, общий бюджет
-105 секунд и не более четырёх попыток. Сжатие контекста отключено.
+У `ax-free` ожидание одного target — 45 секунд, бюджет каскада — 105 секунд;
+разрешено не более двух попыток без повторения исчерпанной цепочки. HTTP harness
+делает ноль повторов всей цепочки (`request_retries: 0`). Сжатие контекста отключено.
 Ожидание короткого cooldown ограничено 15 секундами: для соединения разрешён
 один повтор, для комбо — две попытки с общим бюджетом ожидания 30 секунд.
 Это оставляет время на вызов target в пределах общего бюджета комбо;
-HTTP harness ждёт ответ до 120 секунд. RPM и параллелизм очереди остаются
+HTTP harness ждёт ответ до 900 секунд. RPM и параллелизм очереди остаются
 настройками окружения и должны соответствовать квотам upstream.
 Маскирование credentials включено для запросов и ответов, включая аргументы
 и результаты инструментов. Оно заменяет распознанные секреты и не заменяет
 контроль доступа. Встроенные память, skills, debug и Chaos для ключа AX
 явно отключены: память и навыки задаются runtime и ролями.
+`settings.call_log_pipeline_enabled=true` сохраняет содержимое новых запросов и
+ответов в артефактах OmniRoute для просмотра диалогов. Эти артефакты могут
+содержать пользовательские данные; маскирование credentials не удаляет весь
+приватный текст. Старые диалоги без артефактов автоматически не восстанавливаются.
 North Mini оставлен первым и для общих задач: в новой AX-сессии он вызвал
 `utc_time` и `calculate` и вернул их результаты. В прежней сессии Lightning
 пропустил эти инструменты и выдал выдуманные значения. После изменения маршрутов
@@ -633,13 +646,38 @@ Hosted-доступ NVIDIA здесь используется для локал
 
 `ax-ollama` — отдельное платное `priority`-комбо:
 `ollama-cloud/deepseek-v4-pro:0813` →
-`ollama-cloud/glm-5.3-flash` → `ollama-cloud/minimax-m2.7` →
-`ollama-cloud/deepseek-v4.1-flash` → `ollama-cloud/deepseek-v4.1-flash:1017`. Существующие `*-free` цепочки не используют Ollama.
+`ollama-cloud/deepseek-v4.1-flash:1017` → `ollama-cloud/glm-5.3-flash`. Бесплатное комбо `ax-free` не использует Ollama.
 Модели выбраны по заявленным возможностям программирования и tool calling;
 это не гарантия качества или доступности в конкретном аккаунте.
 31 октября 2026 три исходных прямых маршрута и само комбо прошли реальный цикл
 «вызов инструмента → результат → финальный ответ» через OmniRoute 3.8.51.
 Короткая проверка совместимости не оценивает качество работы с длинной историей.
+
+Лимиты Ollama Cloud проверены через `/api/show` и валидацию `/v1/chat/completions`
+31 октября 2026. Контекст облако уже выставляет в максимум:
+
+| Модель | Контекст | Максимум выходных токенов | Thinking |
+| --- | ---: | ---: | --- |
+| DeepSeek V4 Pro 0813 | 1048576 | 65536 | max |
+| GLM 5.3 Flash | 1048576 | 1048576 | max |
+| DeepSeek V4.1 Flash 1017 | 1048576 | 393216 | max |
+
+Общий бюджет `ax-ollama` — 65536 токенов (reasoning и видимый ответ вместе):
+это максимум основной Pro 0813 и совместимый лимит для fallback. Индивидуальные
+максимумы резервных моделей выше; они не выставляются общим параметром комбо,
+иначе основная Pro возвращает HTTP 400. Параметр `num_ctx` для облака не нужен;
+полный контекст не означает, что AX автоматически заполняет его целиком.
+Источник поведения контекста: [Ollama context length](https://docs.ollama.com/context-length).
+MiniMax M2.7 исключён: API пометил его к выводу из эксплуатации 9 ноября 2026.
+Flash без тега исключён как дубликат закреплённой версии 1017.
+
+`ax-ollama` ждёт одну модель до 600 секунд, всё комбо — до 870 секунд.
+HTTP-запрос worker ограничен 900 секундами (прокси оставляет запас на ответ),
+а оставшееся время хода может сократить любой из этих сроков.
+Суммаризация профилей с `reasoning_effort` использует `low`, сохраняет выходной
+бюджет профиля и ждёт до 300 секунд в пределах остатка времени хода.
+Это оставляет место рассуждениям моделей, у которых их нельзя отключить.
+Настройки применяются к новым сессиям после перезапуска API и пересборки worker.
 
 Цены [Ollama](https://ollama.com/pricing), проверены 31 октября 2026,
 в долларах за миллион токенов без скидки off-peak:
@@ -647,7 +685,6 @@ Hosted-доступ NVIDIA здесь используется для локал
 | Модель | Вход | Кэшированный вход | Выход |
 | --- | ---: | ---: | ---: |
 | GLM-5.3-Flash | 0.15 | 0.03 | 0.50 |
-| MiniMax-M2.7 | 0.30 | 0.06 | 1.20 |
 | DeepSeek-V4.1-Flash | 0.30 | 0.006 | 1.20 |
 
 Дополнительно включён тег `deepseek-v4.1-flash:1017` последним fallback.
@@ -660,12 +697,12 @@ DeepSeek-V4-Pro — $1.32 за миллион входных и $3.96 за ми�
 Bootstrap требует существующий `OLLAMA_API_KEY`, передаёт его только в подключение
 `ollama-cloud` и ограничивает ключ AX перечисленными моделями. Имя ключа
 `popot-ax-free` сохранено для совместимости и не означает бесплатность всех разрешённых моделей.
-Для выбора комбо задайте `OMNIROUTE_MODEL=ax-ollama` или
-`OMNIROUTE_CODE_MODEL=ax-ollama` и перезапустите API, затем начните новую сессию.
+Для выбора комбо задайте `OMNIROUTE_FREE_MODEL=ax-ollama` или
+`OMNIROUTE_CLOUD_MODEL=ax-ollama` и перезапустите API, затем начните новую сессию.
 Роли с прямым профилем `ollama_cloud` продолжают использовать `OLLAMA_CLOUD_MODEL`.
-Комбо переключается при ошибке/таймауте, а не при плохом ответе. Все пять маршрутов
+Комбо переключается при ошибке/таймауте, а не при плохом ответе. Все три маршрута
 используют один аккаунт Ollama: fallback не обходит его квоты или общий сбой.
-Ожидание target — 60 секунд, общий бюджет — 105 секунд, максимум пять попыток,
+Ожидание target — 600 секунд, общий бюджет — 870 секунд, максимум три попытки,
 без повторения цепочки. Thinking зависит от модели; GLM-5.3-Flash всегда рассуждает,
 поэтому настройки отключения thinking не гарантируют отсутствие reasoning-токенов и их стоимости.
 
@@ -676,8 +713,8 @@ Bootstrap требует существующий `OLLAMA_API_KEY`, переда
 
    ```dotenv
    OMNIROUTE_API_KEY=<private-gateway-secret>
-   OMNIROUTE_MODEL=ax-free
-   OMNIROUTE_CODE_MODEL=ax-code-free
+   OMNIROUTE_FREE_MODEL=ax-free
+   OMNIROUTE_CLOUD_MODEL=ax-ollama
    ```
 
    На чистом экземпляре выберите случайный секрет шлюза, например с помощью
@@ -688,7 +725,7 @@ Bootstrap требует существующий `OLLAMA_API_KEY`, переда
    уже настроенной панели.
 
 2. Выполните `bash ax_local/up.sh`. Если хотя бы одна роль использует
-   `omniroute`/`omniroute_code`, launcher автоматически выбирает профиль шлюза
+   `omniroute_free`/`omniroute_cloud`, launcher автоматически выбирает профиль шлюза
    и обязательную зависимость `gateway healthy → omniroute-init completed → AX API`.
    При ошибке настройки запуск API/MCP завершается ошибкой.
    Настройка создаёт или обновляет подключения `popot-ax-openrouter` и
@@ -719,10 +756,9 @@ Bootstrap требует существующий `OLLAMA_API_KEY`, переда
    [фильтрация OmniRoute работает fail-open](https://github.com/diegosouzapw/OmniRoute/blob/v3.8.51/docs/routing/AUTO-COMBO.md).
    При недоступности всех бесплатных targets задача может завершиться ошибкой.
 
-3. В `config/roles/` общие роли выбирают `"agent": "omniroute"`,
-   `frontend_engineer` — `"agent": "omniroute_code"`, а `backend_engineer` и
-   `code_reviewer` — `"agent": "ollama_cloud"` с `OLLAMA_API_KEY` и
-   `OLLAMA_CLOUD_MODEL=deepseek-v4.1-flash:1017` из `.env`. Примените конфигурацию
+3. В `config/roles/` общие роли выбирают `"agent": "omniroute_free"`,
+   `backend_engineer`, `frontend_engineer`, `code_reviewer` и `qa_engineer` —
+   `"agent": "omniroute_cloud"` с `OMNIROUTE_CLOUD_MODEL=ax-ollama` из `.env`. Примените конфигурацию
    через `bash ax_local/up.sh` и начните новую сессию. Проверочный MCP-вызов:
 
    ```json
@@ -730,7 +766,7 @@ Bootstrap требует существующий `OLLAMA_API_KEY`, переда
    ```
 
 Ключ шлюза и обе модели-комбо обязательны для запуска AX, пока роли выбирают
-`omniroute` и `omniroute_code`. Чтобы запустить AX без шлюза, назначьте этим
+`omniroute_free` и `omniroute_cloud`. Чтобы запустить AX без шлюза, назначьте этим
 ролям другой настроенный профиль, например `openrouter`. Его ключ остаётся в AX API,
 worker получает только токен прокси. Сервис настройки получает только пароль
 панели, ключ шлюза и два указанных upstream-секрета; секреты не записываются
@@ -890,7 +926,7 @@ Reviewer может запускать shell-проверки, читать фа
 Большие ответы MCP сохраняются в `.tool-results/`; инструмент `read_tool_output`
 читает их порциями без повторного запроса к GitHub. История/checkpoint — до
 2 000 000 байт, socket — 16 MiB, запрос к model proxy — 8 MiB. Ожидание модели —
-120 секунд на запрос без повтора всей цепочки со стороны harness. Переключение
+900 секунд на запрос без повтора всей цепочки со стороны harness. Переключение
 провайдеров остаётся внутри OmniRoute; общий дедлайн хода сохраняется.
 
 GitHub MCP авторизуется автоматически через `GITHUB_PERSONAL_ACCESS_TOKEN` из `.env`.
@@ -1063,8 +1099,10 @@ bash compose.sh --env-file .env -f ax_local/compose.yaml logs --tail=500 api | g
 вызвать инструмент, runtime возвращает частичный результат и checkpoint с уже
 полученными ответами инструментов.
 
-Извлечение заметок Cognee запрашивает `response_format=json_object`, использует параметры выбранной модели, включая
-настройки reasoning, и ждёт до 120 секунд в пределах оставшегося времени хода,
+Извлечение заметок Cognee запрашивает `response_format=json_object`, кроме прямого
+Ollama и профилей с нативным `reasoning_effort`. Для последних используется `low`
+и полный выходной бюджет профиля; для прямого Ollama запрашивается `none`.
+Извлечение ждёт до 300 секунд в пределах оставшегося времени хода,
 оставляя резерв на запись. Таймаут извлечения не отменяет результат задачи.
 
 Продолжение разрешено только исходному родителю с исходной ролью. Оно расходует
@@ -1206,7 +1244,7 @@ bash compose.sh --env-file .env -f ax_local/compose.yaml logs -f api mcp-server
 ```
 
 Таймаут одного запроса к модели задаётся в
-`config/runtime.json → timeouts.model_request_seconds` (120 секунд по умолчанию).
+`config/runtime.json → timeouts.model_request_seconds` (900 секунд по умолчанию).
 AX-прокси вычитает `proxy.response_margin_seconds` из `ax_local/config.json`
 (5 секунд, но не больше половины лимита), чтобы успеть вернуть HTTP 504 раньше,
 чем worker закроет соединение. Это socket timeout, а не гарантия общего времени
@@ -1385,7 +1423,7 @@ python3 -m ax_local.cluster.holmes "Почему перезапускаются 
 В корневом `.env` модель задаётся именем бесплатного комбо:
 
 ```dotenv
-HOLMES_MODEL=ax-ops-free
+HOLMES_MODEL=ax-free
 ```
 
 `HOLMES_MODEL` обязателен для запуска диагностики. При отсутствии или пустом
@@ -1397,7 +1435,7 @@ Holmes использует OpenAI-совместимый endpoint шлюза н
 Ключ передаётся через stdin в Kubernetes Secret, в аргументы команд и ConfigMap
 не попадает. Платные/автоматические маршруты ограничены разрешениями этого ключа.
 Holmes использует fallback комбо из `HOLMES_MODEL`; по умолчанию это маршрут
-оператора `ax-ops-free` с Super VL первой.
+оператора `ax-free` с North Mini Code первой.
 Runner отключает thinking и задаёт выходной бюджет 8192 токена. Старый
 закреплённый Nemotron Super удалён из настройки из-за HTTP 404.
 
@@ -1435,6 +1473,9 @@ kubectl --kubeconfig=ax_local/.local/kubeconfig --context=kind-popot-ax auth can
 `bash ax_local/up.sh` настраивает существующий Prometheus и запускает Grafana:
 <http://127.0.0.1:3002/d/popot-resources>. Панель доступна локально без входа,
 с правами просмотра. Можно выбирать namespace, pod, role, task и имя процесса.
+Подробный `debug`-экспорт traces/metrics Collector отключён; реальные экспорты
+в Prometheus и Jaeger сохраняются. Конфигурация проверяется бинарником Collector
+до применения, изменение хеша вызывает его rollout.
 Grafana ограничена 1 ядром CPU и 512 MiB памяти; прежние 500m/256Mi вызывали
 throttling и таймауты API при обновлении дашборда.
 Фильтр role ограничивает задачи и процессы sandbox; общие pod/контейнеры

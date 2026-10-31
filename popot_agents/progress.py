@@ -2,12 +2,66 @@
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timezone
 import json
 import os
 import re
 import sys
+import threading
+import time
 
 _observer = ContextVar('agent_progress', default=None)
+
+
+class TurnProgress:
+    """Bounded, payload-free snapshot for concurrent status readers."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._started = time.monotonic()
+        self._state = {
+            'state': 'running', 'startedAt': datetime.now(timezone.utc).isoformat(),
+            'sequence': 0, 'modelCalls': 0, 'toolCalls': 0,
+            'lastAction': None, 'lastError': None,
+        }
+
+    def update(self, message, *, finished=False):
+        if not is_progress_message(message):
+            return
+        value = json.loads(message)
+        event = value['event']
+        if event in {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer'}:
+            return
+        action = {'event': redact_text(event)[:160]}
+        for key in ('name', 'model', 'server', 'agent_role', 'error_type'):
+            if isinstance(value.get(key), str):
+                action[key] = redact_text(value[key])[:160]
+        for key in ('round', 'attempt'):
+            if type(value.get(key)) is int and 0 <= value[key] <= 1000000:
+                action[key] = value[key]
+        with self._lock:
+            self._state['sequence'] += 1
+            self._state['updatedAt'] = datetime.now(timezone.utc).isoformat()
+            self._state['lastAction'] = action
+            if event == 'model_request':
+                self._state['modelCalls'] += 1
+            elif event == 'tool_call':
+                self._state['toolCalls'] += 1
+            if event.endswith(('_error', '_failed', '_timeout')) or event == 'failed':
+                self._state['lastError'] = dict(action)
+            if finished and event in {'completed', 'failed'}:
+                self._state['state'] = event
+                self._state['elapsedSeconds'] = round(time.monotonic() - self._started, 1)
+
+    def snapshot(self):
+        with self._lock:
+            result = dict(self._state)
+            for key in ('lastAction', 'lastError'):
+                if result[key] is not None:
+                    result[key] = dict(result[key])
+            if result['state'] == 'running':
+                result['elapsedSeconds'] = round(time.monotonic() - self._started, 1)
+            return result
 
 
 def redact_text(text):

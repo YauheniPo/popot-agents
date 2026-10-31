@@ -11,6 +11,8 @@ import hashlib
 import os
 import re
 import sys
+import time
+import math
 from pathlib import Path
 import uuid
 from urllib import error, parse, request
@@ -99,11 +101,12 @@ class CogneeMemory:
         return value
 
     def _request(self, path: str, body: bytes | None = None,
-                 content_type: str = 'application/json', *, login: bool = False):
+                 content_type: str = 'application/json', *, login: bool = False,
+                 deadline: float | None = None):
         if not login and not self.token:
             auth = self._request('/api/v1/auth/login', parse.urlencode({
                 'username': 'default_user@example.com', 'password': self.password,
-            }).encode(), 'application/x-www-form-urlencoded', login=True)
+            }).encode(), 'application/x-www-form-urlencoded', login=True, deadline=deadline)
             self.token = auth.get('access_token') if isinstance(auth, dict) else None
             if not self.token:
                 raise MemoryServiceError('Cognee login returned no access token')
@@ -111,9 +114,14 @@ class CogneeMemory:
         if not login:
             headers['Authorization'] = f'Bearer {self.token}'
         req = request.Request(self.api_url + path, data=body, headers=headers)
+        timeout = self.timeout if deadline is None else min(self.timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise MemoryServiceError('Cognee recall deadline exceeded')
         try:
-            with self.opener.open(req, timeout=self.timeout) as response:
+            with self.opener.open(req, timeout=timeout) as response:
                 data = response.read(1048577)
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise MemoryServiceError('Cognee recall deadline exceeded')
                 if len(data) > 1048576:
                     raise MemoryServiceError('Cognee response exceeds 1 MiB')
                 return json.loads(data)
@@ -122,7 +130,9 @@ class CogneeMemory:
             exc.close()
             raise MemoryServiceError(f'Cognee request failed (HTTP {exc.code})') from None
         except (error.URLError, TimeoutError, OSError):
-            raise MemoryServiceError('Cognee is unreachable or timed out; check memory services') from None
+            phase = {'/api/v1/auth/login': 'login', '/api/v1/datasets': 'dataset lookup',
+                     '/api/v1/recall': 'recall'}.get(path, 'request')
+            raise MemoryServiceError(f'Cognee {phase} is unreachable or timed out; check memory services') from None
         except (ValueError, UnicodeError):
             raise MemoryServiceError('Cognee returned an invalid JSON response') from None
 
@@ -148,19 +158,24 @@ class CogneeMemory:
         return self._request('/api/v1/remember', b''.join(parts),
                              f'multipart/form-data; boundary={boundary}')
 
-    def _dataset_id(self, dataset_name: str):
-        datasets = self._request('/api/v1/datasets')
+    def _dataset_id(self, dataset_name: str, *, deadline: float | None = None):
+        datasets = self._request('/api/v1/datasets', deadline=deadline)
         return next((item['id'] for item in datasets if item['name'] == dataset_name), None)
 
-    def recall(self, query: str, dataset_name: str = 'popot-agents', top_k: int = 5):
+    def recall(self, query: str, dataset_name: str = 'popot-agents', top_k: int = 5,
+               *, timeout_seconds: float | None = None):
         query, dataset_name = self._text(query), self._dataset(dataset_name)
         if type(top_k) is not int or not 1 <= top_k <= 20:
             raise ValueError('top_k must be an integer between 1 and 20')
-        if not self._dataset_id(dataset_name):
+        if timeout_seconds is not None and (type(timeout_seconds) not in {int, float}
+                or not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+            raise ValueError('timeout_seconds must be positive and finite')
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        if not self._dataset_id(dataset_name, deadline=deadline):
             return {'status': 'empty', 'memories': []}
         return self._request('/api/v1/recall', json.dumps({
             'query': query, 'datasets': [dataset_name], 'search_type': 'CHUNKS', 'top_k': top_k,
-        }).encode())
+        }).encode(), deadline=deadline)
 
     def status(self, dataset_name: str = 'popot-agents'):
         dataset_id = self._dataset_id(self._dataset(dataset_name))

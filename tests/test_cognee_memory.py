@@ -2,6 +2,8 @@ import json
 import asyncio
 import threading
 import unittest
+import io
+from unittest.mock import patch
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +13,41 @@ from popot_agents.worker.cognee_memory import CogneeMemory, MemoryServiceError
 
 
 class CogneeMemoryTests(unittest.TestCase):
+    def test_recall_shares_remaining_budget_across_login_dataset_and_search(self):
+        clock = [0.0]
+        timeouts = []
+        def respond(req, *, timeout):
+            timeouts.append(timeout)
+            if req.full_url.endswith('/auth/login'):
+                clock[0] += 2
+                result = {'access_token': 'private-token'}
+            elif req.full_url.endswith('/datasets'):
+                clock[0] += 1
+                result = [{'id': 'project-id', 'name': 'project-a'}]
+            else:
+                self.assertGreaterEqual(timeout, 8)
+                clock[0] += 8
+                result = [{'text': 'Verified decision'}]
+            return io.BytesIO(json.dumps(result).encode())
+        with patch('time.monotonic', side_effect=lambda: clock[0]), \
+             patch.object(self.memory.opener, 'open', side_effect=respond):
+            result = self.memory.recall('database decision', 'project-a', timeout_seconds=20)
+        self.assertEqual(result, [{'text': 'Verified decision'}])
+        self.assertEqual(timeouts, [20, 18, 17])
+
+    def test_recall_does_not_start_search_after_shared_budget_expires(self):
+        clock = [0.0]
+        def respond(req, *, timeout):
+            if req.full_url.endswith('/auth/login'):
+                return io.BytesIO(b'{"access_token":"private-token"}')
+            clock[0] = 20
+            return io.BytesIO(b'[{"id":"project-id","name":"project-a"}]')
+        with patch('time.monotonic', side_effect=lambda: clock[0]), \
+             patch.object(self.memory.opener, 'open', side_effect=respond) as call:
+            with self.assertRaisesRegex(MemoryServiceError, 'deadline'):
+                self.memory.recall('query', 'project-a', timeout_seconds=20)
+        self.assertEqual(call.call_count, 2)
+
     def setUp(self):
         self.calls = []
         self.failure = None

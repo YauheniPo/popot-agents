@@ -53,8 +53,8 @@ class Harness2RoleTests(unittest.TestCase):
         from popot_agents.worker.harness2 import refine_role
         role = {'name': 'reviewer', 'instructions': 'Keep the original policy.',
                 'tools': [], 'harness2': {'enabled': True, 'timeout_seconds': 5}}
-        environment = {'HARNESS_BASE_URL': 'http://model.test/v1', 'HARNESS_MODEL': 'ax-code-free',
-                       'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
+        environment = {'HARNESS_BASE_URL': 'http://model.test/v1', 'HARNESS_MODEL': 'ax-ollama',
+                       'HARNESS2_IMPROVER_MODEL': 'ax-free',
                        'HARNESS2_PROXY_TOKEN': 'opaque-improver-token'}
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {**environment, 'HARNESS_SOCKET_PATH': directory + '/chat.sock'}), \
@@ -83,7 +83,7 @@ class Harness2RoleTests(unittest.TestCase):
             with self.subTest(outcome=type(outcome).__name__), tempfile.TemporaryDirectory() as directory, \
                  patch.dict(os.environ, {'HARNESS_SOCKET_PATH': directory + '/chat.sock',
                     'HARNESS_MODEL': 'ax-free', 'HARNESS_BASE_URL': 'http://proxy.test/v1',
-                    'HARNESS2_IMPROVER_MODEL': 'ax-harness-free', 'HARNESS2_PROXY_TOKEN': 'token'}), \
+                    'HARNESS2_IMPROVER_MODEL': 'ax-free', 'HARNESS2_PROXY_TOKEN': 'token'}), \
                  patch('popot_agents.worker.harness2.subprocess.run',
                        **({'side_effect': outcome} if isinstance(outcome, Exception) else {'return_value': outcome})):
                 self.assertEqual(refine_role([], role, deadline=time.monotonic() + 5,
@@ -103,7 +103,7 @@ class Harness2RoleTests(unittest.TestCase):
                 'harness2': {'enabled': True, 'mode': 'execution'}}
         with patch.dict(os.environ, {'HARNESS_MODEL': 'ax-free',
                 'HARNESS_BASE_URL': 'http://proxy.test/v1',
-                'HARNESS2_IMPROVER_MODEL': 'ax-harness-free', 'HARNESS2_PROXY_TOKEN': 'test'}), \
+                'HARNESS2_IMPROVER_MODEL': 'ax-free', 'HARNESS2_PROXY_TOKEN': 'test'}), \
              patch('popot_agents.worker.harness2.subprocess.run') as child:
             self.assertEqual(refine_role([{'role':'user', 'content':'x' * 30001}], role,
                 deadline=time.monotonic() + 30, tool_names=[]), role)
@@ -114,7 +114,7 @@ class Harness2RoleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
                 'HARNESS_BASE_URL': 'http://proxy.test/v1', 'HARNESS_MODEL': 'ax-free',
                 'HARNESS_SOCKET_PATH': directory + '/chat.sock',
-                'HARNESS2_IMPROVER_MODEL': 'ax-harness-free', 'HARNESS2_PROXY_TOKEN': 'token'}), \
+                'HARNESS2_IMPROVER_MODEL': 'ax-free', 'HARNESS2_PROXY_TOKEN': 'token'}), \
              patch('popot_agents.worker.harness2.subprocess.run', return_value=subprocess.CompletedProcess(
                  [], 0, json.dumps({'prompt': '', 'experience': {'lesson': 'Check relevant sources.'}}), '')) as child:
             role = {'name': 'reviewer', 'instructions': 'Review.', 'harness2': {'enabled': True}}
@@ -141,7 +141,7 @@ class Harness2RoleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
                 'HARNESS_BASE_URL': 'http://proxy.test/v1', 'HARNESS_MODEL': 'ax-free',
                 'HARNESS_SOCKET_PATH': directory + '/chat.sock',
-                'HARNESS2_IMPROVER_MODEL': 'ax-harness-free', 'HARNESS2_PROXY_TOKEN': 'token'}), \
+                'HARNESS2_IMPROVER_MODEL': 'ax-free', 'HARNESS2_PROXY_TOKEN': 'token'}), \
              patch('popot_agents.worker.harness2.subprocess.run', side_effect=delayed_child):
             started = time.monotonic()
             self.assertEqual(refine_role([], role, deadline=started + 20, tool_names=[]), role)
@@ -170,7 +170,7 @@ class PlanningClientTests(unittest.TestCase):
         from popot_agents.worker.harness2 import PlanningClient
         self.client = PlanningClient({
             'base_url': 'http://model.test/v1', 'budget_seconds': 30,
-            'model': 'worker-model', 'improver_model': 'ax-harness-free',
+            'model': 'worker-model', 'improver_model': 'ax-free',
             'key': None, 'improver_key': 'planning-token',
             'parameters': {}, 'improver_parameters': {},
         })
@@ -206,7 +206,7 @@ class PlanningClientTests(unittest.TestCase):
         call = upstream.call_args.args[0]
         body = json.loads(call.data)
         self.assertEqual(call.get_header('Authorization'), 'Bearer planning-token')
-        self.assertEqual(body['model'], 'ax-harness-free')
+        self.assertEqual(body['model'], 'ax-free')
         self.assertEqual(body['max_tokens'], 2048)
         self.assertEqual([tool['function']['name'] for tool in body['tools']], ['propose_prompt'])
         self.assertEqual(body['tool_choice']['function']['name'], 'propose_prompt')
@@ -303,7 +303,7 @@ class Harness2NativeTests(unittest.TestCase):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 calls.append(body)
                 system = body['messages'][0]['content']
-                if body['model'] == 'ax-harness-free':
+                if body['model'] == 'ax-free':
                     if body.get('tools'):
                         self_test.assertEqual(body['tools'][0]['function']['name'], 'propose_prompt')
                         message = {'tool_calls': [{'id': 'proposal', 'type': 'function', 'function': {
@@ -354,9 +354,9 @@ class Harness2NativeTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
                     'HARNESS_BASE_URL': f'http://127.0.0.1:{server.server_port}/v1',
-                    'HARNESS_MODEL': 'ax-code-free', 'HARNESS_API_KEY_ENV': '',
+                    'HARNESS_MODEL': 'ax-ollama', 'HARNESS_API_KEY_ENV': '',
                     'HARNESS_SOCKET_PATH': directory + '/chat.sock', 'HARNESS_TURN_TIMEOUT_SECONDS': '30',
-                    'HARNESS2_IMPROVER_MODEL': 'ax-harness-free', 'HARNESS2_PROXY_TOKEN': 'opaque-token'}):
+                    'HARNESS2_IMPROVER_MODEL': 'ax-free', 'HARNESS2_PROXY_TOKEN': 'opaque-token'}):
                 role = {'name': 'code_reviewer', 'instructions': 'Review evidence.', 'tools': ['calculate'],
                         'harness2': {'enabled': True, 'timeout_seconds': 10}}
                 from popot_agents.worker import http_harness

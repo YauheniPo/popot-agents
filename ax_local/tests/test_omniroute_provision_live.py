@@ -93,7 +93,7 @@ class InnerProvisionTests(unittest.TestCase):
         fake_token = 'ghp_' + 'a' * 36
         diff = '@@ -1 +1 @@\n-return left - right\n+return left + right\n'
         arguments = json.dumps({'path': 'review.py', 'line': 2})
-        payload = {'model': 'ax-code-free', 'messages': [
+        payload = {'model': 'ax-ollama', 'messages': [
             {'role': 'user', 'content': 'Review this diff:\n' + diff + '\nFixture token: ' + fake_token},
             {'role': 'assistant', 'content': None, 'tool_calls': [
                 {'id': 'review-read-1', 'type': 'function', 'function': {

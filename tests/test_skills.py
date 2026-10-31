@@ -37,6 +37,24 @@ class SkillTests(unittest.TestCase):
     def model_response(self):
         return io.BytesIO(b'{"choices":[{"message":{"content":"done"}}]}')
 
+    def test_shell_roles_get_reference_paths_without_eager_reference_content(self):
+        from popot_agents.skills import prepare_role_config
+        prepared = prepare_role_config(dict(self.role, tools=['bash']))
+        self.assertIn('Unique skill instruction.', prepared['instructions'])
+        self.assertIn(str(self.skill.resolve() / 'references.md'), prepared['instructions'])
+        self.assertNotIn('Unique reference example.', prepared['instructions'])
+        self.assertIn('read-only', prepared['instructions'])
+        self.assertEqual(prepared, prepare_role_config(prepared))
+
+    def test_http_shell_policy_groups_reads_without_parallelizing_writes(self):
+        role = dict(self.role, tools=['bash'], permissions={'shell': True})
+        with patch.dict(os.environ, self.env), \
+             patch('popot_agents.worker.http_harness.request.urlopen', return_value=self.model_response()) as call:
+            self.assertEqual(run_http('inspect files', role), 'done')
+        instructions = json.loads(call.call_args.args[0].data)['messages'][0]['content']
+        self.assertIn('Group independent read-only', instructions)
+        self.assertIn('Keep writes', instructions)
+
     def assert_instructions(self, content):
         self.assertIn("Base role instruction.", content)
         self.assertIn("Unique skill instruction.", content)

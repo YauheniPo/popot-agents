@@ -14,9 +14,10 @@ class AxServerTests(unittest.TestCase):
             'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
             'AX_LOCAL_BASE_URL': 'http://proxy.test/v1',
             'AX_LOCAL_SESSION_BACKEND': 'file',
-            'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_OPS_MODEL': 'ax-ops-free', 'OMNIROUTE_API_KEY': 'test-gateway-key',
+            'OMNIROUTE_FREE_MODEL': 'ax-free',
+            'OMNIROUTE_CLOUD_MODEL': 'ax-ollama', 'OMNIROUTE_API_KEY': 'test-gateway-key',
         }
-        role = {'agent': 'omniroute_code', 'instructions': '', 'tools': [], 'harness2': {'enabled': True}}
+        role = {'agent': 'omniroute_cloud', 'instructions': '', 'tools': [], 'harness2': {'enabled': True}}
         for value in (None, '', '   '):
             selected_env = dict(environment)
             if value is not None:
@@ -32,7 +33,7 @@ class AxServerTests(unittest.TestCase):
              patch('ax_local.api.server.load_roles', return_value={'reviewer': disabled}), \
              patch('ax_local.api.server.create_server') as create:
             make_server()
-        runner = create.call_args.args[0]['omniroute_code']
+        runner = create.call_args.args[0]['omniroute_cloud']
         self.assertEqual(runner.harness2_environment, {})
         runner.shutdown_worker_queue()
 
@@ -41,25 +42,25 @@ class AxServerTests(unittest.TestCase):
             'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
             'AX_LOCAL_BASE_URL': 'http://proxy.test/v1',
             'AX_LOCAL_SESSION_BACKEND': 'file',
-            'OMNIROUTE_MODEL': 'ax-free', 'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_OPS_MODEL': 'ax-ops-free',
+            'OMNIROUTE_FREE_MODEL': 'ax-free', 'OMNIROUTE_CLOUD_MODEL': 'ax-ollama',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
-            'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
+            'HARNESS2_IMPROVER_MODEL': 'ax-free',
         }
-        roles = {'reviewer': {'agent': 'omniroute_code', 'instructions': '', 'tools': [],
+        roles = {'reviewer': {'agent': 'omniroute_cloud', 'instructions': '', 'tools': [],
                               'harness2': {'enabled': True}},
-                 'backend': {'agent': 'omniroute_code', 'instructions': '', 'tools': []}}
+                 'backend': {'agent': 'omniroute_cloud', 'instructions': '', 'tools': []}}
         with patch.dict(os.environ, environment, clear=True), \
              patch('ax_local.api.server.load_roles', return_value=roles), \
              patch('ax_local.api.server.create_server') as create:
             server = make_server()
-        runner = create.call_args.args[0]['omniroute_code']
+        runner = create.call_args.args[0]['omniroute_cloud']
         try:
             manifests = {name: runner.task_manifest('0123456789abcdef', role)
                          for name, role in roles.items()}
             env = {item['name']: item['value'] for item in manifests['reviewer']['spec']['env']}
             env.update(json.loads(env['AX_CAPABILITIES_JSON']))
-            self.assertEqual(env['HARNESS2_IMPROVER_MODEL'], 'ax-harness-free')
-            self.assertEqual(server.provider_routes[env['HARNESS2_PROXY_TOKEN']].model, 'ax-harness-free')
+            self.assertEqual(env['HARNESS2_IMPROVER_MODEL'], 'ax-free')
+            self.assertEqual(server.provider_routes[env['HARNESS2_PROXY_TOKEN']].model, 'ax-free')
             self.assertNotEqual(env['HARNESS2_PROXY_TOKEN'], env['AX_PROXY_TOKEN'])
             self.assertNotIn('private-gateway-key', json.dumps(manifests))
             ordinary = {item['name']: item['value'] for item in manifests['backend']['spec']['env']}
@@ -76,10 +77,10 @@ class AxServerTests(unittest.TestCase):
             'OPENROUTER_MODEL': 'role-cloud-model',
             'OPENROUTER_API_KEY': 'private-cloud-key',
             'OLLAMA_CLOUD_MODEL': 'deepseek-v4.1-flash:1017', 'OLLAMA_API_KEY': 'private-ollama-key',
-            'OMNIROUTE_MODEL': 'ax-free',
-            'OMNIROUTE_CODE_MODEL': 'ax-code-free', 'OMNIROUTE_OPS_MODEL': 'ax-ops-free',
+            'OMNIROUTE_FREE_MODEL': 'ax-free',
+            'OMNIROUTE_CLOUD_MODEL': 'ax-ollama',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
-            'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
+            'HARNESS2_IMPROVER_MODEL': 'ax-free',
             # Stale overrides must not replace the role's profile.
             'AX_LOCAL_PROVIDER': 'openrouter', 'AX_LOCAL_MODEL': 'wrong-model',
             'AX_LOCAL_PROXY_TOKEN': 'old-global-capability',
@@ -88,25 +89,23 @@ class AxServerTests(unittest.TestCase):
              patch('ax_local.api.server.create_server') as create:
             server = make_server()
         roles = create.call_args.kwargs['roles']
-        self.assertEqual(roles['analyst']['agent'], 'omniroute')
+        self.assertEqual(roles['analyst']['agent'], 'omniroute_free')
         runners = create.call_args.args[0]
-        self.assertEqual(set(runners), {'omniroute', 'omniroute_code', 'omniroute_ops', 'ollama_cloud'})
+        self.assertEqual(set(runners), {'omniroute_free', 'omniroute_cloud', 'omniroute_ops'})
         for name in ('backend_engineer', 'code_reviewer', 'qa_engineer'):
-            self.assertEqual(roles[name]['agent'], 'ollama_cloud')
-        self.assertEqual(runners['ollama_cloud'].model, 'deepseek-v4.1-flash:1017')
-        self.assertIs(runners['omniroute'].worker_queue, runners['ollama_cloud'].worker_queue)
+            self.assertEqual(roles[name]['agent'], 'omniroute_cloud')
         for name in ('chat', 'planner', 'tech_lead', 'cron_demo'):
-            self.assertEqual(roles[name]['agent'], 'omniroute')
-        self.assertEqual(runners['omniroute'].model, 'ax-free')
-        self.assertEqual(runners['omniroute_code'].model, 'ax-code-free')
-        self.assertIs(runners['omniroute'].worker_queue, runners['omniroute_code'].worker_queue)
-        self.assertNotEqual(runners['omniroute'].proxy_token, runners['omniroute_code'].proxy_token)
-        queue = runners['omniroute'].worker_queue
+            self.assertEqual(roles[name]['agent'], 'omniroute_free')
+        self.assertEqual(runners['omniroute_free'].model, 'ax-free')
+        self.assertEqual(runners['omniroute_cloud'].model, 'ax-ollama')
+        self.assertIs(runners['omniroute_free'].worker_queue, runners['omniroute_cloud'].worker_queue)
+        self.assertNotEqual(runners['omniroute_free'].proxy_token, runners['omniroute_cloud'].proxy_token)
+        queue = runners['omniroute_free'].worker_queue
         leases = [(f'occupied-{index}', queue.acquire(f'occupied-{index}'))
                   for index in range(queue.max_workers)]
-        with patch.object(runners['omniroute_code'], '_run') as run:
+        with patch.object(runners['omniroute_cloud'], '_run') as run:
             with self.assertRaises(TimeoutError):
-                runners['omniroute_code'].start_chat('0123456789abcdef', deadline=time.monotonic() + 0.03)
+                runners['omniroute_cloud'].start_chat('0123456789abcdef', deadline=time.monotonic() + 0.03)
             run.assert_not_called()
         for name, lease in leases:
             queue.release(name, lease)
@@ -130,9 +129,11 @@ class AxServerTests(unittest.TestCase):
             'AX_LOCAL_BASE_URL': 'http://proxy.test/v1',
             'AX_LOCAL_SESSION_BACKEND': 'file',
             'OPENROUTER_MODEL': 'cloud-model', 'OPENROUTER_API_KEY': 'test-key',
+            'OMNIROUTE_FREE_MODEL': 'ax-free',
+            'OMNIROUTE_API_KEY': 'test-gateway-key',
         }
         with patch.dict(os.environ, environment, clear=True), \
-             self.assertRaisesRegex(ValueError, 'ollama_cloud.*OLLAMA_CLOUD_MODEL'):
+             self.assertRaisesRegex(ValueError, 'omniroute_cloud.*OMNIROUTE_CLOUD_MODEL'):
             make_server()
 
     def test_control_plane_host_follows_ax_context(self):
@@ -145,19 +146,19 @@ class AxServerTests(unittest.TestCase):
             "OPENROUTER_MODEL": "selected-model",
             "OPENROUTER_API_KEY": "test-key",
             "OLLAMA_CLOUD_MODEL": "deepseek-v4.1-flash:1017", "OLLAMA_API_KEY": "test-ollama-key",
-            "OMNIROUTE_MODEL": "ax-free",
-            "OMNIROUTE_CODE_MODEL": "ax-code-free", "OMNIROUTE_OPS_MODEL": "ax-ops-free",
+            "OMNIROUTE_FREE_MODEL": "ax-free",
+            "OMNIROUTE_CLOUD_MODEL": "ax-ollama",
             "OMNIROUTE_API_KEY": "gateway-key",
-            "HARNESS2_IMPROVER_MODEL": "ax-harness-free",
+            "HARNESS2_IMPROVER_MODEL": "ax-free",
             "AX_LOCAL_BASE_URL": "http://172.18.0.5:8004/v1",
             "AX_LOCAL_SESSION_BACKEND": "file",
         }
         with patch.dict(os.environ, environment), patch("ax_local.api.server.create_server") as create:
             server = make_server()
         roles = create.call_args.kwargs["roles"]
-        self.assertEqual(roles["backend_engineer"]["agent"], "ollama_cloud")
+        self.assertEqual(roles["backend_engineer"]["agent"], "omniroute_cloud")
         self.assertIn("bash", roles["backend_engineer"]["tools"])
-        self.assertEqual(set(create.call_args.args[0]), {"omniroute", "omniroute_code", "omniroute_ops", "ollama_cloud"})
+        self.assertEqual(set(create.call_args.args[0]), {"omniroute_free", "omniroute_cloud", "omniroute_ops"})
         self.assertNotIn("allowed_roles", server.delegation.policy)
         self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer"])
         env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
@@ -174,10 +175,10 @@ class AxServerTests(unittest.TestCase):
             "OPENROUTER_MODEL": "selected-model",
             "OPENROUTER_API_KEY": "test-key",
             "OLLAMA_CLOUD_MODEL": "deepseek-v4.1-flash:1017", "OLLAMA_API_KEY": "test-ollama-key",
-            "OMNIROUTE_MODEL": "ax-free",
-            "OMNIROUTE_CODE_MODEL": "ax-code-free", "OMNIROUTE_OPS_MODEL": "ax-ops-free",
+            "OMNIROUTE_FREE_MODEL": "ax-free",
+            "OMNIROUTE_CLOUD_MODEL": "ax-ollama",
             "OMNIROUTE_API_KEY": "gateway-key",
-            "HARNESS2_IMPROVER_MODEL": "ax-harness-free",
+            "HARNESS2_IMPROVER_MODEL": "ax-free",
             "AX_LOCAL_BASE_URL": "http://172.18.0.5:8004/v1",
             "AX_LOCAL_SESSION_BACKEND": "file",
             "AX_LOCAL_BIND_HOST": "0.0.0.0",

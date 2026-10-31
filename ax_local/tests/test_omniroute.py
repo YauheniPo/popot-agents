@@ -15,16 +15,15 @@ from popot_agents.worker.http_harness import run_http
 
 class OmniRouteTests(unittest.TestCase):
     def test_combo_tool_loop_keeps_gateway_key_out_of_ax_task(self):
-        role = {'agent': 'omniroute', 'instructions': 'Use calculate.', 'tools': ['calculate']}
+        role = {'agent': 'omniroute_free', 'instructions': 'Use calculate.', 'tools': ['calculate']}
         environment = {
             'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
             'AX_LOCAL_BASE_URL': 'http://proxy.test/v1',
             'AX_LOCAL_SESSION_BACKEND': 'file',
-            'OMNIROUTE_MODEL': 'ax-free',
-            'OMNIROUTE_CODE_MODEL': 'ax-code-free',
-            'OMNIROUTE_OPS_MODEL': 'ax-ops-free',
+            'OMNIROUTE_FREE_MODEL': 'ax-free',
+            'OMNIROUTE_CLOUD_MODEL': 'ax-ollama',
             'OMNIROUTE_API_KEY': 'private-gateway-key',
-            'HARNESS2_IMPROVER_MODEL': 'ax-harness-free',
+            'HARNESS2_IMPROVER_MODEL': 'ax-free',
             'OPENROUTER_MODEL': 'direct-provider-model',
             'OPENROUTER_API_KEY': 'direct-provider-key',
             'OLLAMA_CLOUD_MODEL': 'deepseek-v4.1-flash:1017', 'OLLAMA_API_KEY': 'test-ollama-key',
@@ -34,10 +33,12 @@ class OmniRouteTests(unittest.TestCase):
             server = make_server()
         for configured_runner in create.call_args.args[0].values():
             self.addCleanup(configured_runner.shutdown_worker_queue)
-        runner = create.call_args.args[0]['omniroute']
-        self.assertEqual(create.call_args.kwargs['roles']['analyst']['agent'], 'omniroute')
-        self.assertEqual(create.call_args.kwargs['roles']['frontend_engineer']['agent'], 'omniroute_code')
-        self.assertEqual(create.call_args.args[0]['omniroute_code'].model, 'ax-code-free')
+        runner = create.call_args.args[0]['omniroute_free']
+        self.assertEqual(create.call_args.kwargs['roles']['analyst']['agent'], 'omniroute_free')
+        self.assertEqual(create.call_args.kwargs['roles']['frontend_engineer']['agent'], 'omniroute_cloud')
+        for name in ('backend_engineer', 'code_reviewer', 'qa_engineer'):
+            self.assertEqual(create.call_args.kwargs['roles'][name]['agent'], 'omniroute_cloud')
+        self.assertEqual(create.call_args.args[0]['omniroute_cloud'].model, 'ax-ollama')
         proxy = start_proxy(server.provider_routes, host='127.0.0.1', port=0)
         self.addCleanup(proxy.server_close)
         self.addCleanup(proxy.shutdown)

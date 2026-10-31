@@ -69,7 +69,7 @@ class UpScriptTests(unittest.TestCase):
         config = self.root / 'config'
         config.mkdir()
         (config / 'roles').mkdir()
-        (config / 'roles/analyst.json').write_text(json.dumps({'agent': 'omniroute'}))
+        (config / 'roles/analyst.json').write_text(json.dumps({'agent': 'omniroute_free'}))
         cluster = self.ax / "cluster"
         cluster.mkdir()
         shutil.copyfile(SOURCE.parent / 'cluster/build_versions.py', cluster / 'build_versions.py')
@@ -173,7 +173,7 @@ class UpScriptTests(unittest.TestCase):
         self.assertFalse(self.calls.exists())
 
     def test_operator_prepares_holmes_without_starting_an_investigation(self):
-        (self.root / 'config/roles/project_operator.json').write_text(json.dumps({'agent':'omniroute'}))
+        (self.root / 'config/roles/project_operator.json').write_text(json.dumps({'agent':'omniroute_free'}))
         (self.ax / 'omniroute_tls.py').write_text(
             "import os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==['export']\n"
             "with Path(os.environ['CALLS']).open('a') as f:f.write('tls-export\\n')\n")

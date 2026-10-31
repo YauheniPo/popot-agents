@@ -10,6 +10,18 @@ from unittest.mock import patch
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_native_reasoning_effort_is_validated(self):
+        from popot_agents.runtime_config import validate_model_parameters
+
+        for effort in ('none', 'low', 'high', 'max'):
+            self.assertEqual(validate_model_parameters({'reasoning_effort': effort}),
+                             {'reasoning_effort': effort})
+        for effort in ('invalid', None, True, []):
+            with self.assertRaisesRegex(ValueError, 'reasoning_effort'):
+                validate_model_parameters({'reasoning_effort': effort})
+        with self.assertRaisesRegex(ValueError, 'reasoning'):
+            validate_model_parameters({'reasoning_effort': 'max', 'reasoning': {'enabled': False}})
+
     def test_mcp_transport_and_retry_settings_validate(self):
         from popot_agents.runtime_config import load_runtime_config
 

@@ -7,7 +7,7 @@
 | --- | --- |
 | [monitoring.json](monitoring.json) | Настройки Grafana/Prometheus и секции `resources` для Grafana, Prometheus, kube-state-metrics и OTEL |
 | [holmes.json](holmes.json) | Бюджет шагов и токенов, параметры LLM, ресурсы Job, deadline, время хранения завершённых Job и адрес шлюза Holmes |
-| [omniroute/combos.json](omniroute/combos.json) | Состав, порядок бесплатных моделей и бюджеты fallback для `ax-free`, `ax-code-free`, `ax-harness-free`, `ax-ops-free` |
+| [omniroute/combos.json](omniroute/combos.json) | Состав, порядок моделей и бюджеты fallback для `ax-free` и `ax-ollama` |
 | [omniroute/settings.json](omniroute/settings.json) | Настройки шлюза, провайдеры, cooldown/circuit breaker и разрешения ключа AX |
 | [agents.json](agents.json) | Профили провайдеров, endpoint, имя переменной модели, параметры запросов |
 | [roles/](roles/) | Роли, инструкции, инструменты, память, делегирование, Harness² и бюджеты выполнения |
@@ -23,9 +23,9 @@
 [Схема ролей](roles/index.html) показывает обязанности, инструменты, навыки и
 разрешённые связи делегирования. Откройте HTML в браузере и выберите роль.
 
-Модели выбираются в `.env` через `OMNIROUTE_MODEL`, `OMNIROUTE_CODE_MODEL`,
-`OMNIROUTE_OPS_MODEL`, `HARNESS2_IMPROVER_MODEL` и `HOLMES_MODEL`.
-`project_operator` и Holmes по умолчанию используют `ax-ops-free`.
+Модели выбираются в `.env` через `OMNIROUTE_FREE_MODEL`, `OMNIROUTE_CLOUD_MODEL`,
+`HARNESS2_IMPROVER_MODEL` и `HOLMES_MODEL`.
+`project_operator` и Holmes по умолчанию используют `ax-free`.
 
 ## Применение изменений
 

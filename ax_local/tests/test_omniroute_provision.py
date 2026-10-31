@@ -17,10 +17,25 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class ManagedConfigTests(unittest.TestCase):
+    def test_only_two_distinct_managed_routes_remain(self):
+        root = Path(__file__).resolve().parents[2]
+        combos = json.loads((root / 'config/omniroute/combos.json').read_text())
+        self.assertEqual(set(combos), {'ax-free', 'ax-ollama'})
+        self.assertEqual([target['model'] for target in combos['ax-free']['models']], [
+            'openrouter/cohere/north-mini-code:free',
+            'nvidia/nvidia/nemotron-3.5-lightning-30b-a3b'])
+        self.assertEqual([target['model'] for target in combos['ax-ollama']['models']], [
+            'ollama-cloud/deepseek-v4-pro:0813',
+            'ollama-cloud/deepseek-v4.1-flash:1017',
+            'ollama-cloud/glm-5.3-flash'])
+        for combo in combos.values():
+            self.assertEqual(combo['config']['maxGlobalAttempts'], len(combo['models']))
+
     def test_ollama_budget_is_separate_from_free_routes_and_provisions_idempotently(self):
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / 'config/omniroute/settings.json').read_text())
         combos = json.loads((root / 'config/omniroute/combos.json').read_text())
+        self.assertIs(config['settings']['call_log_pipeline_enabled'], True)
         budget = combos['ax-ollama']
         self.assertEqual({target['providerId'] for target in budget['models']}, {'ollama-cloud'})
         for name, combo in combos.items():
