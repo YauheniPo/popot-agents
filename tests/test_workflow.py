@@ -183,6 +183,14 @@ class WorkflowTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_recovery_never_encodes_a_cleartext_url(self):
+        """Sonar S5332: the recovery hop re-enters the loopback API without a clear-text URL."""
+        from pathlib import Path
+        package = Path(__file__).resolve().parents[1] / 'popot_agents' / 'orchestrator'
+        offenders = sorted(path.name for path in package.glob('*.py')
+                           if 'http://' in path.read_text(encoding='utf-8'))
+        self.assertEqual(offenders, [], 'clear-text URL literals in the orchestrator')
+
     def test_checkpoint_is_resumed_after_api_recreation_without_replaying_original_message(self):
         from popot_agents.orchestrator.session_store import SessionStore
         from popot_agents.orchestrator.workflow import WorkflowRun

@@ -106,7 +106,7 @@ class WorkflowRun:
 def recover_workflows(server, policy, token):
     """Resume only durable completed-turn checkpoints, never an uncertain send."""
     from threading import Thread, current_thread
-    from urllib import request, error
+    from http.client import HTTPConnection, HTTPException
     import sys
     if getattr(server, '_workflow_closing', False):
         return
@@ -125,11 +125,19 @@ def recover_workflows(server, policy, token):
             host, port = server.server_address[:2]
             host = '127.0.0.1' if host == '0.0.0.0' else host
             body = json.dumps({'sessionId': sid, 'message': workflow.continuation()}).encode()
-            call = request.Request(f'http://{host}:{port}/messages', data=body,
-                headers={'Content-Type':'application/json', 'X-Popot-Workflow-Recovery':token})
-            with request.urlopen(call, timeout=max(1, workflow.remaining()) + 30) as response:
+            # Recovery re-enters this process' own API over loopback: dial the socket
+            # directly so no clear-text URL is encoded and no ambient proxy applies.
+            connection = HTTPConnection(host, port, timeout=max(1, workflow.remaining()) + 30)
+            try:
+                connection.request('POST', '/messages', body=body,
+                    headers={'Content-Type':'application/json', 'X-Popot-Workflow-Recovery':token})
+                response = connection.getresponse()
                 response.read()
-        except (OSError, ValueError, error.HTTPError) as exc:
+                if response.status >= 400:
+                    raise OSError(f'recovery request rejected with status {response.status}')
+            finally:
+                connection.close()
+        except (OSError, ValueError, HTTPException) as exc:
             # The executing request owns its failure state. Never replay an uncertain send.
             print(json.dumps({'event': 'workflow_recovery_error', 'session_id': sid,
                               'error_type': type(exc).__name__}), file=sys.stderr, flush=True)
