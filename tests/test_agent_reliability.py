@@ -82,14 +82,14 @@ class AgentReliabilityTests(unittest.TestCase):
         return {'tool_calls': [{'id': 'qa', 'function': {'name': 'delegate_task',
             'arguments': json.dumps({'role': 'qa_engineer', 'task': 'Run the required tests'})}}]}
 
-    def test_durable_pending_child_yields_without_another_model_round(self):
+    def test_explicit_child_wait_yields_without_polling_the_model(self):
         from unittest.mock import Mock
         delegate=Mock(return_value=json.dumps({'sessionId':'a'*16,'role':'qa_engineer',
             'state':'TASK_STATE_WORKING','pending':True,'resumable':False,
             'outcome':{'status':'partial','reason':'child_running','evidence':[],
                        'errors':[],'remaining_work':['await child']}}))
-        _,state,bodies=self.run_sequence([self.delegate_call()],delegate=delegate)
-        self.assertEqual(len(bodies),1)
+        _,state,bodies=self.run_sequence([self.delegate_call(), {'tool_calls':[{'id':'wait','function':{'name':'await_tasks','arguments':json.dumps({'session_ids':['a'*16]})}}]}],delegate=delegate)
+        self.assertEqual(len(bodies),2)
         self.assertEqual(state['outcome']['reason'],'child_pending')
         self.assertTrue(state['failed_delegations'][0][1]['pending'])
 
@@ -100,7 +100,7 @@ class AgentReliabilityTests(unittest.TestCase):
         delegate = Mock(return_value=json.dumps({'sessionId':'a'*16,'role':'qa_engineer',
             'state':'TASK_STATE_WORKING','pending':True,'outcome':{'status':'partial'}}))
         with patch('popot_agents.worker.http_harness.TurnMemory', return_value=memory):
-            self.run_sequence([self.delegate_call()], delegate=delegate)
+            self.run_sequence([self.delegate_call(),self.result()], delegate=delegate)
         memory.summary_messages.assert_not_called()
 
     def test_verification_handoff_shares_only_checks_for_requested_revision(self):

@@ -43,6 +43,10 @@ class WorkerQueue:
             self.reservations.pop(key,None)
             self.condition.notify_all()
 
+    def reserved_workers(self, key):
+        with self.condition:
+            return {name for name,group in self.groups.items() if group==key and name in self.active}
+
     def adopt_reservation(self, name, key):
         with self.condition:
             if self.groups.get(name) == key:

@@ -413,8 +413,14 @@ last coordinator turn accepts results instead of starting children. Completed
 implementation requires reviewer and QA receipts for the same observed SHA;
 a newer PR-head read-back invalidates verification of an older revision.
 Repeated identical input errors stop with a blocker and failed tool receipts
-do not reset the no-progress guard. Same-SHA reviewer/QA tasks may overlap when
-reserved nested-worker capacity is available.
+do not reset the no-progress guard. `delegate_task` returns immediately for
+durable children; the parent continues its own work until `await_tasks` joins
+selected children (`all` or `any`). Child waits resume the same coordinator turn.
+`depends_on` orders stages using successful direct-child results without creating
+a waiting worker. Independent roles run concurrently, with a path to a leaf
+reserved in the shared pool. One server-designated implementation owner integrates
+and publishes branch changes; other workers return local commits/patches and checks.
+Review and QA still accept the same final integrated SHA.
 
 Requests can select a role, but cannot override its command, credentials or
 permissions. Keep this local endpoint restricted to trusted callers; it has no
@@ -735,8 +741,10 @@ failure; otherwise the result remains partial. It cannot execute tools, repeat
 writes or mark project-memory capture successful. The time reserve may trigger
 this final request earlier, reserving a useful request window (up to 30 seconds,
 capped at half a short turn) before reporting. New or resumed child executions
-require at least 60 seconds of work budget, excluding the parent's final reserve;
-otherwise the tool returns an explicit refusal and the unfinished work remains visible.
+require 10 seconds of submission work budget in a durable AX workflow (two bounded
+RPC attempts), excluding the parent's final reserve. Legacy blocking delegation
+still requires 60 seconds. Child execution uses the separately checked workflow
+and branch deadlines; refusal preserves the unfinished work.
 
 An explicit structured partial result ends the turn without forcing another child
 execution. Invalid final JSON or a premature completion claim gets one correction;

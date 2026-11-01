@@ -14,6 +14,23 @@ class DelegationContextError(ToolInputError):
     retryable = False
 
 
+def check_publication_owner(name, arguments, context):
+    """Coordinate branch publication; role credentials remain the security boundary."""
+    if context is None or 'publication_owner' not in context or context.get('publication_owner') == context.get('session_id'):
+        return
+    branch_write = name.rsplit('__',1)[-1] in {
+        'push_files','create_or_update_file','delete_file','create_branch',
+        'create_pull_request','merge_pull_request','update_pull_request_branch'}
+    if name == 'bash':
+        command = arguments.get('command','')
+        branch_write = isinstance(command,str) and bool(re.search(
+            r'\bgit(?:\s+(?:-c|-C)\s+\S+)*\s+push\b|\bgh\s+pr\s+(?:create|merge)\b',command))
+    if branch_write:
+        raise ToolInputError('Branch publication belongs to integration owner '+
+            str(context.get('publication_owner') or 'not assigned')+
+            '; return commits or patches and check evidence for integration. Original authorization still applies.')
+
+
 def publication_policy(role_config):
     instructions = role_config.get('instructions', '')
     marker = 'Repository publication policy:'

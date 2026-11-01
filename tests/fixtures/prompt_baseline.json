@@ -49,7 +49,7 @@
     "sha256": "675c26e2a2853c1c3d6c8ed7726c71994e70e393556d5052b59f00533ae9d71e"
   },
   "delegation/instructions": {
-    "sha256": "9685dd3480cc7415b60c729fe5aa14a9e9670a8140cb49b25fcd457d4328ced5",
+    "sha256": "b3d7f70273e5ad1c359b2147dabf5e4331a4f88e35eee3e8073247416699e17d",
     "values": {
       "role": "engineer",
       "review_routing": "ROUTING ",
@@ -85,7 +85,7 @@
     "sha256": "29d5e883638177c635a8cf7431cfcda6a438d9ecef5615dac94e7af861d64970"
   },
   "delegation/tool": {
-    "sha256": "7fc8ace9f2915f5045ced599d4fb947f352af2577abb3e769cc0723ffd450d8f"
+    "sha256": "eca5b24eb07e8dae5da233e6e5a14cd8a2b84e33264fb5fac0791dcf57b78816"
   },
   "harness2/addendum": {
     "sha256": "2147be410baf221294e3d1b015b2bcce4a8b2a6e02464bfa964fab0569b10956"

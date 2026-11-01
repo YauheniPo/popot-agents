@@ -830,7 +830,7 @@ def create_server(
                     delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
                 while True:
                     if workflow:
-                        if workflow.remaining() < 1 or workflow.meta['turns'] >= workflow.policy['max_turns']:
+                        if workflow.remaining() < 1 or workflow.meta['turns'] >= workflow.policy['max_turns'] and not workflow.meta.get('awaiting_children'):
                             result = workflow.stop({'answer': 'Autonomous workflow time budget exhausted'},
                                                    'workflow_deadline_exhausted' if workflow.remaining() < 1 else 'workflow_turn_limit')
                             role_config = {**(role_config or {}), '_workflow': workflow.meta}

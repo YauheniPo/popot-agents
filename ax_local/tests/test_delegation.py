@@ -75,6 +75,7 @@ class DelegationTests(unittest.TestCase):
         def start(sid,config,**kwargs):
             token=pool.acquire(sid,reservation=config['_ax_delegation']['pool_reservation'])
             chat=original(sid,config,**kwargs)
+            chat.container_name=sid
             close=chat.close
             def release():
                 close();pool.release(sid,token)
@@ -97,7 +98,7 @@ class DelegationTests(unittest.TestCase):
                     'configuration':{'returnImmediately':True}})['task']
                 jobs.append((role,task['id']))
             self.assertTrue(all(e.wait(1) for e in entered.values()))
-            self.assertEqual(pool.reservations['run'],6)
+            self.assertEqual(pool.reservations['run'],8)
             # Root + two verifiers; spare reservations remain available to nested tasks.
             self.assertEqual(pool.status()['active'],3)
             finish.set()
@@ -105,16 +106,20 @@ class DelegationTests(unittest.TestCase):
         wait_for(lambda:pool.status()['active']==1)
         self.assertEqual(pool.reservations,{})
 
-    def test_different_revision_or_insufficient_capacity_keeps_root_children_serial(self):
+    def test_admission_depends_on_depth_capacity_instead_of_role_or_revision(self):
         from ax_local.api.delegation import Job,Run
-        for slots,revision,expected in [(6,'a',True),(6,'b',False),(5,'a',False)]:
+        from ax_local.api.worker_queue import WorkerQueue
+        for slots,revision,expected in [(6,'a',True),(6,'b',True),(5,'a',False)]:
             with self.subTest(slots=slots,revision=revision):
                 self.policy['max_depth']=5
-                run=Run(time.monotonic()+5,reserved_slots=slots)
-                first=Job('a'*16,{'_ax_role':'code_reviewer','_ax_delegation':{'revision':'a'*40}},'',run,run.deadline)
-                second=Job('b'*16,{'_ax_role':'qa_engineer','_ax_delegation':{'revision':revision*40}},'',run,run.deadline)
-                run.root_children[first.session_id]=first
-                self.assertEqual(self.service._root_lane_available(second),expected)
+                pool=WorkerQueue(10,1);pool.reserve('run',slots)
+                run=Run(time.monotonic()+5,reserved_slots=slots,pool=pool,reservation='run')
+                first=Job('a'*16,{'_ax_role':'code_reviewer','_ax_delegation':{
+                    'revision':'a'*40,'lineage':['tech_lead','code_reviewer']}},'',run,run.deadline)
+                second=Job('b'*16,{'_ax_role':'qa_engineer','_ax_delegation':{
+                    'revision':revision*40,'lineage':['tech_lead','qa_engineer']}},'',run,run.deadline)
+                run.admitted[first.session_id]=first
+                self.assertEqual(self.service._can_start(second),expected)
 
     def test_continuation_preserves_prior_child_assignment_restrictions(self):
         contexts=[]
@@ -599,7 +604,7 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(failure['status'],'blocked')
             self.assertFalse(failure['pending'])
 
-    def test_durable_workflow_end_cancels_child_and_siblings_do_not_consume_workers(self):
+    def test_durable_workflow_end_cancels_parallel_children(self):
         entered,release=threading.Event(),threading.Event()
         def callback(chat,task):
             entered.set();release.wait(2)
@@ -610,12 +615,12 @@ class DelegationTests(unittest.TestCase):
                 with self.service.turn(self.parent,.1):
                     one=self.send(message_id='one');self.assertTrue(entered.wait(1))
                     two=self.send(message_id='two')
-                self.assertEqual(len(self.runner.chats),1)
+                wait_for(lambda:len(self.runner.chats)==2)
                 jobs=[self.service.jobs[one['id']],self.service.jobs[two['id']]]
             self.assertTrue(all(job.canceled.is_set() for job in jobs))
         finally:release.set()
         for job in jobs:job.thread.join(2)
-        self.assertTrue(self.runner.chats[0].closed)
+        self.assertTrue(all(chat.closed for chat in self.runner.chats))
 
     def test_measured_mcp_setup_replaces_cold_start_estimate(self):
         from ax_local.api.delegation import Job, Run

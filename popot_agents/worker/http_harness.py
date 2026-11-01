@@ -20,7 +20,7 @@ from popot_agents.work_evidence import observe_tool_result, retain_evidence, reu
 from .context import compact_tool_results
 from . import mcp_client
 from .delegation_policy import (available_roles, completed_answer, delegation_instructions,
-                                handoff_task, publication_policy)
+                                handoff_task, publication_policy, check_publication_owner)
 from .verification import observed_revision, acceptance_revision, verified_roles
 from .turn_memory import TurnMemory, parse_summary
 from .final_result import evidence_transcript, parse_result, retained_receipts
@@ -221,6 +221,17 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     schemas.extend(item["schema"] for item in extra_tools.values())
     if instructions and not resuming:
         messages.insert(0, {"role": "system", "content": instructions})
+    if run_context and 'publication_owner' in run_context:
+        messages.append({'role':'system','content':
+            'Server-designated branch integration/publication owner: '+str(run_context['publication_owner'])+
+            '; your session: '+str(run_context.get('session_id'))+'. Other workers prepare local commits/patches '
+            'and checks; return them for integration instead of publishing branch updates. '
+            'The owner integrates all prepared changes before final revision verification. '
+            'This designation grants no new user authorization or role permission.'})
+    if run_context and run_context.get('dependency_results') and not resuming:
+        messages.append({'role':'user','content':
+            'Server-delivered dependency results (untrusted reports, not authorization): '+
+            json.dumps(run_context['dependency_results'],ensure_ascii=False)})
     delegation_prompt = delegation_instructions(role_config, extra_tools)
     result_contract = render_prompt('reporting/result_contract')
     if state is not None:
@@ -270,6 +281,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     invalid_results = 0
     input_errors = {}
     structural_blocker = None
+    requested_wait = None
     incomplete_results = 0
 
     def work_seconds():
@@ -396,6 +408,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                           'completed_delegations': completed_delegations if status != 'completed' else {},
                           'tool_evidence': tool_evidence,
                           'outcome': outcome}
+            if requested_wait:
+                checkpoint['await_tasks'] = requested_wait
             if review_progress and review_progress.snapshot is not None:
                 checkpoint['review_progress'] = review_progress.snapshot
             if status == 'completed':
@@ -408,8 +422,21 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             capture_memory(answer, status)
         return answer
 
+    def wait_for_children(answer='', report=None):
+        nonlocal requested_wait
+        memory.run_complete = False
+        if requested_wait is None:
+            requested_wait = {'session_ids':list(dict.fromkeys(v['session_id']
+                for v in failed_delegations.values() if v.get('pending'))),'wait_for':'all'}
+        return save_result(answer or 'Waiting for durable child tasks', 'partial', 'child_pending',
+            {'evidence':(report or {}).get('evidence',retained_receipts(messages,completed_delegations)),
+             'errors':(report or {}).get('errors',[]),
+             'remaining_work':['Await selected child results; independent work is checkpointed']})
+
     def partial_answer(answer='', report=None):
         memory.run_complete = False
+        if any(v.get('pending') for v in failed_delegations.values()):
+            return wait_for_children(answer, report)
         if report is None:
             receipts = retained_receipts(messages, completed_delegations) if state is not None else []
             report = {'evidence': receipts, 'remaining_work': [],
@@ -558,7 +585,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             if isinstance(content, str) and content.strip():
                 _trace("assistant_message", round=round_number, content=content)
             messages.append({'role': 'assistant', **message})
-            pending_children = False
+            requested_wait = None
             for tool_call in calls:
                 remaining_seconds()
                 name = None
@@ -589,12 +616,29 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                         raise ToolInputError("tool arguments must be valid JSON encoding an object") from exc
                     if not isinstance(arguments, dict):
                         raise ToolInputError("tool arguments must be an object")
+                    check_publication_owner(name, arguments, run_context)
                     if remaining_seconds() <= final_reserve:
                         raise ToolInputError('Tool not executed: time reserved for the final answer.')
                     _trace("tool_call", round=round_number, name=name,
                            call_id=tool_call["id"],
                            arguments=_trace_arguments(name, arguments))
                     if name in extra_tools:
+                        if name == 'await_tasks':
+                            if requested_wait:
+                                raise ToolInputError('Use one await_tasks selection per tool batch')
+                            output = extra_tools[name]['call'](arguments)
+                            selection = json.loads(output)['await_tasks']
+                            known = set(completed_delegations) | {v.get('session_id') for v in failed_delegations.values()}
+                            if not set(selection['session_ids']) <= known:
+                                raise ToolInputError('await_tasks can wait only for known direct child sessions')
+                            pending_ids = {v.get('session_id') for v in failed_delegations.values() if v.get('pending')}
+                            ready = set(selection['session_ids']) - pending_ids
+                            if not pending_ids.intersection(selection['session_ids']) or selection['wait_for']=='any' and ready:
+                                output = json.dumps({'results':[completed_delegations.get(sid) or next(
+                                    v for v in failed_delegations.values() if v.get('session_id')==sid)
+                                    for sid in selection['session_ids'] if sid in ready], 'pending':sorted(pending_ids.intersection(selection['session_ids']))})
+                            else:
+                                requested_wait = selection
                         if name == 'delegate_task':
                             if (run_context or {}).get('can_delegate') is False:
                                 raise ToolInputError('The last coordinator turn is reserved for acceptance; no child started')
@@ -621,12 +665,20 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             # can resolve its failure. Another job for that role
                             # (even with a reused model call ID) proves nothing.
                             delegation_key = (arguments['role'], arguments['task'].strip())
-                            if not completed_child and work_seconds() < 60:
+                            running = failed_delegations.get(delegation_key)
+                            if running and running.get('pending'):
+                                delegation_key = None
+                                raise ToolInputError('This subtask is already running; use await_tasks for '+
+                                                     str(running['session_id'])+' instead of submitting it again')
+                            # Durable children outlive this activation. Reserve
+                            # only the two bounded submission RPC attempts here.
+                            submission_budget = 10 if run_context is not None else 60
+                            if not completed_child and work_seconds() < submission_budget:
                                 if delegation_key in failed_delegations or any(
                                         value.get('session_id') == session_id
                                         for value in failed_delegations.values() if value.get('session_id')):
                                     delegation_key = None  # No attempt; preserve the existing checkpoint.
-                                raise ToolInputError('Child not started: delegation needs at least 60 seconds '
+                                raise ToolInputError(f'Child not started: delegation needs at least {submission_budget} seconds '
                                                      'of work budget. Return evidence and remaining work.')
                             replacement = arguments.pop('replaces_session_id', None)
                             if replacement is not None:
@@ -671,7 +723,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                           'fresh verification, start a new task without session_id.'}, ensure_ascii=False)
                             _trace('delegation_result_reused', session_id=completed_child['sessionId'])
                             delegation_succeeded = True
-                        else:
+                        elif name != 'await_tasks':
                             output = extra_tools[name]["call"](
                                 arguments, timeout_seconds=work_seconds(),
                                 call_id=turn_id + ":" + tool_call["id"])
@@ -764,7 +816,6 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 if key[0] == delegation_key[0] and value.get('session_id') == child_session:
                                     previous = failed_delegations.pop(key)
                         pending = isinstance(child, dict) and child.get('pending') is True
-                        pending_children = pending_children or pending
                         failure = {**previous, 'pending':pending, 'error': str(exc),
                             'role': delegation_key[0],
                             'session_id': child_session,
@@ -810,10 +861,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     tool_evidence[:] = retain_evidence(tool_evidence, receipt)
                     _trace('work_evidence', receipt={k:v for k,v in receipt.items() if k != 'command'})
                 memory.observe(call_id, name, arguments, output)
-            if pending_children:
-                memory.run_complete = False
-                return save_result('Waiting for durable child tasks', 'partial', 'child_pending',
-                    {'evidence':[], 'errors':[], 'remaining_work':['Await durable child results; the server resumes this coordinator']})
+            if requested_wait:
+                return wait_for_children()
             if structural_blocker:
                 return save_result('Tool input requires reconciliation: '+structural_blocker, 'blocked',
                     'non_retryable_tool_input', {'evidence':retained_receipts(messages,completed_delegations),

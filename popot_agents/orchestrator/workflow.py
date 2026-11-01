@@ -43,7 +43,8 @@ class WorkflowRun:
         return max(0, self.deadline - time.monotonic())
 
     def begin(self):
-        self.meta.update(state='running', phase='executing', turns=self.meta['turns'] + 1)
+        increment = 0 if self.meta.pop('awaiting_children',False) else 1
+        self.meta.update(state='running', phase='executing', turns=self.meta['turns'] + increment)
 
     def record(self, result, checkpoint):
         outcome = result.get('outcome')
@@ -68,6 +69,12 @@ class WorkflowRun:
         if not isinstance(checkpoint, dict):
             return self.stop(result, 'workflow_checkpoint_unavailable')
         self.meta['checkpoint'] = checkpoint
+        if outcome.get('reason') == 'child_pending' and any(
+                value.get('pending') for _,value in checkpoint.get('failed_delegations', [])):
+            if self.remaining() < 1:
+                return self.stop(result, 'workflow_deadline_exhausted')
+            self.meta.update(state='running', phase='checkpoint', awaiting_children=True)
+            return None
         material = {key: sorted(outcome[key]) for key in ('evidence', 'remaining_work', 'errors')}
         receipts = []
         for item in checkpoint.get('messages', []):
@@ -109,7 +116,9 @@ class WorkflowRun:
                 'outcome': outcome}
 
     def continuation(self, *, compact=False):
-        prefix = (f'Coordinator turn {self.meta["turns"]} finished; begin turn {self.meta["turns"] + 1}.\n'
+        prefix = ((f'Child wait finished; resume coordinator turn {self.meta["turns"]}.\n'
+                   if self.meta.get('awaiting_children') else
+                   f'Coordinator turn {self.meta["turns"]} finished; begin turn {self.meta["turns"] + 1}.\n') +
                   'Continue the same authorized task from the saved checkpoint. Do not repeat completed '
                   'actions, implementation, publications or completed child tasks. Reconcile uncertain effects '
                   'before any write. Finish missing review/QA and read back requested publication/CI results. '
