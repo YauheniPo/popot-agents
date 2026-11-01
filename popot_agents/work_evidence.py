@@ -84,6 +84,8 @@ def observe_tool_result(name, arguments, output, call_id):
         'summary':summary[:320]}
     if revision:
         receipt['revision'] = revision
+        if data.get('headRefOid') or isinstance(data.get('head'),dict) and data['head'].get('sha'):
+            receipt['revisionSource'] = 'pr_head'
     if exit_code is not None:
         receipt['exitCode'] = exit_code
     if command:
@@ -120,13 +122,15 @@ def evidence_event(message):
         return None
     result = {}
     for key, size in (('callId',128),('tool',160),('kind',32),('status',32),('source',32),
-                      ('summary',320),('observedAt',64),('command',512),('commandSha256',64),('outputSha256',64)):
+                      ('summary',320),('observedAt',64),('command',512),('commandSha256',64),('outputSha256',64),('runId',64)):
         if isinstance(value.get(key), str):
             result[key] = redact_text(value[key])[:size]
     if not all(result.get(k) for k in ('callId','tool','observedAt','summary')):
         return None
     if isinstance(value.get('revision'), str) and re.fullmatch(_SHA, value['revision']):
         result['revision'] = value['revision'].lower()
+    if value.get('revisionSource') == 'pr_head':
+        result['revisionSource'] = 'pr_head'
     if type(value.get('exitCode')) is int:
         result['exitCode'] = value['exitCode']
     if value.get('outcomeUnknown') is True:

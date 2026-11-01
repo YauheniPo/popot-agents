@@ -56,6 +56,9 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
 
 
 def delegate(arguments, *, timeout_seconds, call_id, url, token, allowed, poll_interval, probe):
+    arguments = dict(arguments) if isinstance(arguments, dict) else arguments
+    scope_assignment = arguments.pop('_scope_assignment', None) if isinstance(arguments, dict) else None
+    revision = arguments.pop('_scope_revision', None) if isinstance(arguments, dict) else None
     if not isinstance(arguments, dict) or not {'role', 'task'} <= set(arguments) \
             or set(arguments) - {'role', 'task', 'session_id'} \
             or ('session_id' in arguments and (probe is not None or not isinstance(arguments['session_id'], str)
@@ -66,12 +69,15 @@ def delegate(arguments, *, timeout_seconds, call_id, url, token, allowed, poll_i
         return json.dumps({"isError": True,
                            "error": "delegate_task requires an allowed role and a nonempty task"})
     invocation = DelegationRequest(arguments, url, token, poll_interval, probe, timeout_seconds, call_id)
+    invocation.scope_assignment, invocation.revision = scope_assignment, revision
     return asyncio.run(invocation.execute())
 
 
 def delegated_result(task, role, probe):
     result = {"sessionId": task.id, "role": role, "state": types.TaskState.Name(task.status.state)}
     metadata = MessageToDict(task).get('metadata', {})
+    if isinstance(metadata.get('reportedAt'), str):
+        result['reportedAt'] = metadata['reportedAt']
     if metadata.get('durable') is True and task.status.state in {types.TASK_STATE_SUBMITTED, types.TASK_STATE_WORKING}:
         return {**result, 'pending':True, 'resumable':False,
                 'outcome':{'status':'partial','reason':'child_running','evidence':[],
@@ -115,6 +121,7 @@ class DelegationRequest:
         self.endpoint = url.rstrip("/") + "/a2a/" + arguments["role"]
         self.task_id = None
         self.progress_seq = 0
+        self.scope_assignment = self.revision = None
 
     def forward_task_progress(self, task):
         activity = MessageToDict(task).get('metadata', {}).get('activity', [])
@@ -144,6 +151,10 @@ class DelegationRequest:
                                   role=types.ROLE_USER,
                                   parts=[types.Part(text=self.arguments["task"])]),
             configuration=types.SendMessageConfiguration(return_immediately=True))
+        if self.scope_assignment is not None:
+            params.message.metadata.update({'scope_assignment':self.scope_assignment})
+        if self.revision is not None:
+            params.message.metadata.update({'revision':self.revision})
         if self.probe is not None:
             params.message.metadata.update({'harness2': self.probe})
         if self.arguments.get('session_id'):

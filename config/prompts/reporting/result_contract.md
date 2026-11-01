@@ -5,6 +5,7 @@ Use blocked when a missing precondition requires intervention.
 Values may use the user language; keys and status are the protocol.
 The answer field is the user-visible deliverable: include requested URLs and results there, not only in evidence.
 Tool call responses are unchanged.
+For repository implementation or verification, include revision=<full 40-character commit SHA> in this JSON object. Read that immutable revision through actual tools. The runtime checks observed revisions; a requested SHA or a prior model claim is not proof that it was inspected. Verification must match the current implementation revision.
 Distinguish current tool observations, attributed child reports and historical memory.
 Do not claim a fresh CI check or after-action read-back without its matching tool result; a PR metadata read proves neither.
 Omit stale status metrics or label them historical.

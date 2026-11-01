@@ -406,6 +406,16 @@ MCP errors include a short redacted message. The top-level `turns` still counts
 saved conversation answers; `workflow.turns` and each task's `coordinatorTurns`
 represent coordinator turns.
 
+Each explicit user run has a stable `workflow.runId`; `get_chat.runs` retains
+up to 20 prior runs. Automatic continuation keeps its ID and receives original
+authorization from server scope, without nesting prior handoff wrappers. The
+last coordinator turn accepts results instead of starting children. Completed
+implementation requires reviewer and QA receipts for the same observed SHA;
+a newer PR-head read-back invalidates verification of an older revision.
+Repeated identical input errors stop with a blocker and failed tool receipts
+do not reset the no-progress guard. Same-SHA reviewer/QA tasks may overlap when
+reserved nested-worker capacity is available.
+
 Requests can select a role, but cannot override its command, credentials or
 permissions. Keep this local endpoint restricted to trusted callers; it has no
 client authentication.

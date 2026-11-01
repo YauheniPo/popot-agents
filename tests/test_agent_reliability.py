@@ -49,7 +49,7 @@ class AgentReliabilityTests(unittest.TestCase):
                 if role == 'code_reviewer':
                     self.assertIn('You own the review', prompt)
 
-    def run_sequence(self, replies, *, delegate=None, clock=None, timeout=900, role=None, state=None, env=None):
+    def run_sequence(self, replies, *, delegate=None, clock=None, timeout=900, role=None, state=None, env=None, run_context=None):
         from ax_local.worker.delegation import make_tools
         bodies = []
         tools = make_tools({'AX_DELEGATION_URL': 'http://fake', 'AX_DELEGATION_TOKEN': 'test',
@@ -69,7 +69,7 @@ class AgentReliabilityTests(unittest.TestCase):
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=response), \
              redirect_stderr(io.StringIO()):
             answer = run_http('Verify the requested work', role or {'tools': ['calculate']},
-                              extra_tools=tools, state=state)
+                              extra_tools=tools, state=state, run_context=run_context)
         return answer, state, bodies
 
     @staticmethod

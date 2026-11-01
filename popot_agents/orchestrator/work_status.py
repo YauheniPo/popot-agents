@@ -24,6 +24,10 @@ def _report(saved):
               'coordinatorTurns': (child.get('workflow') or workflow).get('turns'),
               'outcome': None, 'references': [], 'commits': [], 'truncated': False}
     observations = config.get('_work_evidence', [])
+    run_id = child.get('run_id') or workflow.get('run_id')
+    if run_id:
+        observations = [r for r in observations if r.get('runId') == run_id]
+    report['runId'] = run_id
     report['milestones'] = [{key: value for key, value in receipt.items() if key not in {'command'}}
                              for receipt in observations[-4:]]
     report['truncated'] |= len(observations) > 4

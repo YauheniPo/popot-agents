@@ -28,7 +28,7 @@ class Conversation:
         self.answer = answer
         self.messages = []
 
-    def ask(self, message: str, *, timeout_seconds: float | None = None) -> str:
+    def ask(self, message: str, *, timeout_seconds: float | None = None, run_context=None) -> str:
         if not isinstance(message, str) or not message.strip() \
                 or len(message) > RUNTIME["limits"]["message_chars"]:
             raise ValueError(f"message must be a nonempty string up to {RUNTIME['limits']['message_chars']} characters")
@@ -39,8 +39,10 @@ class Conversation:
         started_at = time.monotonic()
         _trace("turn_started", turn=turn)
         try:
-            answer = (self.answer(candidate) if timeout_seconds is None else
-                      self.answer(candidate, timeout_seconds=timeout_seconds))
+            options = {} if timeout_seconds is None else {'timeout_seconds':timeout_seconds}
+            if run_context is not None:
+                options['run_context'] = run_context
+            answer = self.answer(candidate, **options)
             if not isinstance(answer, str) or not answer.strip():
                 raise RuntimeError("harness returned an empty answer")
             completed = candidate + [{"role": "assistant", "content": answer}]
@@ -110,7 +112,8 @@ def serve(*, extra_tools: dict | None = None) -> None:
                             pass  # A disconnected observer must not stop agent work.
                     with observe_progress(notify if payload.get('progress') is True else None):
                         result = {"answer": conversation.ask(payload.get("message"),
-                                  timeout_seconds=payload.get('timeout_seconds'))}
+                                  timeout_seconds=payload.get('timeout_seconds'),
+                                  run_context=payload.get('run_context') if os.getenv('HARNESS_SESSION_MODE') == 'http' else None)}
                         if payload.get('result_details') is True:
                             result['outcome'] = harness_state.get('outcome', {
                                 'status': 'completed', 'reason': 'answer_returned'})

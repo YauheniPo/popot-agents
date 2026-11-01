@@ -382,7 +382,7 @@ class HttpHarnessTests(unittest.TestCase):
         with patch.dict(os.environ, {"HARNESS_BASE_URL": "https://example.test/v1",
                                   "HARNESS_MODEL": "example-model"}), redirect_stderr(output):
             answer = run_http("calculate", {"tools": ["calculate"], "max_tool_rounds": 2})
-            self.assertIn('Partial result', answer)
+            self.assertIn('Tool input requires reconciliation', answer)
         self.assertNotIn("private-token", output.getvalue())
 
     @patch("popot_agents.worker.http_harness.request.urlopen")

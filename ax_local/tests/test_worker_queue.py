@@ -24,6 +24,19 @@ def wait_for(predicate):
 
 
 class WorkerQueueTests(unittest.TestCase):
+    def test_reserved_nested_capacity_cannot_be_stolen_and_exhaustion_is_immediate(self):
+        queue=WorkerQueue(10, .1)
+        queue.acquire('root')
+        self.assertEqual(queue.reserve('run',6),6)
+        outsiders=[queue.acquire(str(i)) for i in range(3)]
+        children=[queue.acquire('child'+str(i),reservation='run') for i in range(6)]
+        with self.assertRaises(AgentRunError):
+            queue.acquire('too-deep',reservation='run')
+        for i,lease in enumerate(children):queue.release('child'+str(i),lease)
+        queue.release_reservation('run')
+        queue.acquire('after-run')
+        self.assertEqual(queue.status()['active'],5)
+
     def test_fifo_admission_after_ten_slots_are_occupied(self):
         queue = WorkerQueue(10, 3600)
         leases = [queue.acquire(str(i)) for i in range(10)]

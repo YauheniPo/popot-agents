@@ -126,6 +126,14 @@ class Run:
     turn_calls: int = 0
     sibling_locks: dict = field(default_factory=dict, repr=False)
     metadata: dict = field(default_factory=dict, repr=False)
+    max_turns: int = 0
+    root_id: str = ''
+    pool: object = field(default=None, repr=False)
+    reservation: str | None = None
+    reserved_slots: int = 0
+    root_children: dict = field(default_factory=dict, repr=False)
+    lane_condition: object = field(default_factory=threading.Condition, repr=False)
+    nested_lock: object = field(default_factory=threading.Lock, repr=False)
 
 
 @dataclass
@@ -158,6 +166,7 @@ class Job:
     activity: deque = field(default_factory=lambda: deque(maxlen=64))
     activity_seq: int = 0
     messages: list = field(default_factory=list)
+    waiting_for: str | None = None
 
 
 class DelegationService:
@@ -184,17 +193,44 @@ class DelegationService:
                     raise RuntimeError('workflow is already active')
                 metadata = metadata if metadata is not None else {}
                 yield_run = Run(deadline, persistent=True, calls=metadata.get('delegationCalls', 0),
-                                metadata=metadata,
+                                metadata=metadata, max_turns=max_turns, root_id=session_id,
                                 call_limit=self.policy['max_calls_per_turn'] * max_turns)
+                pool = getattr(self.runners[grant.config['agent']], 'worker_queue', None)
+                if pool is not None:
+                    yield_run.pool = pool
+                    yield_run.reservation = metadata.get('run_id') or secrets.token_hex(16)
+                    yield_run.reserved_slots = pool.reserve(yield_run.reservation, self.policy['max_depth']+1)
                 grant.run = yield_run
         try:
             yield yield_run
         finally:
             if yield_run:
                 self._cancel_run(yield_run)
+                if yield_run.pool is not None:
+                    yield_run.pool.release_reservation(yield_run.reservation)
                 with self.lock:
                     if grant.run is yield_run:
                         grant.run = None
+
+    def turn_context(self, session_id):
+        with self.lock:
+            grant = self.grants.get(session_id)
+            if not grant or not grant.run or not grant.run.persistent:
+                return None
+            run = grant.run
+            job = self.jobs.get(session_id)
+            meta = job.config['_ax_delegation'] if job else {}
+            turns = meta.get('workflow', {}).get('turns', 0) if job else run.metadata.get('turns', 0)
+            limit = role_policy(job.config)['max_turns'] if job else run.max_turns
+            return {'run_id':run.metadata.get('run_id'), 'root_session_id':run.root_id,
+                'authorization':run.metadata.get('authorization', [run.metadata.get('original_task','')]),
+                'assignments':meta.get('scope_assignments', []),
+                'target_revision':meta.get('revision'), 'can_delegate':turns < limit}
+
+    def wait_state(self, session_id):
+        with self.lock:
+            job = self.jobs.get(session_id)
+            return job.waiting_for if job else None
 
     def setup_estimate(self, config):
         role = config.get('_ax_role')
@@ -242,6 +278,8 @@ class DelegationService:
                        'outcome':meta.get('outcome', {'status':'failed','reason':'missing outcome'}),
                        'resumable':bool(meta.get('resumable') and sid in self.retained),
                        'answer':meta.get('answer',''), 'truncated':False}
+            if meta.get('outcomeRecordedAt'):
+                receipt['reportedAt'] = meta['outcomeRecordedAt']
             if meta.get('error'):
                 receipt.update(isError=True,error=meta['error'])
             receipts[sid] = receipt
@@ -588,6 +626,12 @@ class DelegationService:
         if len(grant.lineage) > self.policy['max_depth']:
             raise A2AError('delegation depth limit reached')
         if grant.run.persistent:
+            job = self.jobs.get(grant.session_id)
+            turns = (job.config['_ax_delegation'].get('workflow',{}).get('turns',0) if job
+                     else grant.run.metadata.get('turns',0))
+            limit = role_policy(job.config)['max_turns'] if job else grant.run.max_turns
+            if turns >= limit:
+                raise A2AError('The last coordinator turn is reserved for acceptance; no child started')
             if grant.run.calls >= grant.run.call_limit:
                 raise A2AError('workflow delegation call limit reached')
             if grant.run.turn_calls >= self.policy['max_calls_per_turn']:
@@ -601,8 +645,15 @@ class DelegationService:
         if not isinstance(params.get('configuration', {}), dict):
             raise A2AError('configuration must be an object')
         probe, is_probe, call_timeout = self._probe_request(grant, message, token)
+        extra = message.get('metadata', {}) or {}
+        assignment = extra.get('scope_assignment', task)
+        revision = extra.get('revision')
+        if not isinstance(assignment, str) or len(assignment) > RUNTIME['limits']['message_chars']:
+            raise A2AError('invalid delegated assignment')
+        if revision is not None and (not isinstance(revision, str) or not re.fullmatch(r'[a-f0-9]{40}',revision)):
+            raise A2AError('invalid target revision')
         fingerprint = hashlib.sha256((role + '\n' + (session_id or '') + '\n' + task +
-            (json.dumps(probe, sort_keys=True) if is_probe else '')).encode()).hexdigest()
+            (json.dumps(probe, sort_keys=True) if is_probe else '') + assignment + (revision or '')).encode()).hexdigest()
         with self.lock:
             self._authorized(token, role)
             existing = self._existing_submission(grant.session_id, message_id, fingerprint)
@@ -638,6 +689,15 @@ class DelegationService:
             config['_ax_delegation']['resumable'] = False
             durable = grant.run.persistent and not is_probe
             config['_ax_delegation']['durable'] = durable
+            parent_meta = grant.config.get('_ax_delegation', {})
+            config['_ax_delegation']['scope_assignments'] = list(dict.fromkeys([
+                *parent_meta.get('scope_assignments', []),
+                *config['_ax_delegation'].get('scope_assignments', []), assignment]))
+            config['_ax_delegation']['run_id'] = grant.run.metadata.get('run_id')
+            if durable and grant.run.pool is not None:
+                config['_ax_delegation']['pool_reservation'] = grant.run.reservation
+            if revision:
+                config['_ax_delegation']['revision'] = revision
             deadline = grant.deadline
             if durable:
                 parent_job = self.jobs.get(grant.session_id)
@@ -667,8 +727,11 @@ class DelegationService:
                 self._save(job, "TASK_STATE_SUBMITTED")
                 self.jobs[session_id] = job
                 if chat:
+                    if durable and grant.run.pool is not None:
+                        grant.run.pool.adopt_reservation(chat.container_name, grant.run.reservation)
                     self.retained.pop(session_id)
                     self.grants[session_id].run = grant.run
+                    self.grants[session_id].config = json.loads(json.dumps(config))
                 if is_probe:
                     grant.probes += 1
                 else:
@@ -756,6 +819,14 @@ class DelegationService:
         with job.lock:
             if job.canceled.is_set() or job.run.canceled.is_set():
                 return
+            if event.get('agent_session_id') == job.session_id:
+                phase = event.get('event')
+                if phase == 'model_request': job.waiting_for = 'model'
+                elif phase == 'tool_call': job.waiting_for = 'tool'
+                elif phase == 'waiting_for_children': job.waiting_for = 'children'
+                elif phase == 'child_results_ready': job.waiting_for = None
+                elif phase == 'work_evidence' and event.get('receipt',{}).get('kind') == 'ci':
+                    job.waiting_for = 'ci' if event['receipt'].get('status') == 'observed' else None
             job.activity_seq += 1
             job.activity = deque(_bounded_activity(
                 [*job.activity, {'seq': job.activity_seq, 'message': message}],
@@ -776,13 +847,24 @@ class DelegationService:
         stage = "worker_startup"
         sibling_lock = None
         acquired = False
+        root_admitted = nested_acquired = False
         try:
             if job.run.persistent and not job.config.get('_ax_harness2_probe'):
-                with self.lock:
-                    sibling_lock = job.run.sibling_locks.setdefault(
-                        job.config['_ax_delegation']['parent_session_id'], threading.Lock())
-                while not acquired:
-                    acquired = sibling_lock.acquire(timeout=min(.1,self._remaining(job)))
+                parent_id = job.config['_ax_delegation']['parent_session_id']
+                if parent_id == job.run.root_id:
+                    with job.run.lane_condition:
+                        while not self._root_lane_available(job):
+                            job.run.lane_condition.wait(min(.1,self._remaining(job)))
+                        job.run.root_children[job.session_id] = job
+                        root_admitted = True
+                else:
+                    with self.lock:
+                        sibling_lock = job.run.sibling_locks.setdefault(parent_id, threading.Lock())
+                    while not acquired:
+                        acquired = sibling_lock.acquire(timeout=min(.1,self._remaining(job)))
+                    if len(job.config['_ax_delegation']['lineage']) == 3:
+                        while not nested_acquired:
+                            nested_acquired = job.run.nested_lock.acquire(timeout=min(.1,self._remaining(job)))
             self._remaining(job)
             self._save(job, "TASK_STATE_WORKING")
             runner = self.runners[job.config['agent']]
@@ -832,7 +914,7 @@ class DelegationService:
                         if job.run.persistent:
                             self.await_children(job.session_id, job.chat, job.messages, job.deadline)
                             workflow.meta['checkpoint'] = job.chat.get_checkpoint()
-                        message = workflow.continuation()
+                        message = workflow.continuation(compact=bool(getattr(job.chat,'supports_run_context',False)))
                         emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
                         continue
                     result = terminal
@@ -893,8 +975,23 @@ class DelegationService:
                 self._cancel_children(job.session_id)
                 if acquired:
                     sibling_lock.release()
+                if nested_acquired:
+                    job.run.nested_lock.release()
+                if root_admitted:
+                    with job.run.lane_condition:
+                        job.run.root_children.pop(job.session_id, None)
+                        job.run.lane_condition.notify_all()
                 with self.lock:
                     self.jobs.pop(job.session_id, None)
+
+    def _root_lane_available(self, job):
+        active = list(job.run.root_children.values())
+        if not active:
+            return True
+        meta = job.config['_ax_delegation']
+        return (job.run.reserved_slots >= self.policy['max_depth']+1 and len(active) == 1
+            and {job.config['_ax_role'],active[0].config['_ax_role']} == {'code_reviewer','qa_engineer'}
+            and bool(meta.get('revision')) and meta['revision'] == active[0].config['_ax_delegation'].get('revision'))
 
     def _task(self, saved: dict) -> dict:
         meta = saved["roleConfig"]["_ax_delegation"]
@@ -903,6 +1000,8 @@ class DelegationService:
                 "metadata": {"sessionId": saved["sessionId"], "role": saved["role"],
                              "parentSessionId": meta["parent_session_id"]}}
         task['metadata']['durable'] = meta.get('durable', False)
+        if meta.get('outcomeRecordedAt'):
+            task['metadata']['reportedAt'] = meta['outcomeRecordedAt']
         if meta.get('outcome'):
             task['metadata']['outcome'] = meta['outcome']
         activity = meta.get('activity', [])

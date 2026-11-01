@@ -25,9 +25,9 @@ class ManagedConfigTests(unittest.TestCase):
             'openrouter/cohere/north-mini-code:free',
             'nvidia/nvidia/nemotron-3.5-lightning-30b-a3b'])
         self.assertEqual([target['model'] for target in combos['ax-ollama']['models']], [
-            'ollama-cloud/deepseek-v4-pro:0813',
             'ollama-cloud/deepseek-v4.1-flash:1017',
-            'ollama-cloud/glm-5.3-flash'])
+            'ollama-cloud/glm-5.3-flash',
+            'ollama-cloud/deepseek-v4-pro:0813'])
         for combo in combos.values():
             self.assertEqual(combo['config']['maxGlobalAttempts'], len(combo['models']))
 

@@ -453,10 +453,10 @@ class DelegationRoutingTests(unittest.TestCase):
         history = [{'role': 'user', 'content': 'Review ' + PR + '\n' +
                     'x' * RUNTIME['limits']['message_chars']}]
         answer, _, _ = self.run_task(history, specialist='code_reviewer')
-        self.assertIn('Partial result', answer)
+        self.assertIn('Tool input requires reconciliation', answer)
         self.delegate.assert_not_called()
-        rejection = json.loads(self.requests[-1]['messages'][-1]['content'])
-        self.assertIn('context exceeds', rejection['error'])
+        self.assertIn('exceed the message limit', answer)
+        self.assertEqual(len(self.requests), 1)
 
 
 if __name__ == '__main__':
