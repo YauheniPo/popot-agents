@@ -16,6 +16,70 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_await_tasks_checkpoint_closes_memory_turn_without_error(self):
+        from tests.test_agent_reliability import AgentReliabilityTests
+        from tests.test_async_delegation import call, pending
+        helper = AgentReliabilityTests()
+        client = Mock()
+        client.recall.return_value = []
+        with patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}):
+            _, state, _ = helper.run_sequence([helper.delegate_call(),
+                call('await_tasks', {'session_ids': ['a' * 16]}, 'join')],
+                delegate=Mock(return_value=pending()), env={**ENV, 'HARNESS_TURN_TIMEOUT_SECONDS': '900'},
+                role={**ROLE, 'tools': ['calculate'], 'memory_project': 'popot-diagnostics'})
+        event = client.session_event.call_args.args[0]
+        self.assertEqual(state['outcome']['reason'], 'child_pending')
+        self.assertEqual(event['status'], 'completed')
+        self.assertEqual(event['reason'], 'child_pending')
+        self.assertEqual(event['errors'], [])
+        client.remember.assert_not_called()
+
+    def test_checkpoint_is_not_failure_and_outcome_has_no_raw_context(self):
+        for reason in ('child_pending', 'work_budget_exhausted'):
+            client = Mock()
+            with self.subTest(reason=reason), patch.dict(os.environ, ENV, clear=True):
+                memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=client)
+                memory.start_session()
+                memory.outcome = {'status': 'partial', 'reason': reason, 'errors': [],
+                                  'evidence': ['private output'], 'remaining_work': ['private task']}
+                memory.finish_session(False)
+            event = client.session_event.call_args.args[0]
+            self.assertEqual(event['status'], 'completed')
+            self.assertEqual(event['outcome'], 'partial')
+            self.assertEqual(event['reason'], reason)
+            self.assertNotIn('private output', json.dumps(event))
+            self.assertNotIn('private task', json.dumps(event))
+
+    def test_partial_model_failure_remains_failed_with_redacted_reason(self):
+        client = Mock()
+        with patch.dict(os.environ, ENV, clear=True):
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=client)
+            memory.start_session()
+            memory.outcome = {'status': 'partial', 'reason': 'work_budget_exhausted',
+                              'errors': ['model timeout private-password']}
+            memory.finish_session(False)
+        event = client.session_event.call_args.args[0]
+        self.assertEqual(event['status'], 'failed')
+        self.assertEqual(event['outcome'], 'partial')
+        self.assertIn('model timeout', event['errors'][0])
+        self.assertNotIn('private-password', json.dumps(event))
+
+    def test_returned_partial_is_forwarded_to_memory(self):
+        client = Mock()
+        client.recall.return_value = []
+        report = {'status': 'partial', 'answer': 'checkpoint', 'evidence': [],
+                  'errors': [], 'remaining_work': ['continue checks']}
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', return_value=io.BytesIO(
+                 json.dumps({'choices': [{'message': {'content': json.dumps(report)}}]}).encode())):
+            self.assertEqual(run_http(TASK, ROLE, state={}), 'checkpoint')
+        event = client.session_event.call_args.args[0]
+        self.assertEqual(event['status'], 'completed')
+        self.assertEqual(event['outcome'], 'partial')
+
     def test_memory_outage_warns_and_main_model_still_completes(self):
         client = Mock()
         client.session_event.side_effect = OSError('private-password')

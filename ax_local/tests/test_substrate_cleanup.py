@@ -28,6 +28,15 @@ class SubstrateCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             substrate_cleanup.patch_runsc('unknown upstream source')
 
+    def test_lifecycle_patch_fences_run_restore_and_terminate_idempotently(self):
+        source='\n'.join('func (s *AteomHerder) '+name+'(req Request) {\n\tactorUID := req.GetActorUid()\n\twork()\n}\n' for name in ('Run','Restore','Terminate'))
+        patched=substrate_cleanup.patch_lifecycle(source)
+        self.assertEqual(patched.count('popotBeginWorkloadOperation'),3)
+        self.assertEqual(patched.count('actorUID), false)'),2)
+        self.assertEqual(patched.count('actorUID), true)'),1)
+        self.assertEqual(substrate_cleanup.patch_lifecycle(patched),patched)
+        with self.assertRaises(ValueError):substrate_cleanup.patch_lifecycle('unsupported source')
+
     def test_retry_guard_wraps_only_termination_rpc(self):
         source = 'before\n' + CALL + '\n\t}); err != nil {\n\t\treturn nil, err\n\t}\n' + END + '\nafter\n'
         patched = patch_terminate(source)
@@ -121,7 +130,11 @@ class SubstrateCleanupTests(unittest.TestCase):
                 (local / 'kubeconfig').touch()
                 source = local / 'src/substrate/cmd/atelet/main.go'
                 source.parent.mkdir(parents=True)
-                source.write_text(CALL + '\n\t}); err != nil {\n\t\treturn nil, err\n\t}\n' + END)
+                source.write_text('\n'.join(
+                    'func (s *AteomHerder) '+name+'(req Request) {\n\tactorUID := req.GetActorUid()\n}\n'
+                    for name in ('Run','Restore')) +
+                    '\nfunc (s *AteomHerder) Terminate(req Request) {\n\tactorUID := req.GetActorUid()\n'+
+                    CALL + '\n\t}); err != nil {\n\t\treturn nil, err\n\t}\n' + END + '\n}\n')
                 runsc = local / 'src/substrate/cmd/ateom-gvisor/runsc.go'
                 runsc.parent.mkdir(parents=True)
                 runsc.write_text('package main\nimport (\n\t"slices"\n)\n' + '\n'.join(

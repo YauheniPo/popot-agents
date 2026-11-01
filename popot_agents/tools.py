@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.role_env import validate_role_env_names
+from popot_agents.role_env import validate_role_env_names, selected_role_env
 
 WORKSPACE_ROOT = Path(os.getenv("TOOL_WORKSPACE_ROOT", "/workspace"))
 MAX_TOOL_OUTPUT = RUNTIME["limits"]["tool_output_chars"]
@@ -104,10 +104,13 @@ _UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 def safe_tool_env() -> dict[str, str]:
     """Forward baseline variables and only role-selected credentials to tools."""
     names = validate_role_env_names(json.loads(os.getenv("HARNESS_TOOL_ENV_NAMES_JSON", "[]")))
+    git_identity = selected_role_env([name for name in names
+                                    if name in {'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL'}])
     return ({key: value for key, value in os.environ.items()
              if key in {"PATH", "LANG", "LC_ALL", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR",
                         "PLAYWRIGHT_BROWSERS_PATH"}
              or key in names}
+            | {name.replace('AUTHOR', 'COMMITTER'): value for name, value in git_identity.items()}
             | {"HOME": str(WORKSPACE_ROOT), "GIT_TERMINAL_PROMPT": "0",
                "NPM_CONFIG_PREFIX": str(WORKSPACE_ROOT / '.local'),
                "PATH": os.pathsep.join(dict.fromkeys([

@@ -25,6 +25,7 @@ class ToolStep(BaseModel):
     output_chars: int = Field(default=0, ge=0, le=100000000)
     recall_outcome: Literal['useful', 'empty', 'warming_up'] | None = None
     chunks: int | None = Field(default=None, ge=0, le=20)
+    error_type: str | None = Field(default=None, max_length=200, pattern=r'^[a-zA-Z0-9_.]+$')
 
 
 class SessionEvent(BaseModel):
@@ -40,6 +41,9 @@ class SessionEvent(BaseModel):
     cost_usd: float = Field(default=0, ge=0, le=100000)
     cost_reported: bool = False
     memories_saved: int = Field(default=0, ge=0, le=5)
+    outcome: Literal['completed', 'partial', 'blocked', 'failed'] | None = None
+    reason: str = Field(default='', max_length=200)
+    errors: list[str] = Field(default_factory=list, max_length=8)
 
 
 @app.post('/api/v1/popot/session')
@@ -54,6 +58,10 @@ async def session_event(payload: SessionEvent, user: User = Depends(get_authenti
     await ensure_and_touch_session(session_id=payload.session_id, user_id=user.id,
                                    dataset_id=dataset_id)
     sm = get_session_manager(dataset_id=dataset_id)
+    tool_errors = [tool.name for tool in payload.tools if tool.status == 'error']
+    memory_tools = [tool for tool in payload.tools if tool.name.startswith(
+        ('cognee.', 'mcp__cognee__', 'memory.'))]
+    memory_errors = [tool.name for tool in memory_tools if tool.status == 'error']
     if payload.tools:
         # Each SDK trace append rewrites session state and updates lifecycle
         # metrics. The pinned SDK sanitizes each container to 20 items, so use
@@ -61,7 +69,9 @@ async def session_event(payload: SessionEvent, user: User = Depends(get_authenti
         steps = [
             {'name': tool.name, 'status': tool.status, 'output_chars': tool.output_chars,
              **({'recall_outcome': tool.recall_outcome, 'chunks': tool.chunks}
-                if tool.recall_outcome is not None else {})} for tool in payload.tools]
+                if tool.recall_outcome is not None else {}),
+             **({'error_type': tool.error_type} if tool.error_type is not None else {})}
+            for tool in payload.tools]
         await sm.add_agent_trace_step(user_id=str(user.id), session_id=payload.session_id,
             origin_function='popot.tools',
             status='error' if any(tool.status == 'error' for tool in payload.tools) else 'success',
@@ -74,9 +84,13 @@ async def session_event(payload: SessionEvent, user: User = Depends(get_authenti
             model=payload.model or None)
     await sm.add_agent_trace_step(user_id=str(user.id), session_id=payload.session_id,
         origin_function='popot.' + payload.role + '.' + payload.status,
-        status='error' if payload.status == 'failed' else 'success',
+        status='error' if payload.status == 'failed' and not tool_errors else 'success',
         generate_feedback_with_llm=False,
         method_return_value={'project': payload.dataset_name,
+            'outcome': payload.outcome or payload.status, 'reason': payload.reason,
+            'errors': [value[:500] for value in payload.errors],
+            'memory_status': 'degraded' if memory_errors else 'available' if memory_tools else 'unused',
+            'memory_errors': memory_errors,
             'memories_saved': payload.memories_saved,
             'cost_reported': payload.cost_reported,
             'cost_note': 'provider-reported' if payload.cost_reported else 'not reported by provider'})

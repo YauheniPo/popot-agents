@@ -89,6 +89,30 @@ def patch_terminate(source: str) -> str:
     return source[:start] + GUARD + block + '\t}\n' + source[end:]
 
 
+def patch_lifecycle(source: str) -> str:
+    for name in ('Run','Restore','Terminate'):
+        signature = 'func (s *AteomHerder) ' + name + '('
+        if source.count(signature) != 1:
+            raise ValueError('Substrate lifecycle source differs from pinned version')
+        start = source.index(signature)
+        end = source.find('\nfunc ',start+len(signature))
+        end = len(source) if end < 0 else end
+        body = source[start:end]
+        anchor = '\tactorUID := req.GetActorUid()\n'
+        guard = ('\treleaseLifecycle, err := popotBeginWorkloadOperation(ctx, ateompath.ActorPath(actorUID), '
+                 + ('true' if name == 'Terminate' else 'false') + ')\n'
+                 '\tif err != nil { return nil, err }\n\tdefer releaseLifecycle()\n')
+        # gofmt expands the error block; accept only our exact installed guard.
+        formatted = guard.replace('if err != nil { return nil, err }',
+                                  'if err != nil {\n\t\treturn nil, err\n\t}')
+        if guard in body or formatted in body:
+            continue
+        if body.count(anchor) != 1 or 'popotBeginWorkloadOperation' in body:
+            raise ValueError('Unexpected Substrate lifecycle guard')
+        source = source[:start] + body.replace(anchor,anchor+guard,1) + source[end:]
+    return source
+
+
 def daemonset_patch(ds: dict, image: str) -> list:
     containers = ds['spec']['template']['spec']['containers']
     matches = [(i, c) for i, c in enumerate(containers) if c['name'] == 'atelet']
@@ -168,6 +192,8 @@ def install_runsc_cleanup(root, checkout, config, kubectl, env, run):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--atelet-only',action='store_true',
+                        help='Update node lifecycle handling without rolling active gVisor worker pods')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     local = root / 'ax_local/.local'
@@ -205,15 +231,17 @@ def main():
     daemonset_patch(items[0], 'validation-only')
     main_file = checkout / 'cmd/atelet/main.go'
     source = main_file.read_text()
-    updated = patch_terminate(source)
+    updated = patch_lifecycle(patch_terminate(source))
     helper = Path(__file__).with_name('cleanup_go')
-    for name in ('popot_cleanup.go', 'popot_cleanup_test.go'):
+    helper_names = ('popot_cleanup.go','popot_cleanup_test.go',
+                    'popot_workload_lifecycle.go','popot_workload_lifecycle_test.go')
+    for name in helper_names:
         target = main_file.with_name(name)
         content = (helper / name).read_text()
         if target.exists() and target.read_text() != content:
             raise ValueError('Existing cleanup helper differs; inspect local source before replacing')
-    version = hashlib.sha256(Path(__file__).read_bytes() +
-                             (helper / 'popot_cleanup.go').read_bytes()).hexdigest()
+    version = hashlib.sha256(Path(__file__).read_bytes() + b''.join(
+        (helper / name).read_bytes() for name in helper_names)).hexdigest()
     stamp = local / 'substrate-cleanup.json'
     try:
         installed = json.loads(stamp.read_text())
@@ -230,13 +258,15 @@ def main():
         # Inspect the live DaemonSet rather than trusting a local stamp alone.
         run([*ds_base, 'rollout', 'status', 'daemonset/' + name, '--timeout=300s'])
         print('Local atelet cleanup fix is current; build skipped.', flush=True)
-        install_runsc_cleanup(root, checkout, config, kubectl, env, run)
+        if not args.atelet_only:
+            install_runsc_cleanup(root, checkout, config, kubectl, env, run)
         return
     if source != updated:
         main_file.write_text(updated)
-    for name in ('popot_cleanup.go', 'popot_cleanup_test.go'):
+    for name in helper_names:
         main_file.with_name(name).write_text((helper / name).read_text())
-    run(['go', 'test', 'popot_cleanup.go', 'popot_cleanup_test.go'], cwd=main_file.parent)
+    run(['gofmt','-w',str(main_file)])
+    run(['go', 'test', *helper_names], cwd=main_file.parent)
     arch = run(['go', 'env', 'GOARCH'], capture_output=True).stdout.strip()
     env['KO_DEFAULTPLATFORMS'] = 'linux/' + arch
     ldflags = '-X=github.com/agent-substrate/substrate/internal/version.Version=popot-cleanup-' + PIN[:12]
@@ -251,7 +281,8 @@ def main():
     run([*ds_base, 'rollout', 'status', 'daemonset/' + name, '--timeout=300s'])
     stamp.write_text(json.dumps({'version': version, 'image': image}) + '\n')
     print('Local atelet cleanup fix deployed.', flush=True)
-    install_runsc_cleanup(root, checkout, config, kubectl, env, run)
+    if not args.atelet_only:
+        install_runsc_cleanup(root, checkout, config, kubectl, env, run)
 
 
 if __name__ == '__main__':

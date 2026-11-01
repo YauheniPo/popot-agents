@@ -29,5 +29,8 @@ def selected_role_env(names, environ: Mapping[str, str] | None = None) -> dict[s
         value = environ.get(name)
         if not value:
             raise ValueError(f"required role environment variable is missing: {name}")
+        if name in {'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL'} and (
+                not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            raise ValueError(f"invalid Git identity environment variable: {name}")
         selected[name] = value
     return selected

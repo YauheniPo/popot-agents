@@ -10,6 +10,18 @@ from unittest.mock import patch
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_git_identity_values_are_not_runtime_settings(self):
+        from popot_agents.runtime_config import load_runtime_config
+        settings = load_runtime_config()
+        self.assertNotIn('git', settings)
+        self.assertTrue({'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL'} <= set(settings['role_env_names']))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'runtime.json'
+            settings['git'] = {'name': 'Owner', 'email': 'owner@example.com'}
+            path.write_text(json.dumps(settings))
+            with self.assertRaisesRegex(ValueError, 'runtime config'):
+                load_runtime_config(path)
+
     def test_workflow_limits_live_in_runtime_and_custom_config_controls_policy(self):
         from popot_agents.runtime_config import load_runtime_config
         settings = load_runtime_config()

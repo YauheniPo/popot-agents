@@ -429,8 +429,22 @@ class AxAgentRunner:
         # entry must never issue a late delete against a replacement worker.
         with self._cleanup_lock:
             try:
+                deadline = time.monotonic() + AX_CONFIG['delete_timeout_seconds']
                 result = self._run('delete', 'task', task_name,
                                    timeout=AX_CONFIG['delete_timeout_seconds'], allow_failure=True)
+                if result.returncode == 0:
+                    # Delete acknowledges an asynchronous controller request.
+                    # Keep the lease until the controller confirms absence.
+                    while True:
+                        remaining = deadline-time.monotonic()
+                        if remaining <= 0:
+                            result = subprocess.CompletedProcess([],1,'','AX deletion not confirmed')
+                            break
+                        state = self._run('describe','task',task_name,timeout=remaining,allow_failure=True)
+                        if state.returncode:
+                            result = state
+                            break
+                        time.sleep(min(.1,max(0,deadline-time.monotonic())))
             except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError):
                 self._defer_cleanup(task_name, lease)
                 raise

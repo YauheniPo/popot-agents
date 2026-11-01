@@ -297,7 +297,7 @@ class FeatureTeamConfigTests(unittest.TestCase):
             self.assertGreater(len(roles[name]["instructions"]), 80, name)
         self.assertIn("calculate", roles["analyst"]["tools"])
         self.assertEqual(roles["backend_engineer"]["env_names"],
-                         ["GITHUB_PERSONAL_ACCESS_TOKEN", "COGNEE_API_URL", "COGNEE_PASSWORD",
+                         ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GITHUB_PERSONAL_ACCESS_TOKEN", "COGNEE_API_URL", "COGNEE_PASSWORD",
                           "GITGUARDIAN_API_KEY", "SONAR_TOKEN"])
 
     def test_frontend_and_qa_can_execute_checks_with_readonly_github_access(self):

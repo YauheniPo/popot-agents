@@ -51,11 +51,11 @@ class SessionApiTests(unittest.TestCase):
             payload = SimpleNamespace(session_id='popot-test-123',
                 dataset_name='github-owner-repo', role='agent', status='running',
                 tools=[SimpleNamespace(name='cognee.recall', status='success',
-                    output_chars=237, recall_outcome='warming_up', chunks=0)] + [
+                    output_chars=237, recall_outcome='warming_up', chunks=0, error_type=None)] + [
                     SimpleNamespace(name='bash', status='success', output_chars=i,
-                                    recall_outcome=None, chunks=None) for i in range(199)],
+                                    recall_outcome=None, chunks=None, error_type=None) for i in range(199)],
                 model='', tokens_in=0, tokens_out=0, cost_usd=0,
-                cost_reported=False, memories_saved=0)
+                cost_reported=False, memories_saved=0, outcome=None, reason='', errors=[])
             user = SimpleNamespace(id='user-id')
             asyncio.run(module.session_event(payload, user))
 

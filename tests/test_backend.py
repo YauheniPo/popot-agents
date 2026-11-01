@@ -20,6 +20,46 @@ BACKEND_TOOLS = [
 
 
 class BackendRoleTests(unittest.TestCase):
+    def test_git_commits_use_owner_identity_despite_agent_config(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(harness_tools, 'WORKSPACE_ROOT', Path(directory)), \
+             patch.dict(os.environ, {'GIT_AUTHOR_NAME': 'Fixture Owner',
+                                     'GIT_AUTHOR_EMAIL': 'owner@example.com',
+                                     'HARNESS_TOOL_ENV_NAMES_JSON': '["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]',
+                                     'GIT_COMMITTER_EMAIL': 'agent@example.com'}):
+            env = harness_tools.safe_tool_env()
+
+            def git(*args):
+                return subprocess.run(['git', *args], cwd=directory, env=env,
+                                      check=True, capture_output=True, text=True).stdout.strip()
+
+            git('init')
+            git('config', 'user.name', 'backend_engineer')
+            git('config', 'user.email', 'backend_engineer@users.noreply.github.com')
+            git('-c', 'user.name=Codex', '-c', 'user.email=noreply@openai.com',
+                'commit', '--allow-empty', '-m', 'fixture')
+            expected = 'Fixture Owner|owner@example.com|Fixture Owner|owner@example.com'
+            self.assertEqual(git('show', '-s', '--format=%an|%ae|%cn|%ce'), expected)
+            git('commit', '--amend', '--reset-author', '--allow-empty', '-m', 'amended')
+            self.assertEqual(git('show', '-s', '--format=%an|%ae|%cn|%ce'), expected)
+
+    def test_git_identity_is_only_forwarded_to_selected_roles(self):
+        with patch.dict(os.environ, {'HARNESS_TOOL_ENV_NAMES_JSON': '[]',
+                                     'GIT_AUTHOR_NAME': 'Owner', 'GIT_AUTHOR_EMAIL': 'owner@example.com'}):
+            env = harness_tools.safe_tool_env()
+        self.assertFalse(any(key.startswith(('GIT_AUTHOR_', 'GIT_COMMITTER_')) for key in env))
+        identity = {'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL'}
+        for path in (Path(__file__).resolve().parents[1] / 'config/roles').glob('*.json'):
+            role = json.loads(path.read_text())
+            can_publish = 'create_pull_request' in role.get('mcpServers', {}).get('github', {}).get('tools', [])
+            self.assertEqual(set(role.get('env_names', [])) & identity, identity if can_publish else set(), path.stem)
+
+    def test_git_identity_rejects_blank_or_multiline_values(self):
+        from popot_agents.role_env import selected_role_env
+        for value in (' ', 'bad\nidentity', 'bad\x00identity'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'GIT_AUTHOR_NAME'):
+                selected_role_env(['GIT_AUTHOR_NAME'], {'GIT_AUTHOR_NAME': value})
+
     def test_user_installed_commands_are_on_tool_path(self):
         with patch.dict(os.environ, {'PATH': '/usr/bin'}, clear=True), \
              patch.object(harness_tools, 'WORKSPACE_ROOT', Path('/workspace')):

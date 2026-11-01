@@ -77,8 +77,8 @@ class CronTests(unittest.TestCase):
                                          for index in range(4)]}}
             scheduler = CronScheduler(roles, {"openrouter": runner}, store)
             def cli(*args, **_kwargs):
-                return subprocess.CompletedProcess([], 1 if args[0] == 'get' else 0, '',
-                                                   'NotFound' if args[0] == 'get' else '')
+                return subprocess.CompletedProcess([], 1 if args[0] in {'get','describe'} else 0, '',
+                                                   'NotFound' if args[0] in {'get','describe'} else '')
             with patch.object(runner, '_run', side_effect=cli) as run, \
                  patch.object(runner, '_wait_for_chat', side_effect=lambda chat, *_args: chat), \
                  patch.object(AxChat, 'send', return_value={'answer': 'report ready'}), \

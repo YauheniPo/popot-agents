@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
-from popot_agents.progress import trace_event, trace_output
+from popot_agents.progress import trace_event, trace_output, redact_text
 from popot_agents.skills import prepare_role_config
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output
 from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks
@@ -137,6 +137,10 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                            run_context=run_context)
         success = memory.run_complete
         return answer
+    except Exception as exc:
+        memory.outcome = {'status': 'failed', 'reason': 'execution_error',
+                          'errors': [type(exc).__name__ + ': ' + redact_text(str(exc))[:400]]}
+        raise
     finally:
         memory.finish_session(success)
 
@@ -350,6 +354,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 memory.client.timeout = min(RUNTIME["timeouts"]["memory_request_seconds"], remaining_seconds() / 2)
                 memory.save(summary, task_status=status)
             except Exception as exc:
+                memory.capture_failed(exc)
                 _trace('memory_capture_failed', dataset=memory.dataset, error_type=type(exc).__name__)
 
     def save_result(answer, status, reason, report=None):
@@ -420,6 +425,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             state.update(checkpoint)
         if reason != 'child_pending':
             capture_memory(answer, status)
+        memory.outcome = outcome
+        if memory.warnings:
+            outcome['warnings'] = list(dict.fromkeys([*outcome.get('warnings', []), *memory.warnings]))
         return answer
 
     def wait_for_children(answer='', report=None):
@@ -557,6 +565,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             if forced_final and (isinstance(exc, _ModelRequestError) and exc.retryable
                                  or 'timed out' in str(exc) or 'deadline exceeded' in str(exc)):
                 _trace('turn_partial', reason='final_model_timeout', round=round_number)
+                model_failure = str(exc)
                 return partial_answer()
             raise
         memory.record_usage(result)
