@@ -140,9 +140,10 @@ class TurnMemory:
         if not self.enabled or seconds < RUNTIME["timeouts"]["memory_recall_min_seconds"]:
             return ''
         try:
-            # recall may log in, resolve the dataset, then search (three requests).
-            self.client.timeout = min(RUNTIME["timeouts"]["memory_request_seconds"], seconds / 3)
-            result = self.client.recall(self.task[:RUNTIME["memory"]["query_chars"]], self.dataset, top_k=RUNTIME["memory"]["recall_top_k"])
+            # Login, dataset lookup and search share the actual remaining budget.
+            self.client.timeout = seconds
+            result = self.client.recall(self.task[:RUNTIME["memory"]["query_chars"]], self.dataset,
+                                       top_k=RUNTIME["memory"]["recall_top_k"], timeout_seconds=seconds)
             chunks = []
             warming_up = False
             for item in result if isinstance(result, list) else []:

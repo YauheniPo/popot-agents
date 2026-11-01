@@ -170,18 +170,22 @@ Supported fields are `effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhig
 `max`), a positive integer `max_tokens`, and boolean `enabled`/`exclude`.
 Choose either `effort` or `reasoning.max_tokens`, not both. Use
 `{"enabled": true}` for provider defaults. Omitting `reasoning` leaves provider
-behavior unchanged. Active OmniRoute profiles and the direct `openrouter`
-profile disable reasoning and cap output at 8192 tokens. The direct OpenRouter
+behavior unchanged. Profiles may alternatively use native `reasoning_effort`
+with the same effort values; combining it with `reasoning` is rejected.
+The `omniroute_cloud` and `ollama_cloud` profiles use `reasoning_effort=max` and
+65536 output tokens, the verified maximum for the primary DeepSeek V4 Pro 0813.
+Other OmniRoute profiles and the direct `openrouter` profile disable reasoning
+and cap output at 8192 tokens. The direct OpenRouter
 model is pinned to `cohere/north-mini-code:free`; roles using OmniRoute use explicit
 fallback combos instead of the random `openrouter/free` pool.
 The optional `nous` profile retains its provider-default reasoning setting,
 but Solar Mini 4 is excluded from AX combos after malformed tool arguments in
 the 2026-10-20 experiment.
 Ollama's configured `qwen2.5-coder:14b` does not advertise a separate thinking
-mode. `backend_engineer` and `code_reviewer` use the `ollama_cloud` profile with
-`OLLAMA_CLOUD_MODEL=deepseek-v4.1-flash:1017` and `OLLAMA_API_KEY`. They connect
-directly to `https://ollama.com/v1` through the AX provider proxy. Reasoning is
-left at the provider default.
+mode. Backend, frontend, code review and QA use `omniroute_cloud` with
+`OMNIROUTE_CLOUD_MODEL=ax-ollama`. The AX provider proxy forwards requests to
+OmniRoute, which selects the configured Ollama Cloud targets. Direct profiles
+remain available for explicit assignments.
 Recheck support when changing a profile's model.
 Model/provider support still determines which options work, including whether
 reasoning can be disabled or returned. `openrouter/free` chooses models dynamically.
@@ -296,6 +300,18 @@ answer, `sessionId` and activity. Continue with `send_message` and that `session
 Upstream HTTP failures return `isError=true` with the HTTP status and redacted
 diagnostic message, including child session IDs when supplied by the API.
 
+For clients that hide MCP notifications, monitor a pending task with `list_chats`
+and `get_chat(session_id)`. Both return a compact `progress` snapshot: current turn
+state, elapsed seconds, counts of `model_request`/`tool_call` events, the last action
+and last error. `get_chat` does not wait for a running turn's session lock or probe
+its busy worker. Poll every 15–30 seconds and display changed snapshots through
+the client's normal tool output; do not rerun the task to check its status.
+Identify the session by its ID, role and creation time; do not attribute another
+concurrent session's progress to the task. Arguments, output and reasoning are
+excluded from this snapshot. It resets each turn and exists only while the API
+retains the live session; after restart or eviction it is `null`. A completed
+progress state means the turn ended, not that its task passed verification.
+
 Requests can select a role, but cannot override its command, credentials or
 permissions. Keep this local endpoint restricted to trusted callers; it has no
 client authentication.
@@ -352,8 +368,7 @@ The feature team roles are:
 | `project_operator` | Analyze local services, model routing, metrics, memory and pods; prepare and apply reviewed local changes | Real Holmes jobs, project inspection/change tools, PromQL and Cognee memory; no shell or worker admin credentials |
 
 The `chat` and `analyst` roles also remain available. `analyst` uses the
-`omniroute` profile; backend, code review and QA use `ollama_cloud`, while frontend
-uses `omniroute_code`. Change a role's `agent` field to another configured
+`omniroute_free` profile; backend, frontend, code review and QA use `omniroute_cloud`. Change a role's `agent` field to another configured
 profile if needed, and set that profile's model and credentials in `.env`.
 
 Select `planner` or `qa_engineer` in the MCP request above to use those roles.
@@ -747,9 +762,9 @@ scheduled work uses the receiving role's own profile.
 | Profile | Provider | Variables |
 | --- | --- | --- |
 | `openrouter` | OpenRouter chat API | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
-| `omniroute` | Local OmniRoute gateway | `OMNIROUTE_API_KEY`, `OMNIROUTE_MODEL` |
-| `omniroute_code` | OmniRoute combo for code | `OMNIROUTE_API_KEY`, `OMNIROUTE_CODE_MODEL` |
-| `omniroute_ops` | Project operator and service analysis | `OMNIROUTE_API_KEY`, `OMNIROUTE_OPS_MODEL` |
+| `omniroute_free` | Local OmniRoute gateway | `OMNIROUTE_API_KEY`, `OMNIROUTE_FREE_MODEL` |
+| `omniroute_cloud` | OmniRoute combo for code | `OMNIROUTE_API_KEY`, `OMNIROUTE_CLOUD_MODEL` |
+| `omniroute_ops` | Project operator and service analysis | `OMNIROUTE_API_KEY`, `OMNIROUTE_FREE_MODEL` |
 | `ollama_local` | Local Ollama chat API | `OLLAMA_LOCAL_MODEL` |
 | `ollama_cloud` | Ollama Cloud chat API | `OLLAMA_API_KEY`, `OLLAMA_CLOUD_MODEL` |
 | `nous` | Nous inference chat API | `NOUS_API_KEY`, `NOUS_MODEL` |
@@ -765,7 +780,7 @@ Docker profiles `ollama_claude` and `ollama_claude_local` have been removed.
 For routing across free provider models, follow the optional
 [OmniRoute setup for AX](ax_local/README.md#omniroute-для-ax). It uses named
 combos of explicitly selected models, recorded in `config/omniroute/combos.json`.
-Engineers and the reviewer use `ax-code-free`; other configured roles use
+Engineers, QA and the reviewer use `ax-ollama`; other configured roles use
 `ax-free`. The launcher provisions the gateway from the repository configuration
 and `.env` secrets before starting AX. Assign those roles to another configured
 profile to run without OmniRoute.

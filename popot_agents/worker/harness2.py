@@ -59,7 +59,7 @@ def refine_role(messages, role, *, deadline, tool_names):
         if budget < 1:
             raise TimeoutError('No time remains for planning')
         model = os.environ['HARNESS2_IMPROVER_MODEL']
-        if model != 'ax-harness-free' and not model.endswith(':free'):
+        if model != 'ax-free' and not model.endswith(':free'):
             raise ValueError('Harness2 improver requires a free model')
         state = Path(os.getenv('HARNESS_SOCKET_PATH', '/workspace/chat.sock')).parent / 'harness2' / name
         mode = settings.get('mode', 'planning')

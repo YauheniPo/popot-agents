@@ -6,19 +6,19 @@
     "model_env": "OPENROUTER_MODEL",
     "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}}
   },
-  "omniroute": {
+  "omniroute_free": {
     "session_mode": "http",
     "environment": {"HARNESS_BASE_URL": "https://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
     "env_names": ["OMNIROUTE_API_KEY"],
-    "model_env": "OMNIROUTE_MODEL",
+    "model_env": "OMNIROUTE_FREE_MODEL",
     "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}, "chat_template_kwargs": {"enable_thinking": false}}
   },
-  "omniroute_code": {
+  "omniroute_cloud": {
     "session_mode": "http",
     "environment": {"HARNESS_BASE_URL": "https://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
     "env_names": ["OMNIROUTE_API_KEY"],
-    "model_env": "OMNIROUTE_CODE_MODEL",
-    "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}, "chat_template_kwargs": {"enable_thinking": false}}
+    "model_env": "OMNIROUTE_CLOUD_MODEL",
+    "model_parameters": {"max_tokens": 65536, "reasoning_effort": "max"}
   },
   "ollama_local": {
     "session_mode": "http",
@@ -29,7 +29,8 @@
     "session_mode": "http",
     "environment": {"HARNESS_BASE_URL": "https://ollama.com/v1", "HARNESS_API_KEY_ENV": "OLLAMA_API_KEY"},
     "env_names": ["OLLAMA_API_KEY"],
-    "model_env": "OLLAMA_CLOUD_MODEL"
+    "model_env": "OLLAMA_CLOUD_MODEL",
+    "model_parameters": {"max_tokens": 65536, "reasoning_effort": "max"}
   },
   "nous": {
     "session_mode": "http",
@@ -49,7 +50,7 @@
     "session_mode": "http",
     "environment": {"HARNESS_BASE_URL": "https://omniroute:20128/v1", "HARNESS_API_KEY_ENV": "OMNIROUTE_API_KEY"},
     "env_names": ["OMNIROUTE_API_KEY"],
-    "model_env": "OMNIROUTE_OPS_MODEL",
+    "model_env": "OMNIROUTE_FREE_MODEL",
     "model_parameters": {"max_tokens": 8192, "reasoning": {"enabled": false}, "chat_template_kwargs": {"enable_thinking": false}}
   }
 }

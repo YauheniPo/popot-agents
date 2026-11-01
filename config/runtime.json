@@ -5,7 +5,7 @@
     "prune_interval_seconds": 60
   },
   "timeouts": {
-    "model_request_seconds": 120,
+    "model_request_seconds": 900,
     "mcp_discovery_seconds": 60,
     "mcp_tool_seconds": 120,
     "mcp_http_seconds": 30,
@@ -20,7 +20,7 @@
     "memory_recall_seconds": 20,
     "memory_session_start_seconds": 3,
     "memory_session_finish_seconds": 5,
-    "memory_summary_seconds": 120,
+    "memory_summary_seconds": 300,
     "memory_capture_min_seconds": 8,
     "memory_capture_margin_seconds": 5,
     "memory_recall_min_seconds": 1,

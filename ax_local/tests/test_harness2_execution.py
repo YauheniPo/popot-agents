@@ -154,7 +154,7 @@ class Harness2ExecutionTests(unittest.TestCase):
         runner = AxAgentRunner('image@sha256:' + 'a' * 64, 'test', 'http://model.test/v1',
                                proxy_token='model-token', model_parameters={'max_tokens':8192})
         runner.delegation = self.service
-        runner.harness2_environment = {'HARNESS2_IMPROVER_MODEL':'ax-harness-free',
+        runner.harness2_environment = {'HARNESS2_IMPROVER_MODEL':'ax-free',
             'HARNESS2_PROXY_TOKEN':'improver-token','HARNESS2_MODEL_PARAMETERS_JSON':'{}'}
         with patch.dict('os.environ', {name:'test-' + name for name in role['env_names']}):
             manifest = runner.task_manifest('4444444444444444', role)

@@ -34,8 +34,14 @@ FIELDS = {
 
 def validate_model_parameters(parameters: dict, label: str = "model parameters") -> dict:
     if not isinstance(parameters, dict) or set(parameters) - {
-            "temperature", "max_tokens", "reasoning", "chat_template_kwargs"}:
-        raise ValueError(f"{label} may contain only temperature, max_tokens, reasoning and chat_template_kwargs")
+            "temperature", "max_tokens", "reasoning", "reasoning_effort", "chat_template_kwargs"}:
+        raise ValueError(f"{label} may contain only temperature, max_tokens, reasoning, reasoning_effort and chat_template_kwargs")
+    if 'reasoning_effort' in parameters:
+        effort = parameters['reasoning_effort']
+        if not isinstance(effort, str) or effort not in {'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'}:
+            raise ValueError(f'{label}.reasoning_effort must be none, minimal, low, medium, high, xhigh or max')
+        if 'reasoning' in parameters:
+            raise ValueError(f'{label} must use either reasoning or reasoning_effort, not both')
     temperature = parameters.get("temperature")
     if "temperature" in parameters and (type(temperature) not in (int, float)
                                         or not 0 <= temperature <= 2):

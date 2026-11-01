@@ -2,6 +2,7 @@
   "settings": {
     "cloudEnabled": false,
     "credentialRedactionEnabled": true,
+    "call_log_pipeline_enabled": true,
     "debugMode": false,
     "memoryEnabled": false,
     "skillsEnabled": false,

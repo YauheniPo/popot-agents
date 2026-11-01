@@ -24,16 +24,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class AgentCapacityTests(unittest.TestCase):
     def test_model_timeout_does_not_repeat_the_gateway_fallback_chain(self):
-        timeouts = []
-        def respond(call, timeout):
-            timeouts.append(timeout)
-            if len(timeouts) == 1:
-                raise TimeoutError()
-            return io.BytesIO(b'{"choices": []}')
-        with patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
-            with self.assertRaisesRegex(RuntimeError, 'model request timed out'):
-                _model_request(object(), round_number=1, messages=[], schemas=[], remaining_seconds=lambda: 500)
-        self.assertEqual(timeouts, [120])
+        for remaining, expected in ((500, 500), (1500, 900)):
+            with self.subTest(remaining=remaining):
+                timeouts = []
+                def respond(call, timeout):
+                    timeouts.append(timeout)
+                    if len(timeouts) == 1:
+                        raise TimeoutError()
+                    return io.BytesIO(b'{"choices": []}')
+                with patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
+                    with self.assertRaisesRegex(RuntimeError, 'model request timed out'):
+                        _model_request(object(), round_number=1, messages=[], schemas=[],
+                                       remaining_seconds=lambda: remaining)
+                self.assertEqual(timeouts, [expected])
 
     def test_large_mcp_output_is_preserved_and_can_be_read_past_preview(self):
         content = 'начало\n' + 'x' * 30000 + '\nimportant finding at the end; continue with read_file '

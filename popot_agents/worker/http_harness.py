@@ -175,6 +175,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         extra_tools['delegate_task'] = delegation
     instructions = role_config.get("instructions", "")
     allowed = role_config.get("tools", [])
+    if 'bash' in allowed:
+        instructions += '\n\n' + render_prompt('tools/inspection')
     mcp_servers = role_config.get("mcpServers", {})
     mcp_tools = (mcp_client.discover_tools(mcp_servers, timeout_seconds=remaining_seconds())
                  if mcp_servers else {})
@@ -258,6 +260,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                     "response_format": {"type": "json_object"},
                                     "max_tokens": RUNTIME["memory"]["summary_max_tokens"] if attempt == 0
                                         else RUNTIME["memory"]["summary_retry_max_tokens"]}
+                    if 'reasoning_effort' in model_parameters:
+                        # Native thinking models (including gateway routes) may need
+                        # reasoning tokens before emitting the small extraction JSON.
+                        summary_body['reasoning_effort'] = 'low'
+                        summary_body['max_tokens'] = max(summary_body['max_tokens'],
+                            model_parameters.get('max_tokens', summary_body['max_tokens']))
+                        summary_body.pop('response_format', None)
                     if os.getenv('HARNESS_UPSTREAM_HOST', urlsplit(base_url).hostname) == 'ollama.com':
                         # Cloud has no structured-output guarantee. Its default thinking
                         # can consume the extraction token budget before emitting JSON.

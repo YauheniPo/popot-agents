@@ -34,15 +34,15 @@ def configure_harness2(roles, profiles, runners, routes):
     model = os.getenv('HARNESS2_IMPROVER_MODEL', '').strip()
     if not model:
         raise ValueError('Set HARNESS2_IMPROVER_MODEL in .env for roles using Harness2')
-    if model != 'ax-harness-free' and not model.endswith(':free'):
+    if model != 'ax-free' and not model.endswith(':free'):
         raise ValueError('HARNESS2_IMPROVER_MODEL requires a free model')
-    selected = resolve_provider('omniroute', model, profiles, os.environ)
+    selected = resolve_provider('omniroute_free', model, profiles, os.environ)
     token = secrets.token_urlsafe(32)
     routes[token] = selected
     for runner in runners.values():
         runner.harness2_environment = {
             'HARNESS2_IMPROVER_MODEL': model, 'HARNESS2_PROXY_TOKEN': token,
-            'HARNESS2_MODEL_PARAMETERS_JSON': json.dumps(profiles['omniroute'].get('model_parameters', {})),
+            'HARNESS2_MODEL_PARAMETERS_JSON': json.dumps(profiles['omniroute_free'].get('model_parameters', {})),
         }
 
 

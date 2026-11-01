@@ -16,10 +16,43 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_gateway_capture_lowers_effort_and_preserves_room_for_thinking(self):
+        client = Mock()
+        client.recall.return_value = []
+        bodies = []
+
+        def respond(call, **kwargs):
+            bodies.append(json.loads(call.data))
+            content = 'done' if len(bodies) == 1 else '{"memories":[]}'
+            return io.BytesIO(json.dumps({'choices': [{'finish_reason': 'stop',
+                'message': {'content': content}}]}).encode())
+
+        with patch.dict(os.environ, {**ENV, 'HARNESS_UPSTREAM_HOST': 'omniroute',
+             'HARNESS_MODEL_PARAMETERS_JSON': json.dumps(
+                 {'reasoning_effort': 'max', 'max_tokens': 65536})}, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
+            self.assertEqual(run_http(TASK, ROLE), 'done')
+        self.assertEqual(bodies[0]['reasoning_effort'], 'max')
+        self.assertEqual(bodies[0]['max_tokens'], 65536)
+        self.assertEqual(bodies[1]['reasoning_effort'], 'low')
+        self.assertEqual(bodies[1]['max_tokens'], 65536)
+        self.assertNotIn('response_format', bodies[1])
+
+    def test_automatic_recall_passes_its_full_budget_to_the_memory_client(self):
+        with patch.dict(os.environ, ENV, clear=True):
+            client = Mock()
+            client.recall.return_value = []
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=client)
+            memory.context(20)
+        self.assertEqual(client.timeout, 20)
+        self.assertEqual(client.recall.call_args.kwargs['timeout_seconds'], 20)
+
     def test_capture_keeps_model_parameters_and_waits_within_the_turn_deadline(self):
         parameters = {'reasoning': {'enabled': False}, 'chat_template_kwargs': {'enable_thinking': False},
                       'max_tokens': 8192}
-        for turn_seconds, expected_timeout in ((180, 120), (60, 55)):
+        for turn_seconds, expected_timeout in ((600, 300), (180, 175), (60, 55)):
             with self.subTest(turn_seconds=turn_seconds):
                 client = Mock()
                 client.recall.return_value = []

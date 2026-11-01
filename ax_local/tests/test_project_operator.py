@@ -299,7 +299,7 @@ class OperatorChangeTests(unittest.TestCase):
         def start():
             barrier.wait(timeout=2)
             reports.append(self.ops.inspect('holmes',{'question':'Check pods'},actor='actor',request_id='same'))
-        with patch.dict('os.environ',{'HOLMES_MODEL':'ax-ops-free','OMNIROUTE_API_KEY':'fake-gateway'}), \
+        with patch.dict('os.environ',{'HOLMES_MODEL':'ax-free','OMNIROUTE_API_KEY':'fake-gateway'}), \
              patch.object(self.ops,'_kube',side_effect=kube):
             threads=[threading.Thread(target=start) for _ in range(2)]
             for thread in threads:thread.start()
@@ -449,7 +449,7 @@ class OperatorInspectionTests(unittest.TestCase):
         self.assertEqual(self.ops.inspect('sessions', {})['postgres'], {'backend': 'file'})
 
     def test_overview_is_partial_when_one_service_fails_and_redacts_service_details(self):
-        self.ops.roles = {'test': {'agent': 'omniroute', 'env_names': ['SECRET']}}
+        self.ops.roles = {'test': {'agent': 'omniroute_free', 'env_names': ['SECRET']}}
         with patch.object(self.ops, '_api_health', return_value={'status': 'ok'}), \
              patch.object(self.ops, '_mcp_status', side_effect=TimeoutError), \
              patch.object(self.ops, '_json', return_value={'apiKey': 'hidden'}), \
@@ -458,7 +458,7 @@ class OperatorInspectionTests(unittest.TestCase):
             overview = self.ops.inspect('overview', {})
         self.assertEqual(overview['ax_api'], {'status': 'ok'})
         self.assertEqual(overview['mcp_gateway'], {'unavailable': True, 'error_type': 'TimeoutError'})
-        self.assertEqual(overview['roles'], {'test': {'agent': 'omniroute'}})
+        self.assertEqual(overview['roles'], {'test': {'agent': 'omniroute_free'}})
         self.assertNotIn('hidden', json.dumps(overview))
 
     def test_restart_preserves_annotations_and_uses_an_optimistic_resource_version_check(self):
@@ -486,7 +486,7 @@ class OperatorInspectionTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / 'config/monitoring.json').read_text()), self.monitoring)
 
     def test_holmes_polling_validates_the_job_and_handles_a_pod_that_is_not_ready(self):
-        with patch.dict('os.environ', {'HOLMES_MODEL': 'ax-ops-free'}), \
+        with patch.dict('os.environ', {'HOLMES_MODEL': 'ax-free'}), \
              patch.object(self.ops, '_kube') as kube, patch('ax_local.api.project_operator.time.sleep') as sleep:
             kube.side_effect = ['{}', '{"status":{"failed":1}}', RuntimeError('not ready')]
             result = self.ops.inspect('holmes', {'job': 'holmes-ax-pending', 'wait_seconds': 1})
@@ -502,16 +502,16 @@ class OperatorInspectionTests(unittest.TestCase):
 
 
 class OperatorRoleTests(unittest.TestCase):
-    def test_operator_uses_dedicated_strong_free_route_without_changing_other_roles(self):
+    def test_operator_uses_shared_free_route_without_changing_other_roles(self):
         root=Path(__file__).resolve().parents[2]
         roles={path.stem:json.loads(path.read_text()) for path in (root/'config/roles').glob('*.json')}
         agents=json.loads((root/'config/agents.json').read_text())
         combos=json.loads((root/'config/omniroute/combos.json').read_text())
         self.assertEqual(roles['project_operator']['agent'],'omniroute_ops')
-        self.assertEqual(agents['omniroute_ops']['model_env'],'OMNIROUTE_OPS_MODEL')
-        self.assertEqual(combos['ax-ops-free']['models'][0]['model'],
-                         'openrouter/nvidia/nemotron-3.5-super-vl:free')
-        self.assertEqual(roles['chat']['agent'],'omniroute')
+        self.assertEqual(agents['omniroute_ops']['model_env'],'OMNIROUTE_FREE_MODEL')
+        self.assertEqual(combos['ax-free']['models'][0]['model'],
+                         'openrouter/cohere/north-mini-code:free')
+        self.assertEqual(roles['chat']['agent'],'omniroute_free')
 
 
 if __name__ == '__main__':

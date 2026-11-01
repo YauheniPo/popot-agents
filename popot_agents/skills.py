@@ -13,7 +13,7 @@ from popot_agents.runtime_config import RUNTIME
 SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 
-def load_skill_instructions(selected: list[str]) -> str:
+def load_skill_instructions(selected: list[str], *, include_references: bool = True) -> str:
     """Validate selection and read Markdown, without executing bundled scripts."""
     if not isinstance(selected, list) or any(
             not isinstance(name, str)
@@ -57,7 +57,11 @@ def load_skill_instructions(selected: list[str]) -> str:
                              if filename.lower().endswith(".md"))
         documents.sort(key=lambda path: (path != directory / "SKILL.md", path.as_posix()))
         append(f"\n## Skill: {name}\nBundled directory: {directory}\n")
+        references = []
         for path in documents:
+            if not include_references and path != directory / 'SKILL.md':
+                references.append(str(path))
+                continue
             try:
                 with path.open("rb") as source:
                     data = source.read(max(remaining, 0) + 1)
@@ -69,6 +73,10 @@ def load_skill_instructions(selected: list[str]) -> str:
             if path == directory / "SKILL.md" and not content.strip():
                 raise ValueError(f"skills entry has an empty SKILL.md: {name}")
             append(f"\n### {name}/{path.relative_to(directory).as_posix()}\n{content}\n")
+        if references:
+            append('\nOn-demand read-only references (not loaded):\n'
+                   'Use bash to read the relevant file before applying its guidance.\n'
+                   + '\n'.join(references) + '\n')
     return "".join(sections)
 
 
@@ -76,7 +84,8 @@ def prepare_role_config(role_config: dict | None) -> dict:
     """Snapshot skills once at worker startup; safe to pass to a harness again."""
     prepared = dict(role_config or {})
     selected = prepared.pop("skills", [])
-    instructions = load_skill_instructions(selected)
+    instructions = load_skill_instructions(selected,
+        include_references='bash' not in prepared.get('tools', []))
     if instructions:
         prepared["instructions"] = prepared.get("instructions", "") + instructions
         print(json.dumps({"event": "skills_loaded", "skills": selected,

@@ -1,7 +1,7 @@
 {
   "ax-free": {
     "name": "ax-free",
-    "description": "AX free-only development routes; verified tool/result/answer cycles on 2026-10-20. Thinking is disabled by AX profiles.",
+    "description": "Shared free route for general roles, operations, Holmes and Harness2: North Mini Code first, NVIDIA Lightning fallback.",
     "strategy": "priority",
     "models": [
       {
@@ -13,106 +13,19 @@
         "kind": "model",
         "providerId": "nvidia",
         "model": "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"
-      },
-      {
-        "kind": "model",
-        "providerId": "openrouter",
-        "model": "openrouter/nvidia/nemotron-3.5-lightning:free"
       }
     ],
     "config": {
       "targetTimeoutMs": 45000,
       "comboTimeoutMs": 105000,
-      "maxGlobalAttempts": 3,
-      "maxSetRetries": 0,
-      "compressionMode": "off"
-    }
-  },
-  "ax-code-free": {
-    "name": "ax-code-free",
-    "description": "AX free-only coding routes; verified tool/result/answer cycles on 2026-10-20. Thinking is disabled by AX profiles.",
-    "strategy": "priority",
-    "models": [
-      {
-        "kind": "model",
-        "providerId": "openrouter",
-        "model": "openrouter/cohere/north-mini-code:free"
-      },
-      {
-        "kind": "model",
-        "providerId": "nvidia",
-        "model": "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"
-      },
-      {
-        "kind": "model",
-        "providerId": "openrouter",
-        "model": "openrouter/nvidia/nemotron-3.5-lightning:free"
-      }
-    ],
-    "config": {
-      "targetTimeoutMs": 45000,
-      "comboTimeoutMs": 105000,
-      "maxGlobalAttempts": 3,
-      "maxSetRetries": 0,
-      "compressionMode": "off"
-    }
-  },
-  "ax-harness-free": {
-    "name": "ax-harness-free",
-    "description": "Harness2 prompt optimizer: full-size free Super VL; thinking disabled by the HTTP profile.",
-    "strategy": "priority",
-    "models": [
-      {
-        "kind": "model",
-        "providerId": "openrouter",
-        "model": "openrouter/nvidia/nemotron-3.5-super-vl:free"
-      }
-    ],
-    "config": {
-      "targetTimeoutMs": 90000,
-      "comboTimeoutMs": 105000,
-      "maxGlobalAttempts": 1,
-      "maxSetRetries": 0,
-      "compressionMode": "off"
-    }
-  },
-  "ax-ops-free": {
-    "name": "ax-ops-free",
-    "description": "Project operator and Holmes: Super VL first, then existing free routes. Thinking disabled by the HTTP profile.",
-    "strategy": "priority",
-    "models": [
-      {
-        "kind": "model",
-        "providerId": "openrouter",
-        "model": "openrouter/nvidia/nemotron-3.5-super-vl:free"
-      },
-      {
-        "kind": "model",
-        "providerId": "openrouter",
-        "model": "openrouter/cohere/north-mini-code:free"
-      },
-      {
-        "kind": "model",
-        "providerId": "nvidia",
-        "model": "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"
-      },
-      {
-        "kind": "model",
-        "providerId": "openrouter",
-        "model": "openrouter/nvidia/nemotron-3.5-lightning:free"
-      }
-    ],
-    "config": {
-      "targetTimeoutMs": 60000,
-      "comboTimeoutMs": 105000,
-      "maxGlobalAttempts": 4,
+      "maxGlobalAttempts": 2,
       "maxSetRetries": 0,
       "compressionMode": "off"
     }
   },
   "ax-ollama": {
     "name": "ax-ollama",
-    "description": "Paid Ollama Cloud routes: DeepSeek V4 Pro 0813 first, then GLM 5.3 Flash, MiniMax M2.7, DeepSeek V4.1 Flash and 1017. Catalog and tool cycles checked 2026-10-31.",
+    "description": "Ollama Cloud: pinned DeepSeek V4 Pro 0813 first, pinned DeepSeek V4.1 Flash 1017 fallback, then GLM 5.3 Flash. No duplicate aliases or retiring MiniMax.",
     "strategy": "priority",
     "models": [
       {
@@ -123,28 +36,18 @@
       {
         "kind": "model",
         "providerId": "ollama-cloud",
-        "model": "ollama-cloud/glm-5.3-flash"
-      },
-      {
-        "kind": "model",
-        "providerId": "ollama-cloud",
-        "model": "ollama-cloud/minimax-m2.7"
-      },
-      {
-        "kind": "model",
-        "providerId": "ollama-cloud",
-        "model": "ollama-cloud/deepseek-v4.1-flash"
-      },
-      {
-        "kind": "model",
-        "providerId": "ollama-cloud",
         "model": "ollama-cloud/deepseek-v4.1-flash:1017"
+      },
+      {
+        "kind": "model",
+        "providerId": "ollama-cloud",
+        "model": "ollama-cloud/glm-5.3-flash"
       }
     ],
     "config": {
-      "targetTimeoutMs": 60000,
-      "comboTimeoutMs": 105000,
-      "maxGlobalAttempts": 5,
+      "targetTimeoutMs": 600000,
+      "comboTimeoutMs": 870000,
+      "maxGlobalAttempts": 3,
       "maxSetRetries": 0,
       "compressionMode": "off"
     }

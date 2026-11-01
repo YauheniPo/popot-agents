@@ -18,7 +18,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from popot_agents.tools import TOOL_SCHEMAS
-from popot_agents.progress import is_progress_message, emit_progress, observe_progress, format_progress
+from popot_agents.progress import is_progress_message, emit_progress, observe_progress, format_progress, TurnProgress
 from popot_agents.role_env import validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
@@ -284,6 +284,7 @@ class ChatRecord:
     role: str | None = None
     role_config: dict | None = None
     last_used: float = field(default_factory=time.monotonic)
+    progress: TurnProgress | None = None
 
 
 def session_has_active_owner(server, session_id: str) -> bool:
@@ -407,7 +408,11 @@ def create_server(
                 return getattr(live.worker, "workspace_path", None)
             return None
 
-        def _progress(self, message: str) -> None:
+        def _progress(self, message: str, *, finished: bool = False) -> None:
+            if progress := getattr(self, '_turn_progress', None):
+                progress.update(message, finished=finished)
+            if not getattr(self, '_wants_progress', False):
+                return
             if not is_progress_message(message) or getattr(self, '_progress_broken', False):
                 return
             try:
@@ -427,8 +432,9 @@ def create_server(
                 self._progress_broken = True
 
         def _reply(self, status: int, payload: dict) -> None:
+            if getattr(self, '_stream_started', False) or getattr(self, '_turn_progress', None):
+                self._progress(format_progress('completed' if status < 400 else 'failed', status=status), finished=True)
             if getattr(self, '_stream_started', False):
-                self._progress(format_progress('completed' if status < 400 else 'failed', status=status))
                 if not getattr(self, '_progress_broken', False):
                     self.wfile.write((json.dumps({'type': 'result', 'status': status, 'result': payload}, ensure_ascii=False) + '\n').encode())
                     self.wfile.flush()
@@ -463,6 +469,8 @@ def create_server(
                 with self.server.live_lock:
                     statuses = {sid: getattr(record.worker, "status", "running")
                                 for sid, record in self.server.live.items()}
+                    progress = {sid: record.progress.snapshot() if record.progress else None
+                                for sid, record in self.server.live.items()}
                 self._reply(200, {"chats": [
                     {
                         "sessionId": saved["sessionId"],
@@ -474,24 +482,30 @@ def create_server(
                         "updatedAt": saved["updatedAt"],
                         "turns": len(saved["messages"]) // 2,
                         "status": statuses.get(saved["sessionId"], "stopped"),
+                        "progress": progress.get(saved["sessionId"]),
                     }
                     for saved in self.server.store.list_chats()
                 ]})
             elif self.path.startswith("/chats/"):
                 session_id = self.path.removeprefix("/chats/")
-                with self.server.session_lock(session_id):
-                    self._get_chat(session_id)
+                lock = self.server.session_lock(session_id)
+                acquired = lock.acquire(blocking=False)
+                try:
+                    self._get_chat(session_id, busy=not acquired)
+                finally:
+                    if acquired:
+                        lock.release()
             else:
                 self._reply(404, {"error": "not found"})
 
-        def _get_chat(self, session_id: str) -> None:
+        def _get_chat(self, session_id: str, *, busy: bool = False) -> None:
             saved = self.server.store.get(session_id)
             if saved is None:
                 self._reply(404, {"error": "unknown sessionId"})
             else:
                 with self.server.live_lock:
                     live = self.server.live.get(session_id)
-                if live and not live.worker.is_alive():
+                if live and not busy and not live.worker.is_alive():
                     live.worker.close()
                     with self.server.live_lock:
                         self.server.live.pop(session_id, None)
@@ -502,7 +516,8 @@ def create_server(
                     "createdAt": saved.get("createdAt", saved["updatedAt"]),
                     "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
                                   else None),
-                    "status": getattr(live.worker, "status", "running") if live else "stopped",
+                    "status": ("running" if busy else getattr(live.worker, "status", "running")) if live else "stopped",
+                    "progress": live.progress.snapshot() if live and live.progress else None,
                     "container": live.worker.container_name if live else None,
                     "workspace": self._workspace(saved, live),
                     "turns": len(saved["messages"]) // 2,
@@ -671,6 +686,9 @@ def create_server(
                     record = ChatRecord(agent, worker, saved["messages"], role, role_config)
                     with self.server.live_lock:
                         self.server.live[session_id] = record
+            with self.server.live_lock:
+                record.progress = TurnProgress()
+                self._turn_progress = record.progress
             try:
                 emit_progress('turn_started')
                 result = record.worker.send(message.strip())
@@ -714,7 +732,8 @@ def create_server(
                 return
             try:
                 streaming = self.headers.get('Accept') == 'application/x-ndjson'
-                with observe_progress(self._progress if streaming else None):
+                self._wants_progress = streaming
+                with observe_progress(self._progress):
                     emit_progress('accepted')
                     if self.path == "/tasks":
                         self._task(payload)

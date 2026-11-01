@@ -11,6 +11,31 @@ from ax_local.cluster.resource_dashboard import dashboard
 
 
 class ResourceMonitoringTests(unittest.TestCase):
+    def test_collector_debug_removal_preserves_metrics_traces_and_is_idempotent(self):
+        original = ('receivers:\n  otlp: {}\nexporters:\n  debug:\n    verbosity: detailed\n'
+                    '  prometheus:\n    endpoint: 0.0.0.0:8889\n  otlp/jaeger: {}\n'
+                    'service:\n  pipelines:\n    metrics:\n      receivers: [otlp]\n'
+                    '      exporters: [prometheus, debug]\n    traces:\n      receivers: [otlp]\n'
+                    '      exporters: [otlp/jaeger, debug]\n')
+        result = monitoring.without_collector_debug(original)
+        self.assertNotIn('debug', result)
+        self.assertNotIn('verbosity', result)
+        self.assertIn('exporters: [prometheus]', result)
+        self.assertIn('exporters: [otlp/jaeger]', result)
+        self.assertIn('receivers: [otlp]', result)
+        self.assertEqual(result, monitoring.without_collector_debug(result))
+
+    def test_invalid_collector_config_is_not_applied(self):
+        cluster = MagicMock()
+        cluster.get.side_effect = [
+            {'spec': {'template': {'spec': {'containers': [{'resources': {}}]}}}},
+            {'data': {'otel-collector-config.yaml': 'exporters:\n  debug:\n    verbosity: detailed\n'}},
+        ]
+        cluster.run.side_effect = subprocess.CalledProcessError(1, 'validate')
+        with self.assertRaises(subprocess.CalledProcessError):
+            monitoring.configure_collector(cluster, {})
+        cluster.patch.assert_not_called()
+
     def test_forward_check_preserves_a_healthy_tunnel(self):
         with patch.object(monitoring, 'grafana_healthy', return_value=True), \
              patch.object(monitoring.subprocess, 'Popen') as start, \

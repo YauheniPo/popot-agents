@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -74,6 +75,31 @@ def extend_prometheus_config(original: str, node: str, address: str, *, scrape_i
       - targets: ['kube-state-metrics.otel-system.svc:8080']
 {END}
 '''
+
+
+def without_collector_debug(original: str) -> str:
+    """Remove the upstream detailed debug exporter without changing real sinks."""
+    updated = re.sub(r'(?m)^  debug:\s*\n(?: {4}[^\n]*\n|[ \t]*\n)*', '', original)
+    updated = re.sub(r'(?m)^(\s+exporters:) *\[([^\]\n]*)\]',
+        lambda match: match[1] + ' [' + ', '.join(
+            name.strip() for name in match[2].split(',') if name.strip() != 'debug') + ']', updated)
+    return re.sub(r'(?m)^ +-[ ]+debug[ ]*\n', '', updated)
+
+
+def configure_collector(cluster, resources):
+    collector = cluster.get('deployment', 'opentelemetry-collector')['spec']['template']['spec']
+    name, key = 'opentelemetry-collector-config', 'otel-collector-config.yaml'
+    original = cluster.get('configmap', name)['data'][key]
+    config = without_collector_debug(original)
+    # Validate with the installed Collector before changing its running config.
+    cluster.run('-n', NS, 'exec', '-i', 'deployment/opentelemetry-collector', '--',
+                '/otelcol-contrib', 'validate', '--config=/dev/stdin', input=config)
+    if config != original:
+        cluster.patch('configmap', name, {'data': {key: config}})
+    collector['containers'][0]['resources'] = resources
+    cluster.patch('deployment', 'opentelemetry-collector', {'spec': {'template': {
+        'metadata': {'annotations': {'popot.dev/collector-config': hashlib.sha256(config.encode()).hexdigest()}},
+        'spec': collector}}})
 
 
 class Cluster:
@@ -261,10 +287,8 @@ def install():
                    obj('Service', 'grafana', spec={'selector': {'app': 'grafana'},
                        'ports': [{'port': 3000, 'targetPort': 3000}]})])
     if 'opentelemetry-collector' in overrides:
-        collector = cluster.get('deployment', 'opentelemetry-collector')['spec']['template']['spec']
-        collector['containers'][0]['resources'] = overrides['opentelemetry-collector']
-        cluster.patch('deployment', 'opentelemetry-collector', {'spec': {'template': {'spec': collector}}})
-    for name in ['prometheus', 'kube-state-metrics', 'grafana']:
+        configure_collector(cluster, overrides['opentelemetry-collector'])
+    for name in ['prometheus', 'kube-state-metrics', 'grafana', 'opentelemetry-collector']:
         print(cluster.run('-n', NS, 'rollout', 'status', f'deployment/{name}', '--timeout=600s').strip())
     cluster.run('-n', NS, 'exec', 'deployment/prometheus', '--', 'promtool', 'check', 'config',
                 '/etc/prometheus/prometheus.yml')
