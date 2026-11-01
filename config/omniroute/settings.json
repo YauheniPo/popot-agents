@@ -58,6 +58,10 @@
     "nvidia": {
       "name": "popot-ax-nvidia",
       "apiKeyEnv": "NVIDIA_API_KEY"
+    },
+    "ollama-cloud": {
+      "name": "popot-ax-ollama-cloud",
+      "apiKeyEnv": "OLLAMA_API_KEY"
     }
   },
   "apiKey": {
