@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ SESSION_RETENTION = timedelta(days=RUNTIME["sessions"]["retention_days"])
 class SessionStore:
     def __init__(self, directory: str | Path) -> None:
         self.directory = Path(directory)
+        self._write_lock = threading.RLock()
 
     def _path(self, session_id: str) -> Path | None:
         if not re.fullmatch(r"[0-9a-f]{16}", session_id):
@@ -89,6 +91,10 @@ class SessionStore:
 
     def save(self, session_id: str, agent: str, messages: list[dict[str, str]],
              role: str | None = None, role_config: dict | None = None) -> None:
+        with self._write_lock:
+            self._save(session_id, agent, messages, role, role_config)
+
+    def _save(self, session_id, agent, messages, role, role_config, *, evidence=None):
         path = self._path(session_id)
         if path is None:
             raise ValueError("invalid session ID")
@@ -101,6 +107,10 @@ class SessionStore:
             raise OSError("invalid session file") from exc
         created_at = (previous.get("createdAt", previous["updatedAt"])
                       if previous else now)
+        prior_evidence = ((previous or {}).get('roleConfig') or {}).get('_work_evidence')
+        if evidence is not None or prior_evidence is not None:
+            role_config = {**(role_config or {}), '_work_evidence':
+                           evidence if evidence is not None else prior_evidence}
         payload = {
             "sessionId": session_id,
             "agent": agent,
@@ -120,6 +130,17 @@ class SessionStore:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+    def record_evidence(self, session_id, receipt):
+        from popot_agents.work_evidence import retain_evidence
+        with self._write_lock:
+            saved = self.get(session_id)
+            if saved is None:
+                return
+            config = saved.get('roleConfig') or {}
+            evidence = retain_evidence(config.get('_work_evidence', []), receipt)
+            self._save(session_id, saved['agent'], saved['messages'], saved.get('role'), config,
+                       evidence=evidence)
 
     def delete(self, session_id: str) -> None:
         path = self._path(session_id)

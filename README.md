@@ -329,6 +329,26 @@ automatically replayed. New-stage admission uses recent measured MCP discovery
 times with a safety margin, falling back to cold-start discovery timeouts when
 there are no observations. Cognee is excluded from this required-tool estimate.
 
+`get_chat.work.tasks[].milestones` records bounded observations of tool results
+during a turn, with `lastObservedAt`, source call IDs, observed revisions,
+check results, remote-ref updates and failures. Observations survive subsequent
+checkpoints and API restarts; task acceptance still uses the final outcome.
+Check receipts include the command identity and the revision printed by the
+same tool call. `delegate_task(revision=<full SHA>, ...)` shares matching passing
+receipts with verification specialists. Review focuses on source and findings;
+QA runs missing regression checks and verifies existing results against the
+exact revision, scope and working-tree state.
+
+Before model requests, old large tool results are saved under `.tool-results/`
+and replaced by bounded previews, failure/uncertainty flags and artifact links.
+Use `read_tool_output` for omitted details. `model.context_tool_budget_chars`
+(48000) and `model.context_recent_tool_results` (6) in `config/runtime.json`
+control this reduction; recent results and delegation state can exceed the soft
+budget. User/system instructions and tool-call associations remain intact.
+Waiting for durable children (`child_pending`) does not trigger memory extraction.
+The bash schema advertises the 4000-character command limit; write longer scripts
+with `write_file` and invoke the saved file with a short command.
+
 [config/runtime.json](config/runtime.json) → `workflow` supplies shared defaults: four turns,
 900 seconds per turn, 3600 seconds including startup, two unchanged partial
 outcomes without new tool receipts before stopping, and one concurrent workflow.

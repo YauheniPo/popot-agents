@@ -19,6 +19,9 @@ class LiveProgressTests(unittest.TestCase):
             def send(self, message):
                 emit_progress('model_request', model='test', round=1)
                 emit_progress('tool_call', name='read_file', arguments={'path': 'private-source'})
+                from popot_agents.work_evidence import observe_tool_result
+                emit_progress('work_evidence', receipt=observe_tool_result('bash', {'command':'git push'},
+                    'exit_code=0\nTo https://github.com/example/team.git\n old..new HEAD -> fix\n', 'publication'))
                 emit_progress('tool_error', name='read_file', error_type='TimeoutError', error='private-output')
                 emit_progress('assistant_reasoning', reasoning='private-reasoning')
                 entered.set()
@@ -63,6 +66,8 @@ class LiveProgressTests(unittest.TestCase):
                         'evidence': ['Published ' + commit_url, 'CI workspace tests: success'],
                         'remaining_work': [], 'errors': []}}})
                 detail = read('/chats/' + sid)
+                self.assertEqual(detail['work']['tasks'][0]['milestones'][0]['kind'], 'publication')
+                self.assertIsNone(detail['work']['tasks'][0]['outcome'])
                 self.assertEqual(detail['work']['rootSessionId'], sid)
                 receipt = next(item for item in detail['work']['tasks'] if item['sessionId'] == child_id)
                 self.assertEqual(receipt['outcome']['status'], 'partial')

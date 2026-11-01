@@ -22,6 +22,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.work_evidence import evidence_event
 from ax_local.config import AX_CONFIG
 from popot_agents.orchestrator.workflow import WorkflowRun
 from popot_agents.workflow_config import role_policy
@@ -759,6 +760,8 @@ class DelegationService:
             job.activity = deque(_bounded_activity(
                 [*job.activity, {'seq': job.activity_seq, 'message': message}],
                 _activity_budget()), maxlen=64)
+            if event.get('agent_session_id') == job.session_id and (receipt := evidence_event(message)):
+                self.store.record_evidence(job.session_id, receipt)
 
     def _execute(self, job: Job):
         # Each child owns its observer; parent clients read only their authorized

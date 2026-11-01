@@ -92,12 +92,29 @@ class PostgresSessionStore:
                 ON CONFLICT (session_id) DO UPDATE SET
                     agent = EXCLUDED.agent,
                     role = EXCLUDED.role,
-                    role_config = EXCLUDED.role_config,
+                    role_config = CASE WHEN agent_sessions.role_config ? '_work_evidence'
+                        THEN COALESCE(EXCLUDED.role_config, '{}'::jsonb) || jsonb_build_object(
+                            '_work_evidence', agent_sessions.role_config->'_work_evidence')
+                        ELSE EXCLUDED.role_config END,
                     messages = EXCLUDED.messages,
                     updated_at = now()
             """, (session_id, agent, role,
                   Jsonb(role_config) if role_config is not None else None,
                   Jsonb(messages)))
+
+    def record_evidence(self, session_id, receipt):
+        from popot_agents.work_evidence import retain_evidence
+        if not self._valid_id(session_id):
+            raise ValueError('invalid session ID')
+        with self._connect() as connection:
+            row = connection.execute('SELECT role_config FROM agent_sessions WHERE session_id=%s FOR UPDATE',
+                                     (session_id,)).fetchone()
+            if row is None:
+                return
+            evidence = retain_evidence((row[0] or {}).get('_work_evidence', []), receipt)
+            connection.execute("""UPDATE agent_sessions SET role_config = jsonb_set(
+                COALESCE(role_config, '{}'::jsonb), '{_work_evidence}', %s), updated_at=now()
+                WHERE session_id=%s""", (Jsonb(evidence), session_id))
 
     def prune_expired(self) -> set[str]:
         with self._connect() as connection:

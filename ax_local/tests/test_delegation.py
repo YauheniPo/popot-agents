@@ -224,6 +224,28 @@ class DelegationTests(unittest.TestCase):
         self.assertTrue(self.runner.chats[0].closed)
         self.assertNotIn(self.token, str(saved))
 
+    def test_child_tool_observation_is_persisted_before_its_turn_finishes(self):
+        from popot_agents.work_evidence import observe_tool_result
+        entered, release = threading.Event(), threading.Event()
+        def callback(chat, task):
+            emit_progress('work_evidence', receipt=observe_tool_result('bash', {'command':'git push'},
+                'exit_code=0\n old..new HEAD -> fix\n', 'push'))
+            entered.set()
+            release.wait(3)
+        self.runner.callback = callback
+        try:
+            with self.service.turn(self.parent, 5):
+                task = self.send()
+                self.assertTrue(entered.wait(1))
+                saved = self.store.get(task['id'])
+                self.assertEqual(saved['roleConfig']['_work_evidence'][0]['kind'], 'publication')
+                self.assertNotIn('outcome', saved['roleConfig']['_ax_delegation'])
+                release.set()
+                self.wait_task(task['id'])
+                self.assertEqual(len(self.store.get(task['id'])['roleConfig']['_work_evidence']), 1)
+        finally:
+            release.set()
+
     def test_child_deadline_uses_call_budget_and_cannot_extend_parent_deadline(self):
         remaining = []
         self.runner.callback = lambda chat, _: remaining.append(

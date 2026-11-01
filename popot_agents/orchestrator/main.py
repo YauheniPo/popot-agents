@@ -26,6 +26,7 @@ from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
 from .session_store import SessionStore
 from .work_status import build_work_status
+from popot_agents.work_evidence import evidence_event
 from popot_agents.workflow_config import role_policy
 from .workflow import POLICY, WorkflowRun, public_workflow, validate_policy, recover_workflows
 
@@ -426,6 +427,11 @@ def create_server(
         def _progress(self, message: str, *, finished: bool = False) -> None:
             if progress := getattr(self, '_turn_progress', None):
                 progress.update(message, finished=finished)
+            if (sid := getattr(self, '_work_session_id', None)) and (receipt := evidence_event(message)):
+                event = json.loads(message)
+                if (event.get('agent_session_id') == sid
+                        or 'agent_session_id' not in event and 'agent_role' not in event):
+                    self.server.store.record_evidence(sid, receipt)
             if not getattr(self, '_wants_progress', False):
                 return
             if not is_progress_message(message) or getattr(self, '_progress_broken', False):
@@ -790,6 +796,7 @@ def create_server(
             with self.server.live_lock:
                 record.progress = TurnProgress(session_id)
                 self._turn_progress = record.progress
+                self._work_session_id = session_id
             scope = ExitStack()
             delegation = getattr(agents[record.agent], 'delegation', None)
             try:

@@ -402,6 +402,9 @@ def main() -> None:
         Progress includes the latest action, last error, elapsed time and model/tool
         call counts. work contains durable reports from the root and children: evidence,
         remaining_work, errors, reportedAt, source session IDs and commit/PR/CI references.
+        work.tasks[].milestones and lastObservedAt update during a turn from actual
+        tool results, including check revisions, publication observations and failures.
+        Milestones are observations; use outcome.status and latest-revision checks for acceptance.
         Report new evidence instead of repeating activity-only updates. These are worker
         claims, not independently refreshed GitHub/CI results; preserve source and time.
         executionState is transport state; outcome.status describes reported work completeness.

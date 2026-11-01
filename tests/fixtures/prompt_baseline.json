@@ -43,7 +43,7 @@
     }
   },
   "delegation/reviewer": {
-    "sha256": "f0ea9bc0ea448dd92ab8c2731ed954ac0a8200826a24bf3a3a35252ab6d29d3d"
+    "sha256": "5ae58b753a0bf8bd1b1ff89b6a5413b03927955627079c6dcd17e66a23ab3351"
   },
   "delegation/review_routing": {
     "sha256": "675c26e2a2853c1c3d6c8ed7726c71994e70e393556d5052b59f00533ae9d71e"

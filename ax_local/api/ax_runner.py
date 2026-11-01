@@ -91,7 +91,7 @@ class AxAgentRunner:
         # Server bookkeeping can exceed AX's 32 KiB per-env-value limit. The
         # worker receives its task/checkpoint over the control socket instead.
         worker_role = {key: value for key, value in role_config.items()
-                       if key not in {'_ax_delegation', '_workflow'}}
+                       if key not in {'_ax_delegation', '_workflow', '_work_evidence'}}
         env = {
             "HARNESS_BASE_URL": self.base_url,
             "HARNESS_MODEL": self.model,

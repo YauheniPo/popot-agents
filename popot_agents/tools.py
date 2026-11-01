@@ -62,8 +62,9 @@ def _tool(name, description, properties, required):
 
 
 TOOL_SCHEMAS.update({
-    "bash": _tool("bash", "Run a bash command in the writable workspace and return output and exit code.",
-                  {"command": {"type": "string"}}, ["command"]),
+    "bash": _tool("bash", "Run a bash command (at most 4000 characters) in the writable workspace. "
+                  "For larger scripts use write_file, then invoke the saved script with a short command.",
+                  {"command": {"type": "string", "maxLength": 4000}}, ["command"]),
     "read_file": _tool("read_file", "Read a UTF-8 file in pages; offset counts characters from zero.",
                        {"path": {"type": "string"},
                         "offset": {"type": "integer", "minimum": 0},
@@ -190,10 +191,15 @@ def preserve_tool_output(output: str) -> str:
     """Keep large MCP results in the sandbox instead of losing their tail."""
     if len(output) <= MAX_TOOL_OUTPUT:
         return output
-    path = f".tool-results/{uuid.uuid4().hex}.txt"
-    _file_action('write', {'path': path, 'content': output})
+    path = save_tool_output(output)
     return (output[:MAX_TOOL_OUTPUT] + f"\n[preview truncated; total_chars={len(output)}]"
             f"\nFull output: {path}\nRead with read_tool_output path={path} offset={MAX_TOOL_OUTPUT} limit={MAX_TOOL_OUTPUT}.")
+
+
+def save_tool_output(output: str) -> str:
+    path = f".tool-results/{uuid.uuid4().hex}.txt"
+    _file_action('write', {'path': path, 'content': output})
+    return path
 
 
 def _evaluate(node):

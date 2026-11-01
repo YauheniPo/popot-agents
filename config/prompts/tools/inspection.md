@@ -3,3 +3,4 @@ Label each result so failures and source files remain distinguishable. Limit out
 Keep writes, dependent actions and commands that need separate failure analysis sequential. Do not launch background work that can outlive the turn.
 For tests, use the smallest meaningful check set for the identified risks; combine independent checks only when their individual exit codes and logs are preserved.
 Batching is an execution choice, not permission to skip evidence, change scope, repeat writes or claim unexecuted checks.
+The bash command limit is 4000 characters. For a longer script use write_file and execute the saved file with a short bash command. Do not retry an oversized inline command.

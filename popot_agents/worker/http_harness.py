@@ -15,7 +15,9 @@ from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.progress import trace_event, trace_output
 from popot_agents.skills import prepare_role_config
-from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool
+from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output
+from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks
+from .context import compact_tool_results
 from . import mcp_client
 from .delegation_policy import (available_roles, completed_answer, delegation_instructions,
                                 handoff_task)
@@ -172,6 +174,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         delegation['schema']['function']['parameters']['properties']['scope'] = {
             'type': 'string', 'enum': ['subtask', 'whole_task'],
             'description': render_prompt('delegation/scope')}
+        delegation['schema']['function']['parameters']['properties']['revision'] = {
+            'type':'string', 'pattern':'^[a-fA-F0-9]{40}$',
+            'description':'Exact target commit SHA. The runtime shares matching tool-observed check receipts; verify scope, provenance and working-tree changes before reusing them.'}
         extra_tools['delegate_task'] = delegation
     instructions = role_config.get("instructions", "")
     if role_config.get('_workflow_coordinator'):
@@ -194,12 +199,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         extra_tools[REVIEW_CHECKPOINT] = {'schema': REVIEW_SCHEMA, 'call': review_progress.record}
     schemas = [TOOL_SCHEMAS[name] for name in allowed]
     schemas.extend(item["schema"] for item in mcp_tools.values())
-    if mcp_tools and 'read_tool_output' not in allowed:
+    if (mcp_tools or 'bash' in allowed) and 'read_tool_output' not in allowed:
         allowed = [*allowed, 'read_tool_output']
         schemas.append(TOOL_SCHEMAS['read_tool_output'])
     turn_id = uuid.uuid4().hex
     failed_delegations = {tuple(key): value for key, value in state.get('failed_delegations', [])} if resuming else {}
     completed_delegations = dict(state.get('completed_delegations', {})) if resuming else {}
+    tool_evidence = list(state.get('tool_evidence', [])) if resuming else []
     delegated_work_finished = False
     schemas.extend(item["schema"] for item in extra_tools.values())
     if instructions and not resuming:
@@ -343,12 +349,16 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         warnings = list(dict.fromkeys([*memory_warnings, *memory.warnings]))
         if warnings:
             outcome['warnings'] = warnings
+        checks = [receipt for receipt in tool_evidence if receipt['kind'] == 'checks' and receipt.get('revision')]
+        if checks:
+            outcome['checks'] = checks[-8:]
         if status != 'completed' and not outcome['remaining_work']:
             outcome['remaining_work'] = ['Task completeness is unverified']
         if state is not None:
             checkpoint = {'messages': [*messages, {'role': 'assistant', 'content': answer}],
                           'failed_delegations': [[list(key), value] for key, value in failed_delegations.items()],
                           'completed_delegations': completed_delegations if status != 'completed' else {},
+                          'tool_evidence': tool_evidence,
                           'outcome': outcome}
             if review_progress and review_progress.snapshot is not None:
                 checkpoint['review_progress'] = review_progress.snapshot
@@ -358,7 +368,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 raise RuntimeError('Harness checkpoint exceeds the history limit; sandbox must not restart with empty context')
             state.clear()
             state.update(checkpoint)
-        capture_memory(answer, status)
+        if reason != 'child_pending':
+            capture_memory(answer, status)
         return answer
 
     def partial_answer(answer='', report=None):
@@ -424,6 +435,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                            'delegated_task_incomplete' if incomplete_child else 'work_budget_exhausted', report)
 
     def completion(round_number, final):
+        changed = compact_tool_results(messages, save_tool_output,
+            budget_chars=RUNTIME['model']['context_tool_budget_chars'],
+            recent_results=RUNTIME['model']['context_recent_tool_results'], receipts=tool_evidence)
+        if changed:
+            _trace('context_compacted', tool_results=changed)
         request_messages = messages
         if review_progress and review_progress.snapshot and not final:
             request_messages = [*messages, {'role': 'system', 'content': review_progress.focus()}]
@@ -551,6 +567,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 raise ToolInputError('delegate_task requires an available specialist role')
                             if not isinstance(arguments.get('task'), str) or not arguments['task'].strip():
                                 raise ToolInputError('delegate_task requires a nonempty task')
+                            revision = arguments.pop('revision', None)
+                            if revision is not None:
+                                if not isinstance(revision, str) or len(revision) != 40 or any(c not in '0123456789abcdefABCDEF' for c in revision):
+                                    raise ToolInputError('revision must be a full commit SHA')
+                                arguments['task'] += '\nTarget revision: ' + revision.lower()
                             session_id = arguments.get('session_id')
                             completed_child = (completed_delegations.get(session_id)
                                                if isinstance(session_id, str) else None)
@@ -589,6 +610,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             if prior:
                                 task_text += (('\n\n' + render_prompt('delegation/previous_attempt') + '\n')
                                     + json.dumps(prior, ensure_ascii=False))
+                            checks = reusable_checks(tool_evidence + [check
+                                for child in completed_delegations.values()
+                                for check in child.get('outcome', {}).get('checks', [])], revision)
+                            if checks:
+                                task_text += ('\nMatching tool-observed checks (reported observations; verify provenance, '
+                                    'scope and dirty working tree before reuse; parent-local artifacts are not shared):\n'
+                                    + json.dumps(checks[-4:], ensure_ascii=False))
                             arguments = {**arguments, 'task': handoff_task(
                                 task_text, user_context, role_config)}
                         if completed_child:
@@ -725,6 +753,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                        elapsed_seconds=round(time.monotonic() - tool_started_at, 1),
                        **result_fields)
                 messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+                receipt = observe_tool_result(name, arguments, output, call_id)
+                if receipt:
+                    tool_evidence[:] = retain_evidence(tool_evidence, receipt)
+                    _trace('work_evidence', receipt={k:v for k,v in receipt.items() if k != 'command'})
                 memory.observe(call_id, name, arguments, output)
             if pending_children:
                 memory.run_complete = False
