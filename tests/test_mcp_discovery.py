@@ -31,6 +31,48 @@ class DiscoveryRetryTests(unittest.TestCase):
             mock.start()
             self.addCleanup(mock.stop)
 
+    def test_optional_cognee_outage_does_not_hide_required_tools(self):
+        async def discover(alias, config):
+            if alias == 'cognee': raise RuntimeError('memory is offline')
+            return {'mcp__github__get_me': {'server': alias}}
+        with patch.object(mcp_client, '_discover_one', side_effect=discover):
+            result = mcp_client.discover_tools({'cognee': {'command':['memory'], 'tools':[]}, 'github':REMOTE})
+        self.assertIn('mcp__github__get_me', result)
+        self.assertTrue(any(event=='mcp_optional_unavailable' for event, _ in self.events))
+
+    def test_live_worker_cache_reuses_schemas_but_invalidates_changed_config(self):
+        cache = mcp_client.DiscoveryCache()
+        with patch.object(mcp_client, '_discover_one', new=AsyncMock(return_value={
+                'mcp__github__get_me': {'server':'github'}})) as discover:
+            first = mcp_client.discover_tools({'github':REMOTE}, cache=cache)
+            first.clear()
+            second = mcp_client.discover_tools({'github':REMOTE}, cache=cache)
+            self.assertIn('mcp__github__get_me', second)
+            self.assertEqual(discover.await_count, 1)
+            mcp_client.discover_tools({'github':{**REMOTE,'tools':['another']}},cache=cache)
+            self.assertEqual(discover.await_count, 2)
+
+    def test_cache_retries_optional_failure_after_cooldown_and_invalidates_credentials(self):
+        cache = mcp_client.DiscoveryCache()
+        cognee = {'command':['memory'], 'tools':[]}
+        with patch.object(mcp_client, '_discover_one', new=AsyncMock(side_effect=[
+                RuntimeError('offline'), {}])) as discover, \
+             patch.object(mcp_client.time, 'monotonic', return_value=0) as clock:
+            mcp_client.discover_tools({'cognee':cognee}, cache=cache)
+            mcp_client.discover_tools({'cognee':cognee}, cache=cache)
+            self.assertEqual(discover.await_count, 1)
+            self.assertTrue(cache.warnings)
+            clock.return_value = 61
+            mcp_client.discover_tools({'cognee':cognee}, cache=cache)
+            self.assertEqual(discover.await_count, 2)
+            self.assertEqual(cache.warnings, [])
+        with patch.object(mcp_client, '_discover_one', new=AsyncMock(return_value={})) as discover:
+            mcp_client.discover_tools({'github':REMOTE}, cache=cache)
+            with patch.object(mcp_client, '_bearer_token', return_value='rotated-secret'):
+                mcp_client.discover_tools({'github':REMOTE}, cache=cache)
+            self.assertEqual(discover.await_count, 2)
+            self.assertNotIn('rotated-secret', str(cache.entries))
+
     def test_nested_connect_timeout_recovers_and_reports_progress_without_token(self):
         failure = TransportGroup(TransportGroup(self.httpx.ConnectTimeout('test-secret')))
         with patch.object(mcp_client, '_discover_one', new=AsyncMock(

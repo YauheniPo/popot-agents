@@ -312,6 +312,22 @@ There is no enable/disable switch. Missing overrides use shared defaults.
 Nested coordinators inherit their parent's deadline; their loops use the same
 worker pool and do not acquire another root workflow slot. A child returns its
 result to the parent that called it, so only the root responds to the MCP client.
+Child tasks belong to the server-side workflow rather than one model turn.
+Delegation returns a pending receipt; the parent checkpoints, the server waits,
+then delivers the child's result into that same parent's next turn. Waiting uses
+the workflow deadline, not its 900-second model-turn budget. Siblings are queued
+before acquiring workers, while nested coordination can continue.
+Cancellation of the workflow cancels its outstanding children. Delegation calls
+are bounded per root turn and by `max_calls_per_turn * workflow.max_turns` across
+the operation; the latter counter survives checkpoint recovery.
+
+Cognee is optional: discovery or memory-service outages produce warnings while
+available GitHub and shell tools continue. Live workers cache discovered MCP
+schemas across turns, invalidating them on configuration/credential changes or
+tool transport failure. Connections are still opened per call; writes are never
+automatically replayed. New-stage admission uses recent measured MCP discovery
+times with a safety margin, falling back to cold-start discovery timeouts when
+there are no observations. Cognee is excluded from this required-tool estimate.
 
 [config/runtime.json](config/runtime.json) → `workflow` supplies shared defaults: four turns,
 900 seconds per turn, 3600 seconds including startup, two unchanged partial
@@ -349,6 +365,26 @@ concurrent session's progress to the task. Arguments, output and reasoning are
 excluded from this snapshot. It resets each turn and exists only while the API
 retains the live session; after restart or eviction it is `null`. A completed
 progress state means the turn ended, not that its task passed verification.
+
+`get_chat` also returns `work`, a durable snapshot of the root and its children.
+Each task has a source session/role, execution state, `coordinatorTurns`, last
+reported outcome (`evidence`, `remaining_work`, `errors`), `reportedAt` and typed
+commit/PR/CI references. Partial receipts are saved before the next child turn,
+so a published commit can be visible while QA is still running. Failed parents
+and siblings do not erase these receipts. Reports survive API restart.
+
+These are worker reports, not independently refreshed GitHub/CI observations.
+A reference URL alone does not prove publication or CI success. `timeSource`
+distinguishes an outcome timestamp from a legacy session-update timestamp.
+The snapshot is capped at 8 tasks and 16 KiB, with explicit truncation markers;
+raw commands, stdout, diffs, prompts and reasoning are excluded.
+
+Progress actions/errors include `observedAt`, sequence and originating
+`agent_session_id`. `eventsAfterLastError` counts subsequent activity and does
+not establish that the error was resolved. Recoverable delegation-input and
+MCP errors include a short redacted message. The top-level `turns` still counts
+saved conversation answers; `workflow.turns` and each task's `coordinatorTurns`
+represent coordinator turns.
 
 Requests can select a role, but cannot override its command, credentials or
 permissions. Keep this local endpoint restricted to trusted callers; it has no

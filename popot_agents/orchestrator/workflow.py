@@ -51,6 +51,7 @@ class WorkflowRun:
                 or any(x.strip() for key in ('remaining_work', 'errors') for x in outcome[key])):
             return self.stop(result, 'workflow_unverified_completion')
         self.meta['outcome'] = outcome
+        self.meta['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
         if status != 'partial':
             self.meta.update(state=status, phase='finished')
             if status == 'completed':
@@ -81,7 +82,8 @@ class WorkflowRun:
             items = outcome.get(key)
             outcome[key] = [item for item in items if isinstance(item, str) and item.strip()] if isinstance(items, list) else []
         outcome['remaining_work'] = outcome['remaining_work'] or ['Workflow needs reconciliation before continuing']
-        self.meta.update(state='blocked', phase='finished', outcome=outcome)
+        self.meta.update(state='blocked', phase='finished', outcome=outcome,
+                         outcomeRecordedAt=datetime.now(timezone.utc).isoformat())
         self.meta['blocked_message'] = 'Autonomous workflow blocked (' + reason + ').\n' + result.get('answer', '')
         return {**result, 'answer': self.meta['blocked_message'],
                 'outcome': outcome}

@@ -400,7 +400,16 @@ def main() -> None:
     def get_chat(session_id: str) -> dict:
         """Read a chat's status and compact progress without waiting for its task.
         Progress includes the latest action, last error, elapsed time and model/tool
-        call counts. Report changed progress, without inferring unreported checks.
+        call counts. work contains durable reports from the root and children: evidence,
+        remaining_work, errors, reportedAt, source session IDs and commit/PR/CI references.
+        Report new evidence instead of repeating activity-only updates. These are worker
+        claims, not independently refreshed GitHub/CI results; preserve source and time.
+        executionState is transport state; outcome.status describes reported work completeness.
+        Child failures do not erase earlier work or successful sibling reports. A URL
+        alone does not prove publication or CI success. Respect truncation markers;
+        get_chat(child_id) prioritizes that child report when the tree is large.
+        lastError.observedAt and eventsAfterLastError distinguish an old error from
+        subsequent activity; later events do not prove that error was resolved.
         Poll every 15-30 seconds while another task call is still running.
         For autonomous jobs, workflow.state is authoritative even if the worker is
         stopped between turns. A terminal workflow.result contains the answer/outcome

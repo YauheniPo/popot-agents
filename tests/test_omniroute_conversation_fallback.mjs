@@ -65,6 +65,19 @@ test('keeps native pipeline content and handles omitted bodies without invented 
     'i(b,h(g(j?.clientRawRequest)?.body))',
     'i(b,h(g(j?.clientRawRequest)?.body)),i(b,h(c?.requestBody))')), /unsupported/);
 });
+test('resolves Python-spaced JSON tool receipts from compacted artifacts without changing strings', () => {
+  const compact='{"answer":"a,b: c\\\" d","items":[1,{"ok":true}]}';
+  const spaced='{"answer": "a,b: c\\\" d", "items": [1, {"ok": true}]}';
+  const input={pipeline:{clientRawRequest:{body:{messages:[{role:'tool',content:compact}]}}}};
+  assert.equal(resolve(fixture,input).has('tool '+spaced),false);
+  const turns=resolve(patchConversationRoute(fixture),input);
+  assert.equal(turns.get('tool '+spaced)?.textPreview,spaced);
+  assert.equal(turns.get('tool '+spaced)?.blockKind,'tool_result');
+  assert.equal(turns.get('tool '+compact)?.textPreview,compact);
+  assert.equal(input.pipeline.clientRawRequest.body.messages[0].content,compact);
+  const invalid={pipeline:{clientRawRequest:{body:{messages:[{role:'tool',content:'not JSON: 1,2'}]}}}};
+  assert.equal(resolve(patchConversationRoute(fixture),invalid).size,1);
+});
 test('loader changes only the selected module in memory', () => {
   const dir=mkdtempSync(join(tmpdir(),'popot-conversation-'));
   const path=join(dir,'route.cjs');

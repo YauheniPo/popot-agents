@@ -16,6 +16,24 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_memory_outage_warns_and_main_model_still_completes(self):
+        client = Mock()
+        client.session_event.side_effect = OSError('private-password')
+        state = {}
+        content = json.dumps({'status':'completed', 'answer':'Main work verified',
+            'evidence':['shell result'], 'errors':[], 'remaining_work':[]})
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', return_value=io.BytesIO(
+                 json.dumps({'choices':[{'message':{'content':content}}]}).encode())):
+            self.assertEqual(run_http(TASK, ROLE, state=state), 'Main work verified')
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertTrue(state['outcome']['warnings'])
+        self.assertEqual(state['outcome']['errors'], [])
+        self.assertNotIn('private-password', str(state))
+        client.recall.assert_not_called()
+
     def test_gateway_capture_lowers_effort_and_preserves_room_for_thinking(self):
         client = Mock()
         client.recall.return_value = []

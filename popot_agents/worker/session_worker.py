@@ -9,6 +9,7 @@ import time
 
 from .agent_worker import run_harness
 from .http_harness import run_http
+from .mcp_client import DiscoveryCache
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.progress import trace_event, observe_progress, is_progress_message
 from popot_agents.skills import prepare_role_config
@@ -84,9 +85,10 @@ def answer_with_cli(messages: list[dict[str, str]], instructions: str = "", *,
 def serve(*, extra_tools: dict | None = None) -> None:
     role_config = prepare_role_config(json.loads(os.getenv("HARNESS_ROLE_JSON", "{}")))
     harness_state = {}
+    discovery_cache = DiscoveryCache()
     if os.getenv("HARNESS_SESSION_MODE") == "http":
         answer = lambda messages, **options: run_http(messages, role_config, extra_tools=extra_tools,
-                                                      state=harness_state, **options)
+                                                      state=harness_state, discovery_cache=discovery_cache, **options)
     else:
         answer = lambda messages, **options: answer_with_cli(messages, role_config.get("instructions", ""), **options)
     conversation = Conversation(answer)

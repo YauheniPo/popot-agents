@@ -13,6 +13,22 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_server_checkpoints_and_delegation_inputs_do_not_enter_worker_environment(self):
+        role = {'_ax_role': 'code_reviewer', '_workflow_coordinator': True,
+                'instructions': 'Review the supplied change', 'tools': ['calculate'],
+                '_ax_delegation': {'input': 'контекст ' * 6000, 'parent_session_id': 'a' * 16},
+                '_workflow': {'checkpoint': {'messages': ['x' * 40000]}}}
+        manifest = self.runner.task_manifest('0123456789abcdef', role)
+        env = {item['name']: item['value'] for item in manifest['spec']['env']}
+        self.assertLessEqual(max(len(value.encode()) for value in env.values()), 32768)
+        worker_role = json.loads(env['HARNESS_ROLE_JSON'])
+        self.assertNotIn('_ax_delegation', worker_role)
+        self.assertNotIn('_workflow', worker_role)
+        self.assertTrue(worker_role['_workflow_coordinator'])
+        self.assertEqual(worker_role['tools'], ['calculate'])
+        self.assertEqual(role['_ax_delegation']['input'], 'контекст ' * 6000)
+        self.assertEqual(role['_workflow']['checkpoint']['messages'], ['x' * 40000])
+
     def test_control_socket_is_outside_the_tool_owned_workspace(self):
         manifest = self.runner.task_manifest('0123456789abcdef', {'tools': ['bash']})
         env = {item['name']: item['value'] for item in manifest['spec']['env']}

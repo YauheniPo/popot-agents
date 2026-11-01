@@ -82,6 +82,17 @@ class AgentReliabilityTests(unittest.TestCase):
         return {'tool_calls': [{'id': 'qa', 'function': {'name': 'delegate_task',
             'arguments': json.dumps({'role': 'qa_engineer', 'task': 'Run the required tests'})}}]}
 
+    def test_durable_pending_child_yields_without_another_model_round(self):
+        from unittest.mock import Mock
+        delegate=Mock(return_value=json.dumps({'sessionId':'a'*16,'role':'qa_engineer',
+            'state':'TASK_STATE_WORKING','pending':True,'resumable':False,
+            'outcome':{'status':'partial','reason':'child_running','evidence':[],
+                       'errors':[],'remaining_work':['await child']}}))
+        _,state,bodies=self.run_sequence([self.delegate_call()],delegate=delegate)
+        self.assertEqual(len(bodies),1)
+        self.assertEqual(state['outcome']['reason'],'child_pending')
+        self.assertTrue(state['failed_delegations'][0][1]['pending'])
+
     def test_partial_parent_result_finishes_without_forcing_another_child_run(self):
         from unittest.mock import Mock
         delegate = Mock(return_value=json.dumps({'sessionId': 'a'*16, 'role': 'qa_engineer',

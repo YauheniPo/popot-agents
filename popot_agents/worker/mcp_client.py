@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import hashlib
+from copy import deepcopy
 import os
 import sys
 import time
@@ -127,6 +129,7 @@ def _retryable_discovery_error(exc: Exception) -> bool:
 
 async def _discover_with_retry(alias: str, config: dict) -> dict:
     policy = RUNTIME['mcp']
+    started = time.monotonic()
     for attempt in range(1, policy['discovery_attempts'] + 1):
         trace_event('mcp_discovery_started', server=alias, attempt=attempt)
         try:
@@ -142,30 +145,75 @@ async def _discover_with_retry(alias: str, config: dict) -> dict:
             await asyncio.sleep(delay)
         else:
             trace_event('mcp_discovery_completed', server=alias, attempt=attempt,
-                        tool_count=len(result))
+                        tool_count=len(result), elapsed_seconds=round(time.monotonic()-started, 3))
             return result
 
 
-def discover_tools(servers: dict, *, timeout_seconds: float | None = None) -> dict:
+class DiscoveryCache:
+    """Schemas only, scoped to one live conversation; never cached tool results."""
+    def __init__(self):
+        self.entries = {}
+        self.warnings = []
+
+    def key(self, config):
+        credentials = _bearer_token(config) if 'url' in config else safe_tool_env()
+        return hashlib.sha256(json.dumps([config, credentials], sort_keys=True).encode()).hexdigest()
+
+    def invalidate(self, alias):
+        self.entries.pop(alias, None)
+
+
+def discover_tools(servers: dict, *, timeout_seconds: float | None = None,
+                   cache: DiscoveryCache | None = None) -> dict:
     discovered = {}
+    if cache is not None:
+        cache.warnings.clear()
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
-    for alias, config in servers.items():
+    for alias, config in sorted(servers.items(), key=lambda item: item[0] == 'cognee'):
+        key = cache.key(config) if cache is not None else None
+        entry = cache.entries.get(alias) if cache is not None else None
+        if entry and entry['key'] == key and (entry['tools'] is not None or time.monotonic() < entry['retry_at']):
+            if entry['tools'] is not None:
+                discovered.update(deepcopy(entry['tools']))
+                trace_event('mcp_discovery_cached', server=alias, elapsed_seconds=0)
+            else:
+                cache.warnings.append('Project memory MCP is unavailable; using current sources.')
+                trace_event('mcp_optional_unavailable', server=alias, cached=True)
+            continue
         try:
             timeout = RUNTIME["timeouts"]["mcp_discovery_seconds"]
+            if alias == 'cognee':
+                timeout = min(timeout, RUNTIME['timeouts']['memory_session_start_seconds'])
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError
                 timeout = min(timeout, remaining)
-            discovered.update(asyncio.run(asyncio.wait_for(
-                _discover_with_retry(alias, config), timeout)))
+            tools = asyncio.run(asyncio.wait_for(_discover_with_retry(alias, config), timeout))
+            discovered.update(tools)
+            if cache is not None:
+                cache.entries[alias] = {'key':key, 'tools':deepcopy(tools)}
         except (TimeoutError, asyncio.TimeoutError) as exc:
+            if alias == 'cognee':
+                _optional_memory_failure(alias, key, cache)
+                continue
             trace_event('mcp_discovery_failed', server=alias, reason='deadline_exceeded')
             raise RuntimeError(f"MCP server {alias} timed out during discovery") from exc
         except Exception as exc:
+            if alias == 'cognee':
+                _optional_memory_failure(alias, key, cache)
+                continue
             trace_event('mcp_discovery_failed', server=alias, error=_error_text(config, exc))
             raise RuntimeError(f"MCP server {alias} failed during discovery: {_error_text(config, exc)}") from None
     return discovered
+
+
+def _optional_memory_failure(alias, key, cache):
+    trace_event('mcp_optional_unavailable', server=alias, warning='Project memory unavailable; main tools remain enabled')
+    if cache is not None:
+        cache.warnings.append('Project memory MCP is unavailable; using current sources.')
+        cache.entries[alias] = {'key':key, 'tools':None,
+            'retry_at':time.monotonic() + RUNTIME['timeouts']['mcp_discovery_seconds']}
 
 
 async def _call_one(config: dict, native_name: str, arguments: dict) -> str:

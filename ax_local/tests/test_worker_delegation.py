@@ -12,6 +12,18 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class WorkerDelegationTests(unittest.TestCase):
+    def test_durable_child_returns_pending_without_polling_or_canceling(self):
+        tools=make_tools({'AX_DELEGATION_URL':'http://api:8005','AX_DELEGATION_TOKEN':'cap',
+                          'AX_DELEGATION_ROLES':'["qa_engineer"]'})
+        task={'id':'a'*16,'contextId':'parent','status':{'state':'TASK_STATE_WORKING'},
+              'metadata':{'durable':True}}
+        response=httpx.Response(200,json={'jsonrpc':'2.0','id':1,'result':{'task':task}})
+        with patch('httpx.AsyncHTTPTransport.handle_async_request',return_value=response) as send:
+            result=json.loads(tools['delegate_task']['call']({'role':'qa_engineer','task':'check'},
+                              timeout_seconds=5,call_id='pending'))
+        self.assertTrue(result['pending'])
+        self.assertEqual(send.call_count,1)
+
     def test_continuation_sends_native_task_id_and_preserves_partial_outcome(self):
         session = '0123456789abcdef'
         tools = make_tools({'AX_DELEGATION_URL': 'http://api:8005',

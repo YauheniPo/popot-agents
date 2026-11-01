@@ -107,7 +107,7 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
 
 def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
              *, extra_tools: dict | None = None, timeout_seconds: float | None = None,
-             state: dict | None = None) -> str:
+             state: dict | None = None, discovery_cache=None) -> str:
     turn_timeout = float(os.getenv('HARNESS_TURN_TIMEOUT_SECONDS',
                                   str(RUNTIME['timeouts']['turn_seconds'])))
     if not math.isfinite(turn_timeout) or turn_timeout <= 0:
@@ -130,7 +130,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             role_config = refine_role(messages, role_config, deadline=deadline,
                                       tool_names=list(extra_tools or {}))
         answer = _run_http(task, role_config, extra_tools=extra_tools, memory=memory,
-                           deadline=deadline, turn_timeout=turn_timeout, state=state)
+                           deadline=deadline, turn_timeout=turn_timeout, state=state, discovery_cache=discovery_cache)
         success = memory.run_complete
         return answer
     finally:
@@ -139,7 +139,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
 def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
              *, extra_tools: dict | None = None, memory=None, deadline=None, turn_timeout=None,
-             state: dict | None = None) -> str:
+             state: dict | None = None, discovery_cache=None) -> str:
     base_url = os.environ.get("HARNESS_BASE_URL", "").rstrip("/")
     model = os.environ.get("HARNESS_MODEL", "")
     if not base_url.startswith(("http://", "https://")) or not model:
@@ -180,8 +180,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     if 'bash' in allowed:
         instructions += '\n\n' + render_prompt('tools/inspection')
     mcp_servers = role_config.get("mcpServers", {})
-    mcp_tools = (mcp_client.discover_tools(mcp_servers, timeout_seconds=remaining_seconds())
+    mcp_tools = (mcp_client.discover_tools(mcp_servers, timeout_seconds=remaining_seconds(),
+                    **({"cache":discovery_cache} if discovery_cache is not None else {}))
                  if mcp_servers else {})
+    memory_warnings = list(discovery_cache.warnings) if discovery_cache is not None else []
+    if memory_warnings:
+        instructions += '\nProject memory is unavailable. Continue with current sources and tools; report this limitation.'
     # Writes use the curated runtime capture, not arbitrary model-selected text.
     mcp_tools.pop('mcp__cognee__remember', None)
     reviewer = role_config.get('name', role_config.get('_ax_role')) == 'code_reviewer'
@@ -336,6 +340,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                if report else {'evidence': [], 'remaining_work': [],
                                'errors': [value['error'] for value in failed_delegations.values()]
                                    + ([model_failure] if model_failure else [])})}
+        warnings = list(dict.fromkeys([*memory_warnings, *memory.warnings]))
+        if warnings:
+            outcome['warnings'] = warnings
         if status != 'completed' and not outcome['remaining_work']:
             outcome['remaining_work'] = ['Task completeness is unverified']
         if state is not None:
@@ -499,6 +506,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             if isinstance(content, str) and content.strip():
                 _trace("assistant_message", round=round_number, content=content)
             messages.append({'role': 'assistant', **message})
+            pending_children = False
             for tool_call in calls:
                 remaining_seconds()
                 name = None
@@ -632,6 +640,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 mcp_servers[selected["server"]], selected["native_name"], arguments,
                                 timeout_seconds=work_seconds())
                         except RuntimeError as exc:
+                            if discovery_cache is not None:
+                                discovery_cache.invalidate(selected['server'])
                             if selected['server'] != 'cognee':
                                 raise
                             raise mcp_client.MCPToolError(
@@ -675,7 +685,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             for key, value in list(failed_delegations.items()):
                                 if key[0] == delegation_key[0] and value.get('session_id') == child_session:
                                     previous = failed_delegations.pop(key)
-                        failure = {**previous, 'error': str(exc),
+                        pending = isinstance(child, dict) and child.get('pending') is True
+                        pending_children = pending_children or pending
+                        failure = {**previous, 'pending':pending, 'error': str(exc),
                             'role': delegation_key[0],
                             'session_id': child_session,
                             'status': child.get('outcome', {}).get('status') if isinstance(child, dict)
@@ -714,6 +726,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                        **result_fields)
                 messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
                 memory.observe(call_id, name, arguments, output)
+            if pending_children:
+                memory.run_complete = False
+                return save_result('Waiting for durable child tasks', 'partial', 'child_pending',
+                    {'evidence':[], 'errors':[], 'remaining_work':['Await durable child results; the server resumes this coordinator']})
             continue
         answer = message.get("content")
         report = None

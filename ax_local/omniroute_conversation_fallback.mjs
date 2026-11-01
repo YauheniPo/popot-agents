@@ -17,11 +17,46 @@ export function loggingEnvironment(config) {
   return env;
 }
 
+// Tool receipts originate from Python json.dumps, but gateway logging compacts
+// their JSON strings after the conversation identity has already been hashed.
+function spacedToolJson(text) {
+  if (typeof text !== 'string' || !/^[\s]*[\[{]/.test(text)) return null;
+  try { JSON.parse(text); } catch { return null; }
+  let result = '', quoted = false, escaped = false;
+  for (const char of text) {
+    if (quoted) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') {
+      quoted = true;
+      result += char;
+    } else if (char === ',' || char === ':') result += char + ' ';
+    else if (!/\s/.test(char)) result += char;
+  }
+  return result;
+}
+
+const originalIndexer = 'function i(a,b){for(let c of b){let b=(0,f.vm)(c);a.has(b)||a.set(b,{textPreview:c.text,blockKind:c.blockKind,toolName:c.toolName})}}';
+const receiptIndexer = spacedToolJson.toString() + `
+function i(a,b){for(const turn of b){
+  const variants=[turn];
+  if(turn.blockKind==='tool_result'){
+    const spaced=spacedToolJson(turn.text);
+    if(spaced!==null&&spaced!==turn.text)variants.push({...turn,text:spaced});
+  }
+  for(const c of variants){const key=(0,f.vm)(c);
+    if(!a.has(key))a.set(key,{textPreview:c.text,blockKind:c.blockKind,toolName:c.toolName});
+  }
+}}`;
+
 const replacements = [
   ['i(b,h(g(j?.clientRawRequest)?.body))',
    'i(b,h(g(j?.clientRawRequest)?.body)),i(b,h(c?.requestBody))'],
   ['}(g(j?.providerRequest)?.body))',
    '}(g(j?.providerRequest)?.body??c?.requestBody))'],
+  [originalIndexer, receiptIndexer],
 ];
 
 export function patchConversationRoute(source) {

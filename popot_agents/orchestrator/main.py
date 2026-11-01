@@ -12,6 +12,7 @@ import time
 import uuid
 import weakref
 import secrets
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,7 @@ from popot_agents.role_env import validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
 from .session_store import SessionStore
+from .work_status import build_work_status
 from popot_agents.workflow_config import role_policy
 from .workflow import POLICY, WorkflowRun, public_workflow, validate_policy, recover_workflows
 
@@ -494,7 +496,9 @@ def create_server(
                                       else None),
                         "updatedAt": saved["updatedAt"],
                         "turns": len(saved["messages"]) // 2,
-                        "status": statuses.get(saved["sessionId"], "stopped"),
+                        "status": statuses.get(saved["sessionId"], 'running' if
+                            ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('state')
+                            in {'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'} else 'stopped'),
                         "progress": progress.get(saved["sessionId"]),
                         "workflow": public_workflow(saved),
                     }
@@ -524,15 +528,18 @@ def create_server(
                     with self.server.live_lock:
                         self.server.live.pop(session_id, None)
                     live = None
+                child_state = ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('state')
+                stored_status = 'running' if child_state in {'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'} else 'stopped'
                 self._reply(200, {
                     "sessionId": session_id, "agent": saved["agent"],
                     "role": saved.get("role"),
                     "createdAt": saved.get("createdAt", saved["updatedAt"]),
                     "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
                                   else None),
-                    "status": ("running" if busy else getattr(live.worker, "status", "running")) if live else "stopped",
+                    "status": ("running" if busy else getattr(live.worker, "status", "running")) if live else stored_status,
                     "progress": live.progress.snapshot() if live and live.progress else None,
                     "workflow": public_workflow(saved, include_result=True),
+                    "work": build_work_status(saved, self.server.store.list_chats()),
                     "container": live.worker.container_name if live else None,
                     "workspace": self._workspace(saved, live),
                     "turns": len(saved["messages"]) // 2,
@@ -781,10 +788,16 @@ def create_server(
                     with self.server.live_lock:
                         self.server.live[session_id] = record
             with self.server.live_lock:
-                record.progress = TurnProgress()
+                record.progress = TurnProgress(session_id)
                 self._turn_progress = record.progress
+            scope = ExitStack()
+            delegation = getattr(agents[record.agent], 'delegation', None)
             try:
                 workflow = getattr(self, '_workflow', None)
+                if workflow and delegation:
+                    scope.enter_context(delegation.workflow(session_id, workflow.deadline,
+                                        max_turns=workflow.policy['max_turns'], metadata=workflow.meta))
+                    delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
                 while True:
                     if workflow:
                         if workflow.remaining() < 1 or workflow.meta['turns'] >= workflow.policy['max_turns']:
@@ -817,6 +830,10 @@ def create_server(
                     if terminal is not None:
                         break
                     emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
+                    if delegation:
+                        delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
+                        workflow.meta['checkpoint'] = record.worker.get_checkpoint()
+                        self.server.store.save(session_id, record.agent, history, record.role, role_config)
                     try:
                         message = workflow.continuation()
                     except ValueError:
@@ -846,6 +863,8 @@ def create_server(
                 with self.server.live_lock:
                     self.server.live.pop(session_id, None)
                 raise
+            finally:
+                scope.close()
             self._reply(200, {
                 "sessionId": session_id, "container": record.worker.container_name,
                 "answer": result["answer"], "role": record.role, "agent": record.agent,

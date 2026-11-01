@@ -88,10 +88,14 @@ class AxAgentRunner:
         if not re.fullmatch(r"[0-9a-f]{16}", chat_id):
             raise ValueError("invalid session ID")
         role_config = role_config or {}
+        # Server bookkeeping can exceed AX's 32 KiB per-env-value limit. The
+        # worker receives its task/checkpoint over the control socket instead.
+        worker_role = {key: value for key, value in role_config.items()
+                       if key not in {'_ax_delegation', '_workflow'}}
         env = {
             "HARNESS_BASE_URL": self.base_url,
             "HARNESS_MODEL": self.model,
-            "HARNESS_ROLE_JSON": json.dumps(role_config, ensure_ascii=False),
+            "HARNESS_ROLE_JSON": json.dumps(worker_role, ensure_ascii=False),
             "HARNESS_SESSION_MODE": "http",
             "HARNESS_CHAT_ID": chat_id,
             "HARNESS_SOCKET_PATH": "/run/popot/chat.sock",
