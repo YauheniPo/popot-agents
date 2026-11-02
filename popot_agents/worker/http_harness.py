@@ -41,7 +41,11 @@ def _mentions_github_url(messages) -> bool:
             start = min((token.find(scheme) for scheme in _URL_SCHEMES if scheme in token), default=-1)
             if start < 0:
                 continue
-            if urlsplit(token[start:].rstrip(_URL_TRAILING)).hostname in _GITHUB_HOSTS:
+            try:
+                host = urlsplit(token[start:].rstrip(_URL_TRAILING)).hostname
+            except ValueError:
+                continue
+            if host in _GITHUB_HOSTS:
                 return True
     return False
 

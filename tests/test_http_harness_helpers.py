@@ -28,3 +28,9 @@ def test_markdown_wrapped_links_count_as_github_links():
                     '**https://github.com/YauheniPo/popot-agents**',
                     'see <https://github.com/YauheniPo/popot-agents/pull/37>.'):
         assert _mentions_github_url([{'role': 'user', 'content': content}]), content
+
+
+def test_bracketed_hosts_are_skipped_instead_of_raised():
+    for content in ('[ax](https://[::1])', 'https://[::1]', 'see [a](https://[::1/pull/37)'):
+        assert not _mentions_github_url([{'role': 'user', 'content': content}]), content
+    assert _mentions_github_url([{'role': 'user', 'content': '[ax](https://[::1]) https://github.com/YauheniPo/popot-agents/pull/37'}])
