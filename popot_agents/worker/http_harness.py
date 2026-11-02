@@ -28,7 +28,8 @@ from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA a
 
 
 _GITHUB_HOSTS = {'github.com', 'www.github.com'}
-_URL_SCHEMES = ('http://', 'https://')
+# The guard trusts TLS links only, matching the previous https-only predicate.
+_URL_SCHEMES = ('https://',)
 _URL_TRAILING = '>)]}*`,;!.\'"}<>'
 
 
