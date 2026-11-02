@@ -22,7 +22,7 @@ ci = [
     {include-group = "worker"},
     {include-group = "orchestrator"},
     {include-group = "ax"},
-    "pytest==9.1.1",
+    "pytest==9.2.0",
     "coverage==7.16.2",
 ]
 
