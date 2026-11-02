@@ -21,3 +21,10 @@ def test_lookalike_hosts_are_not_github_links():
 
 def test_plain_github_mentions_are_not_links():
     assert not _mentions_github_url([{'role': 'user', 'content': 'see github.com/YauheniPo/popot-agents'}])
+
+
+def test_markdown_wrapped_links_count_as_github_links():
+    for content in ('[pull/37](https://github.com/YauheniPo/popot-agents/pull/37)',
+                    '**https://github.com/YauheniPo/popot-agents**',
+                    'see <https://github.com/YauheniPo/popot-agents/pull/37>.'):
+        assert _mentions_github_url([{'role': 'user', 'content': content}]), content

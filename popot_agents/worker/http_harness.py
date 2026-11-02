@@ -28,6 +28,8 @@ from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA a
 
 
 _GITHUB_HOSTS = {'github.com', 'www.github.com'}
+_URL_SCHEMES = ('http://', 'https://')
+_URL_TRAILING = '>)]}*`,;!.\'"}<>'
 
 
 def _mentions_github_url(messages) -> bool:
@@ -36,10 +38,10 @@ def _mentions_github_url(messages) -> bool:
         if not isinstance(message, dict) or message.get('role') != 'user':
             continue
         for token in str(message.get('content') or '').split():
-            candidate = token.strip('<>()[]{}"\'`,;!')
-            if not candidate.startswith(('http://', 'https://')):
+            start = min((token.find(scheme) for scheme in _URL_SCHEMES if scheme in token), default=-1)
+            if start < 0:
                 continue
-            if urlsplit(candidate).hostname in _GITHUB_HOSTS:
+            if urlsplit(token[start:].rstrip(_URL_TRAILING)).hostname in _GITHUB_HOSTS:
                 return True
     return False
 

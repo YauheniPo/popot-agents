@@ -89,6 +89,36 @@ test('requestAxStatus rejects a body that is not JSON', async () => {
   }
 });
 
+test('requestAxStatus settles when the response is truncated mid body', async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(200, {'content-type': 'application/json'});
+    response.write('{"chats":[');
+    setTimeout(() => response.destroy(), 20);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await assert.rejects(requestAxStatus({host: '127.0.0.1', port: server.address().port}),
+      /AX status response closed before completion|aborted|socket hang up/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('requestAxStatus applies one deadline even while bytes keep arriving', async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(200, {'content-type': 'application/json'});
+    const timer = setInterval(() => response.write(' '), 25);
+    response.on('close', () => clearInterval(timer));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await assert.rejects(requestAxStatus({host: '127.0.0.1', port: server.address().port, timeoutMs: 120}),
+      /AX status timeout/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test('axIndexFrom keys sessions and their runs for browser lookups', () => {
   const index = axIndexFrom({
     chats: [

@@ -93,16 +93,22 @@ export function readSnapshot(path) {
 // HTTP. Naming host and port builds that request without a clear-text URL.
 export function requestAxStatus({host='api',port=8002,path='/chats',timeoutMs=2000}={}) {
   return new Promise((succeed,fail)=>{
+    let settled=false, deadline;
+    // One settlement point: socket errors, truncated bodies and the deadline all
+    // resolve the promise exactly once, so a hung refresh cannot stay pending.
+    const finish=(settle,value)=>{if(settled)return;settled=true;clearTimeout(deadline);settle(value);};
     const request=httpRequest({host,port,path,method:'GET'},response=>{
       const chunks=[];
       response.on('data',chunk=>chunks.push(chunk));
+      response.on('error',error=>finish(fail,error));
+      response.on('close',()=>{if(!response.complete)finish(fail,new Error('AX status response closed before completion'));});
       response.on('end',()=>{
-        if(response.statusCode<200||response.statusCode>299){fail(new Error('AX status HTTP '+response.statusCode));return;}
-        try {succeed(JSON.parse(Buffer.concat(chunks).toString('utf8')));} catch(error) {fail(error);}
+        if(response.statusCode<200||response.statusCode>299){finish(fail,new Error('AX status HTTP '+response.statusCode));return;}
+        try {finish(succeed,JSON.parse(Buffer.concat(chunks).toString('utf8')));} catch(error) {finish(fail,error);}
       });
     });
-    request.setTimeout(timeoutMs,()=>request.destroy(new Error('AX status timeout')));
-    request.on('error',fail);
+    deadline=setTimeout(()=>{const error=new Error('AX status timeout');finish(fail,error);request.destroy(error);},timeoutMs);
+    request.on('error',error=>finish(fail,error));
     request.end();
   });
 }
