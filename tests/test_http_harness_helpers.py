@@ -1,0 +1,23 @@
+from popot_agents.worker.http_harness import _mentions_github_url
+
+
+def test_pull_request_link_counts_as_a_github_link():
+    messages = [{'role': 'user', 'content': 'Please review https://github.com/YauheniPo/popot-agents/pull/37'}]
+    assert _mentions_github_url(messages)
+
+
+def test_bracketed_link_counts_as_a_github_link():
+    messages = [{'role': 'assistant', 'content': 'see repo'},
+                {'role': 'user', 'content': '(https://github.com/YauheniPo/popot-agents), thanks'}]
+    assert _mentions_github_url(messages)
+
+
+def test_lookalike_hosts_are_not_github_links():
+    for content in ('https://evil.example/github.com/pull/1',
+                    'https://github.com.evil.example/YauheniPo/popot-agents',
+                    'https://evil.example/?next=https://github.com/YauheniPo'):
+        assert not _mentions_github_url([{'role': 'user', 'content': content}]), content
+
+
+def test_plain_github_mentions_are_not_links():
+    assert not _mentions_github_url([{'role': 'user', 'content': 'see github.com/YauheniPo/popot-agents'}])

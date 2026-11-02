@@ -27,6 +27,23 @@ from .final_result import evidence_transcript, parse_result, retained_receipts
 from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA as REVIEW_SCHEMA
 
 
+_GITHUB_HOSTS = {'github.com', 'www.github.com'}
+
+
+def _mentions_github_url(messages) -> bool:
+    """Report whether a user message links a URL served by github.com itself."""
+    for message in messages or ():
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        for token in str(message.get('content') or '').split():
+            candidate = token.strip('<>()[]{}"\'`,;!')
+            if not candidate.startswith(('http://', 'https://')):
+                continue
+            if urlsplit(candidate).hostname in _GITHUB_HOSTS:
+                return True
+    return False
+
+
 def _trace(event: str, **fields) -> None:
     trace_event(event, **fields)
 
@@ -381,7 +398,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                               'errors': (report or {}).get('errors', []),
                               'remaining_work': (report or {}).get('remaining_work', []) +
                                   ['Obtain independent verification receipts for the current revision from ' + ', '.join(missing)]}
-                if not target and any('https://github.com/' in m.get('content','') for m in user_context if m.get('role')=='user'):
+                if not target and _mentions_github_url(user_context):
                     status, reason = 'partial','verification_revision_missing'
                     report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
                         ['Read back the implementation revision before accepting verification']}

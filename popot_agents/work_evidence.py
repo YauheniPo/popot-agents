@@ -34,7 +34,7 @@ def observe_tool_result(name, arguments, output, call_id):
             failed_checks = re.search(r'\b[1-9]\d* (?:failed|errors?)\b|FAILED \(|(?m:^EXIT_CODE=[1-9]\d*\s*$)', text)
             if error or failed_checks:
                 status = 'failed'
-            elif exit_code == 0 and re.search(r'(?m)^OK(?:\s|$)|\d+ passed|# pass \d+', text):
+            elif exit_code == 0 and re.search(r'(?m)(?:^OK(?:\s|$))|(?:\d+ passed)|(?:# pass \d+)', text):
                 status = 'passed'
         elif exit_code == 0 and re.search(r'\bgit\b[^\n;|&]*\bcommit\b', command) and re.search(r'(?m)^\[[^\]\n]+ [a-f0-9]{7,40}\]', text):
             kind, summary = 'commit', 'Git commit returned successfully; publication is separate.'
