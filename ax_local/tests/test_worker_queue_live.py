@@ -15,7 +15,7 @@ from tests import test_chat as chat_tests
 
 @unittest.skipUnless(os.getenv('AX_TEST_LIVE_QUEUE'), 'requires idle local AX/Substrate')
 class LiveWorkerQueueTests(unittest.TestCase):
-    def test_ten_suspended_workers_hold_slots_and_eleventh_starts_after_delete(self):
+    def test_suspended_workers_fill_configured_slots_and_next_starts_after_delete(self):
         root = Path(__file__).resolve().parents[2]
         image = (root / 'ax_local/.local/worker-image').read_text().strip()
         environment = {'PATH': str(root / 'ax_local/.local/bin') + os.pathsep + os.environ['PATH'],
@@ -36,7 +36,7 @@ class LiveWorkerQueueTests(unittest.TestCase):
                     return chat_tests.TaskSessionTests._post_to_handler(
                         server.RequestHandlerClass, server, {'agent': 'test', 'message': message})
                 ids = []
-                for index in range(10):
+                for index in range(runner.worker_queue.max_workers):
                     status, result = post('worker ' + str(index))
                     self.assertEqual(status, 200, result)
                     ids.append(result['sessionId'])

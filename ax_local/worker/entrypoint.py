@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import stat
+import errno
 
 from popot_agents.worker.session_worker import SOCKET_PATH, serve
 from .delegation import make_tools
@@ -41,6 +42,23 @@ def prepare_socket(path: str) -> None:
             raise RuntimeError('AX chat socket is already in use')
 
 
+def prepare_directory(path: str, *, tool_user: bool) -> None:
+    """Pin the original directory even on runtimes with incomplete O_NOFOLLOW."""
+    original = os.lstat(path)
+    if not stat.S_ISDIR(original.st_mode):
+        raise OSError(errno.ELOOP, 'Expected a directory without symlinks', path)
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev, opened.st_ino) != (original.st_dev, original.st_ino):
+            raise OSError(errno.ESTALE, 'Directory changed while opening', path)
+        os.fchmod(descriptor, 0o700)
+        if tool_user:
+            os.fchown(descriptor, 10001, 10001)
+    finally:
+        os.close(descriptor)
+
+
 def main() -> None:
     load_capabilities()
     os.makedirs("/workspace", mode=0o700, exist_ok=True)
@@ -56,13 +74,7 @@ def main() -> None:
         # Pin each directory rather than following a replacement or symlink.
         tool_user = os.getenv("POPOT_TOOLS_UID") == "10001"
         for path in ("/workspace", "/dev/shm"):
-            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fchmod(descriptor, 0o700)
-                if tool_user:
-                    os.fchown(descriptor, 10001, 10001)
-            finally:
-                os.close(descriptor)
+            prepare_directory(path, tool_user=tool_user)
     prepare_socket(SOCKET_PATH)
     tools = make_tools()
     tools.update(make_project_tools())

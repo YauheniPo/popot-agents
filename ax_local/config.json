@@ -25,12 +25,12 @@
   "delete_timeout_seconds": 5,
   "suspend_retention_seconds": 86400,
   "snapshot_mode": "data",
-  "max_workers": 10,
+  "max_workers": 3,
   "worker_queue_timeout_seconds": 3600,
   "delegation": {
     "enabled": true,
     "port": 8005,
-    "max_depth": 5,
+    "max_depth": 2,
     "max_calls_per_turn": 8,
     "turn_timeout_seconds": 900,
     "poll_interval_seconds": 0.5

@@ -830,9 +830,10 @@ def create_server(
                     delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
                 while True:
                     if workflow:
-                        if workflow.remaining() < 1 or workflow.meta['turns'] >= workflow.policy['max_turns'] and not workflow.meta.get('awaiting_children'):
-                            result = workflow.stop({'answer': 'Autonomous workflow time budget exhausted'},
-                                                   'workflow_deadline_exhausted' if workflow.remaining() < 1 else 'workflow_turn_limit')
+                        if workflow.remaining() < RUNTIME['timeouts']['min_turn_seconds'] or workflow.meta['turns'] >= workflow.policy['max_turns'] and not workflow.meta.get('awaiting_children'):
+                            result = workflow.stop({'answer': 'Autonomous workflow time budget exhausted',
+                                                    'outcome': workflow.meta.get('outcome')},
+                                                   'workflow_deadline_exhausted' if workflow.remaining() < RUNTIME['timeouts']['min_turn_seconds'] else 'workflow_turn_limit')
                             role_config = {**(role_config or {}), '_workflow': workflow.meta}
                             self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
                             break
@@ -887,14 +888,15 @@ def create_server(
                 raise
             except (subprocess.TimeoutExpired, OSError):
                 if workflow := getattr(self, '_workflow', None):
-                    workflow.stop({'answer': 'Worker execution interrupted; reconcile effects before retrying',
+                    result = workflow.stop({'answer': 'Worker execution interrupted; reconcile effects before retrying',
                                    'outcome': workflow.meta.get('outcome')},
                                   'workflow_execution_uncertain')
                     self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
                 record.worker.close()
                 with self.server.live_lock:
                     self.server.live.pop(session_id, None)
-                raise
+                if not workflow:
+                    raise
             finally:
                 scope.close()
             self._reply(200, {

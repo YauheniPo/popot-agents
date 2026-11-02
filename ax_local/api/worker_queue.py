@@ -33,8 +33,7 @@ class WorkerQueue:
             if key in self.reservations:
                 return self.reservations[key]
             available = self.max_workers-len(self.active)-self._reserved()
-            spare = 1 if self.max_workers >= 3 and available > 1 else 0
-            count = min(slots, max(0,available-spare))
+            count = min(slots, max(0, available))
             self.reservations[key] = count
             return count
 

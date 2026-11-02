@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 from popot_agents.worker.turn_memory import TurnMemory, project_dataset, scrub, parse_summary
 from popot_agents.worker.http_harness import run_http
+from popot_agents.runtime_config import RUNTIME
 
 ROLE = {'mcpServers': {'cognee': {'command': ['python', 'memory.py'],
                                  'tools': ['remember', 'recall', 'memory_status']}}}
@@ -150,7 +151,8 @@ class TurnMemoryTests(unittest.TestCase):
                         content = json.dumps({'memories': [
                             {'kind': 'constraint', 'text': 'Review requested', 'source': 'user', 'quote': 'Review'}]})
                     return io.BytesIO(json.dumps({'choices': [{'message': {'content': content}}]}).encode())
-                with patch.dict(os.environ, {**ENV, 'HARNESS_TURN_TIMEOUT_SECONDS': str(turn_seconds),
+                with patch.dict(RUNTIME['timeouts'], {'memory_summary_seconds': 300}), \
+                     patch.dict(os.environ, {**ENV, 'HARNESS_TURN_TIMEOUT_SECONDS': str(turn_seconds),
                      'HARNESS_MODEL_PARAMETERS_JSON': json.dumps(parameters)}, clear=True), \
                      patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
                      patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \

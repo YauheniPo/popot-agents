@@ -104,6 +104,8 @@ def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
         elif mcp:
             code = "mcp_discovery_failed"
             reason = f"MCP server {mcp[1]} {mcp[2]} during discovery"
+        elif 'ActorResumeFailed' in detail:
+            code, reason = 'actor_resume_failed', 'AX actor could not start; inspect physical worker capacity and controller events'
         elif detail in {"model endpoint is unreachable", "model endpoint returned no answer",
                         "model endpoint returned an empty answer"}:
             code, reason = "model_response_failed", detail
@@ -202,7 +204,7 @@ class DelegationService:
                 if pool is not None:
                     yield_run.pool = pool
                     yield_run.reservation = metadata.get('run_id') or secrets.token_hex(16)
-                    yield_run.reserved_slots = pool.reserve(yield_run.reservation, max(0,pool.max_workers-2))
+                    yield_run.reserved_slots = pool.reserve(yield_run.reservation, max(0,pool.max_workers-1))
                 grant.run = yield_run
         try:
             yield yield_run
@@ -757,6 +759,9 @@ class DelegationService:
             if durable:
                 parent_job = self.jobs.get(grant.session_id)
                 deadline = min(grant.run.deadline, parent_job.deadline if parent_job else grant.run.deadline)
+                parent_remaining = max(0, deadline-time.monotonic())
+                deadline -= min(RUNTIME['model']['final_answer_reserve_seconds'],
+                                parent_remaining / RUNTIME['model']['final_answer_reserve_divisor'])
                 prior_deadline = config['_ax_delegation'].get('deadlineAt')
                 if prior_deadline is not None:
                     deadline = min(deadline, time.monotonic() + max(0, prior_deadline - time.time()))
@@ -936,6 +941,11 @@ class DelegationService:
             message = job.task
             while True:
                 if workflow:
+                    if workflow.remaining() < RUNTIME['timeouts']['min_turn_seconds']:
+                        result = workflow.stop({'answer': 'No budget remains for another worker turn',
+                                                'outcome': workflow.meta.get('outcome')},
+                                               'workflow_deadline_exhausted')
+                        break
                     workflow.begin()
                     job.config['_ax_delegation']['workflow'] = {
                         'state': 'running', 'turns': workflow.meta['turns']}
@@ -1056,7 +1066,8 @@ class DelegationService:
             raise AgentRunError('Reserved capacity cannot support this nesting depth; no worker started')
         deepest=max(len(item.config['_ax_delegation']['lineage']) for item in proposed)
         # Keep a complete path to a leaf available, even while ancestors wait.
-        future=max(0,depth_limit-deepest)
+        future=max(0,depth_limit-deepest) if any(item.config.get('allowed_roles')
+            for item in proposed if len(item.config['_ax_delegation']['lineage']) == deepest) else 0
         return len(proposed)+future<=slots
 
     def _wait_dependencies(self, job):

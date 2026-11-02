@@ -75,7 +75,7 @@ class ModelTimeoutTests(unittest.TestCase):
             requests.append(json.loads(call.data))
             timeouts.append(timeout)
             if len(requests) == 1:
-                now[0] = 2.1
+                now[0] = 21.0
                 return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
                     {'id': 'read', 'function': {'name': 'utc_time', 'arguments': '{}'}}]}}]}).encode())
             return io.BytesIO(b'{"choices":[{"message":{"content":"Verified partial result"}}]}')
@@ -86,10 +86,10 @@ class ModelTimeoutTests(unittest.TestCase):
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
              patch('popot_agents.worker.http_harness.execute_tool') as tool, \
              redirect_stderr(io.StringIO()):
-            answer = run_http('review', {'tools': ['utc_time']}, timeout_seconds=3)
+            answer = run_http('review', {'tools': ['utc_time']}, timeout_seconds=30)
         self.assertIn('Verified partial result', answer)
-        self.assertEqual(timeouts[0], 2)
-        self.assertAlmostEqual(timeouts[-1], 0.9)
+        self.assertEqual(timeouts[0], 20)
+        self.assertAlmostEqual(timeouts[-1], 9)
         self.assertNotIn('tools', requests[-1])
         tool.assert_not_called()
 

@@ -2,6 +2,7 @@ import unittest
 import os
 import json
 import socket
+import stat
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,6 +70,8 @@ class EntrypointTests(unittest.TestCase):
              patch("ax_local.worker.entrypoint.os.makedirs"), \
              patch("ax_local.worker.entrypoint.os.open",
                    side_effect=lambda path, flags: next(fd for fd, name in directories.items() if name == path)) as opened, \
+             patch("ax_local.worker.entrypoint.os.lstat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_dev=1, st_ino=1)), \
+             patch("ax_local.worker.entrypoint.os.fstat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_dev=1, st_ino=1)), \
              patch("ax_local.worker.entrypoint.os.close"), \
              patch("ax_local.worker.entrypoint.os.geteuid", return_value=0), \
              patch("ax_local.worker.entrypoint.os.stat",
@@ -79,6 +82,7 @@ class EntrypointTests(unittest.TestCase):
                    side_effect=lambda fd, uid, gid: owners.__setitem__(fd, [uid, gid])), \
              patch("ax_local.worker.entrypoint.os.fchmod", side_effect=chmod_directory), \
              patch("ax_local.worker.entrypoint.make_tools", return_value={}), \
+             patch("ax_local.worker.entrypoint.prepare_socket"), \
              patch("ax_local.worker.entrypoint.serve", side_effect=start_harness):
             main()
         for opened_call in opened.call_args_list:
@@ -99,6 +103,8 @@ class EntrypointTests(unittest.TestCase):
              patch.object(entrypoint.os, "geteuid", return_value=0), \
              patch.object(entrypoint.os, "stat", return_value=SimpleNamespace(st_mode=0o755)), \
              patch.object(entrypoint.os, "open", return_value=99), \
+             patch.object(entrypoint.os, "lstat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_dev=1, st_ino=1)), \
+             patch.object(entrypoint.os, "fstat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_dev=1, st_ino=1)), \
              patch.object(entrypoint.os, "close") as close, \
              patch.object(entrypoint.os, "fchmod"), \
              patch.object(entrypoint.os, "fchown", side_effect=PermissionError("Operation not permitted")), \
@@ -117,12 +123,14 @@ class EntrypointTests(unittest.TestCase):
             target.mkdir(mode=0o700)
             (root / 'shm').symlink_to(target, target_is_directory=True)
             real_open = os.open
+            real_lstat = os.lstat
             with patch.dict(os.environ, {'POPOT_TOOLS_UID': '10001'}), \
                  patch.object(entrypoint.os, 'makedirs'), \
                  patch.object(entrypoint.os, 'geteuid', return_value=0), \
                  patch.object(entrypoint.os, 'stat', return_value=SimpleNamespace(st_mode=0o755)), \
                  patch.object(entrypoint.os, 'open', side_effect=lambda path, flags:
                               real_open(root / Path(path).name, flags)), \
+                 patch.object(entrypoint.os, 'lstat', side_effect=lambda path: real_lstat(root / Path(path).name)), \
                  patch.object(entrypoint.os, 'fchown') as chown, \
                  patch.object(entrypoint, 'serve') as serve:
                 with self.assertRaises(OSError):
@@ -138,6 +146,8 @@ class EntrypointTests(unittest.TestCase):
              patch.object(entrypoint.os, "geteuid", return_value=0), \
              patch.object(entrypoint.os, "stat", return_value=SimpleNamespace(st_mode=0o755)), \
              patch.object(entrypoint.os, "open", return_value=99), \
+             patch.object(entrypoint.os, "lstat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_dev=1, st_ino=1)), \
+             patch.object(entrypoint.os, "fstat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_dev=1, st_ino=1)), \
              patch.object(entrypoint.os, "close"), \
              patch.object(entrypoint.os, "fchown") as chown, \
              patch.object(entrypoint.os, "fchmod") as chmod, \
