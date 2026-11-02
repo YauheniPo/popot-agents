@@ -28,8 +28,17 @@ class PlannerRoleTests(unittest.TestCase):
     def test_planner_can_start_a_session_and_continue_with_the_same_role(self):
         roles = configured_roles()
         runner = role_tests.FakeRunner()
+        original_start = runner.start_chat
+        def start(*args, **kwargs):
+            kwargs.pop('deadline', None)
+            chat = original_start(*args, **kwargs)
+            original_send = chat.send
+            chat.send = lambda message, **_: {**original_send(message), 'outcome': {
+                'status':'completed', 'evidence':['discussion delivered'], 'remaining_work':[], 'errors':[]}}
+            return chat
+        runner.start_chat = start
         with tempfile.TemporaryDirectory() as directory:
-            server = create_server({'omniroute_free': runner}, roles=roles, port=0, session_dir=directory)
+            server = create_server({'omniroute_cloud': runner}, roles=roles, port=0, session_dir=directory)
             try:
                 status, first = chat_tests.TaskSessionTests._post_to_handler(
                     server.RequestHandlerClass, server,

@@ -1,4 +1,8 @@
 {
+  "logging": {
+    "pipelineMaxSizeKB": 32768,
+    "textLimitChars": 8388608
+  },
   "settings": {
     "cloudEnabled": false,
     "credentialRedactionEnabled": true,

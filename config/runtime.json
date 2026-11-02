@@ -33,7 +33,15 @@
   },
   "mcp": {
     "discovery_attempts": 3,
-    "discovery_backoff_seconds": 1
+    "discovery_backoff_seconds": 1,
+    "default_role": "planner"
+  },
+    "workflow": {
+    "max_turns": 4,
+    "total_seconds": 3600,
+    "turn_seconds": 900,
+    "max_no_progress": 2,
+    "max_concurrent": 1
   },
   "limits": {
     "request_bytes": 262144,

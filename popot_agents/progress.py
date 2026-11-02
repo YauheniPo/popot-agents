@@ -16,7 +16,8 @@ _observer = ContextVar('agent_progress', default=None)
 class TurnProgress:
     """Bounded, payload-free snapshot for concurrent status readers."""
 
-    def __init__(self):
+    def __init__(self, session_id=None):
+        self._session_id = session_id
         self._lock = threading.Lock()
         self._started = time.monotonic()
         self._state = {
@@ -33,14 +34,22 @@ class TurnProgress:
         if event in {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer'}:
             return
         action = {'event': redact_text(event)[:160]}
-        for key in ('name', 'model', 'server', 'agent_role', 'error_type'):
+        for key in ('name', 'model', 'server', 'agent_role', 'agent_session_id', 'error_type', 'code', 'stage', 'reason'):
             if isinstance(value.get(key), str):
                 action[key] = redact_text(value[key])[:160]
+        if (event == 'tool_error' and value.get('recoverable') is True
+                and value.get('error_type') in {'ToolInputError', 'MCPToolError'}
+                and isinstance(value.get('error'), str)):
+            action['message'] = redact_text(value['error'])[:400]
         for key in ('round', 'attempt'):
             if type(value.get(key)) is int and 0 <= value[key] <= 1000000:
                 action[key] = value[key]
         with self._lock:
             self._state['sequence'] += 1
+            action['sequence'] = self._state['sequence']
+            action['observedAt'] = datetime.now(timezone.utc).isoformat()
+            if 'agent_session_id' not in action and 'agent_role' not in action and self._session_id:
+                action['agent_session_id'] = self._session_id
             self._state['updatedAt'] = datetime.now(timezone.utc).isoformat()
             self._state['lastAction'] = action
             if event == 'model_request':
@@ -61,6 +70,8 @@ class TurnProgress:
                     result[key] = dict(result[key])
             if result['state'] == 'running':
                 result['elapsedSeconds'] = round(time.monotonic() - self._started, 1)
+            result['eventsAfterLastError'] = (result['sequence'] - result['lastError']['sequence']
+                                               if result['lastError'] else None)
             return result
 
 
@@ -102,13 +113,15 @@ def is_progress_message(message):
     return isinstance(value, dict) and isinstance(value.get('event'), str) and bool(value['event'])
 
 
-def scoped_progress(role, message):
+def scoped_progress(role, message, *, session_id=None):
     if not is_progress_message(message):
         return None
     value = json.loads(message)
     # Preserve the originating role through nested delegation. The harness may
     # itself use a "role" field, so keep source attribution in a separate field.
     value.setdefault('agent_role', role)
+    if session_id and value['agent_role'] == role:
+        value.setdefault('agent_session_id', session_id)
     return json.dumps(value, ensure_ascii=False)
 
 

@@ -11,5 +11,9 @@
       "schedule": "0 9 * * *",
       "task": "Use utc_time and report the current UTC date and time."
     }
+  ],
+  "allowed_roles": [
+    "analyst",
+    "project_operator"
   ]
 }

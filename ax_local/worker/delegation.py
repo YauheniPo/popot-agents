@@ -72,6 +72,10 @@ def delegate(arguments, *, timeout_seconds, call_id, url, token, allowed, poll_i
 def delegated_result(task, role, probe):
     result = {"sessionId": task.id, "role": role, "state": types.TaskState.Name(task.status.state)}
     metadata = MessageToDict(task).get('metadata', {})
+    if metadata.get('durable') is True and task.status.state in {types.TASK_STATE_SUBMITTED, types.TASK_STATE_WORKING}:
+        return {**result, 'pending':True, 'resumable':False,
+                'outcome':{'status':'partial','reason':'child_running','evidence':[],
+                           'errors':[],'remaining_work':['Await the durable child result']}}
     outcome = metadata.get('outcome')
     result['outcome'] = outcome if isinstance(outcome, dict) else {
         'status': 'failed', 'reason': 'missing_or_invalid_outcome'}
@@ -188,6 +192,8 @@ class DelegationRequest:
                 response = await self.send(transport)
                 if not response.HasField("task"):
                     raise ValueError("delegation did not return a task")
+                if MessageToDict(response.task).get('metadata', {}).get('durable') is True and self.probe is None:
+                    return json.dumps(delegated_result(response.task, self.arguments['role'], None), ensure_ascii=False)
                 task = await self.poll(response.task, transport)
                 return json.dumps(delegated_result(task, self.arguments["role"], self.probe), ensure_ascii=False)
             except (ValueError, KeyError, TypeError, OSError, asyncio.TimeoutError, ParseError, SDKError) as exc:

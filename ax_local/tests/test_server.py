@@ -9,6 +9,13 @@ from ax_local.api.server import kind_control_plane_host, make_server
 
 
 class AxServerTests(unittest.TestCase):
+    def test_workflow_capacity_reserves_room_for_nested_specialists(self):
+        from ax_local.api.server import AX_CONFIG
+        with patch.dict(os.environ, {'AX_LOCAL_WORKER_IMAGE': 'test-image'}), \
+             patch.dict(AX_CONFIG, {'max_workers': 2}), \
+             self.assertRaisesRegex(ValueError, 'workflow.*worker capacity'):
+            make_server()
+
     def test_harness2_model_is_required_only_when_a_role_enables_it(self):
         environment = {
             'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64,
@@ -23,14 +30,14 @@ class AxServerTests(unittest.TestCase):
             if value is not None:
                 selected_env['HARNESS2_IMPROVER_MODEL'] = value
             with self.subTest(value=value), patch.dict(os.environ, selected_env, clear=True), \
-                 patch('ax_local.api.server.load_roles', return_value={'reviewer': role}), \
+                 patch('ax_local.api.server.load_roles', return_value={'reviewer': role, 'planner': dict(role)}), \
                  patch('ax_local.api.server.create_server') as create:
                 with self.assertRaisesRegex(ValueError, 'HARNESS2_IMPROVER_MODEL.*\\.env'):
                     make_server()
                 create.assert_not_called()
         disabled = {**role, 'harness2': {'enabled': False}}
         with patch.dict(os.environ, environment, clear=True), \
-             patch('ax_local.api.server.load_roles', return_value={'reviewer': disabled}), \
+             patch('ax_local.api.server.load_roles', return_value={'reviewer': disabled, 'planner': dict(disabled)}), \
              patch('ax_local.api.server.create_server') as create:
             make_server()
         runner = create.call_args.args[0]['omniroute_cloud']
@@ -50,7 +57,7 @@ class AxServerTests(unittest.TestCase):
                               'harness2': {'enabled': True}},
                  'backend': {'agent': 'omniroute_cloud', 'instructions': '', 'tools': []}}
         with patch.dict(os.environ, environment, clear=True), \
-             patch('ax_local.api.server.load_roles', return_value=roles), \
+             patch('ax_local.api.server.load_roles', return_value={**roles, 'planner': dict(roles['backend'])}), \
              patch('ax_local.api.server.create_server') as create:
             server = make_server()
         runner = create.call_args.args[0]['omniroute_cloud']
@@ -92,9 +99,9 @@ class AxServerTests(unittest.TestCase):
         self.assertEqual(roles['analyst']['agent'], 'omniroute_free')
         runners = create.call_args.args[0]
         self.assertEqual(set(runners), {'omniroute_free', 'omniroute_cloud', 'omniroute_ops'})
-        for name in ('backend_engineer', 'code_reviewer', 'qa_engineer'):
+        for name in ('backend_engineer', 'code_reviewer', 'qa_engineer', 'planner'):
             self.assertEqual(roles[name]['agent'], 'omniroute_cloud')
-        for name in ('chat', 'planner', 'tech_lead', 'cron_demo'):
+        for name in ('chat', 'tech_lead', 'cron_demo'):
             self.assertEqual(roles[name]['agent'], 'omniroute_free')
         self.assertEqual(runners['omniroute_free'].model, 'ax-free')
         self.assertEqual(runners['omniroute_cloud'].model, 'ax-ollama')
@@ -211,7 +218,7 @@ class AxServerTests(unittest.TestCase):
                  patch('ax_local.api.server.Path.read_text', return_value=json.dumps(profiles)), \
                  patch('ax_local.api.server.load_roles', return_value={
                      role: {'agent': provider, 'instructions': '', 'tools': []}
-                     for role in ('backend_engineer', 'code_reviewer')}), \
+                     for role in ('backend_engineer', 'code_reviewer', 'planner')}), \
                  patch('ax_local.api.server.create_server') as create:
                 make_server()
             runner = create.call_args.args[0][provider]

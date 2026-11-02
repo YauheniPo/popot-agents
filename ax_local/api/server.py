@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from popot_agents.orchestrator.main import AgentProfile, create_server, load_dotenv, load_roles
 from ax_local.config import AX_CONFIG
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.workflow_config import POLICY as WORKFLOW_POLICY, role_policy
 from .provider_proxy import network_address_toward, resolve_provider, start_proxy
 from .ax_runner import AxAgentRunner
 from .cron import CronScheduler
@@ -66,6 +67,11 @@ def make_server():
                        {name: AgentProfile(**profile) for name, profile in profiles.items()})
     if not roles:
         raise ValueError("AX requires at least one configured role")
+    if RUNTIME['mcp']['default_role'] not in roles:
+        raise ValueError('mcp.default_role must name a configured role')
+    depth = AX_CONFIG['delegation']['max_depth'] if AX_CONFIG['delegation']['enabled'] else 0
+    if any(role_policy(config) for config in roles.values()) and WORKFLOW_POLICY['max_concurrent'] * (depth + 1) > AX_CONFIG['max_workers']:
+        raise ValueError('workflow concurrency/delegation depth exceeds worker capacity')
     queue = WorkerQueue(AX_CONFIG['max_workers'], AX_CONFIG['worker_queue_timeout_seconds'])
     runners, routes = {}, {}
     for name in sorted({config['agent'] for config in roles.values()}):

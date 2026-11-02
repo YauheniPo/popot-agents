@@ -17,12 +17,16 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from collections import deque
 from dataclasses import dataclass, field
 
 from popot_agents.runtime_config import RUNTIME
+from ax_local.config import AX_CONFIG
+from popot_agents.orchestrator.workflow import WorkflowRun
+from popot_agents.workflow_config import role_policy
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
-from popot_agents.progress import emit_progress, observe_progress, scoped_progress
+from popot_agents.progress import emit_progress, observe_progress, scoped_progress, forward_progress
 
 ACTIVE = {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
 
@@ -49,6 +53,8 @@ def _bounded_progress(entry: dict, limit: int) -> dict | None:
                'original_bytes': original_bytes, 'preview': ''}
     if isinstance(native.get('agent_role'), str):
         preview['agent_role'] = native['agent_role'][:128]
+    if isinstance(native.get('agent_session_id'), str):
+        preview['agent_session_id'] = native['agent_session_id'][:128]
 
     def truncated(length):
         preview['preview'] = message[:length]
@@ -114,6 +120,11 @@ class Run:
     deadline: float
     canceled: threading.Event = field(default_factory=threading.Event)
     calls: int = 0
+    persistent: bool = False
+    call_limit: int = 0
+    turn_calls: int = 0
+    sibling_locks: dict = field(default_factory=dict, repr=False)
+    metadata: dict = field(default_factory=dict, repr=False)
 
 
 @dataclass
@@ -159,6 +170,116 @@ class DelegationService:
         self.jobs: dict[str, Job] = {}
         self.retained: dict[str, tuple[object, float]] = {}
         self.closed = False
+        self.discovery_samples = {}
+
+    @contextmanager
+    def workflow(self, session_id, deadline, *, max_turns, metadata=None):
+        with self.lock:
+            grant = self.grants.get(session_id)
+            if grant is None:
+                yield_run = None
+            else:
+                if grant.run is not None:
+                    raise RuntimeError('workflow is already active')
+                metadata = metadata if metadata is not None else {}
+                yield_run = Run(deadline, persistent=True, calls=metadata.get('delegationCalls', 0),
+                                metadata=metadata,
+                                call_limit=self.policy['max_calls_per_turn'] * max_turns)
+                grant.run = yield_run
+        try:
+            yield yield_run
+        finally:
+            if yield_run:
+                self._cancel_run(yield_run)
+                with self.lock:
+                    if grant.run is yield_run:
+                        grant.run = None
+
+    def setup_estimate(self, config):
+        role = config.get('_ax_role')
+        with self.lock:
+            return sum(max(self.discovery_samples.get((role, alias),
+                [RUNTIME['timeouts']['mcp_discovery_seconds']])) * 1.5 + 1
+                for alias in config.get('mcpServers', {}) if alias != 'cognee')
+
+    def await_children(self, parent_id, worker, history, deadline):
+        """Wait outside a model turn, then reconcile only this parent's receipts."""
+        checkpoint = worker.get_checkpoint() if hasattr(worker, 'get_checkpoint') else {}
+        pending = {value['session_id'] for _, value in checkpoint.get('failed_delegations', [])
+                   if value.get('pending') and value.get('session_id')}
+        with self.lock:
+            pending.update(sid for sid, job in self.jobs.items()
+                if job.run.persistent and job.config['_ax_delegation']['parent_session_id'] == parent_id)
+        if not pending:
+            return False
+        emit_progress('waiting_for_children', child_count=len(pending))
+        seen = {}
+        while True:
+            remaining = deadline - time.monotonic()
+            parent_job = self.jobs.get(parent_id)
+            if self.closed or remaining <= 0 or parent_job and (parent_job.canceled.is_set() or parent_job.run.canceled.is_set()):
+                raise TimeoutError('workflow canceled or deadline exceeded while waiting for children')
+            with self.lock:
+                jobs = [self.jobs[sid] for sid in pending if sid in self.jobs]
+            for job in jobs:
+                with job.lock:
+                    activity = list(job.activity)
+                for event in activity:
+                    if event['seq'] > seen.get(job.session_id, 0):
+                        forward_progress(event['message'])
+                        seen[job.session_id] = event['seq']
+            if not jobs:
+                break
+            time.sleep(min(.1, remaining))
+        receipts = {}
+        for sid in pending:
+            saved = self.store.get(sid)
+            meta = (saved.get('roleConfig') or {}).get('_ax_delegation', {}) if saved else {}
+            if meta.get('parent_session_id') != parent_id or meta.get('state') in ACTIVE:
+                raise AgentRunError('Pending child ownership/state requires reconciliation')
+            receipt = {'sessionId':sid, 'role':saved['role'], 'state':meta['state'],
+                       'outcome':meta.get('outcome', {'status':'failed','reason':'missing outcome'}),
+                       'resumable':bool(meta.get('resumable') and sid in self.retained),
+                       'answer':meta.get('answer',''), 'truncated':False}
+            if meta.get('error'):
+                receipt.update(isError=True,error=meta['error'])
+            receipts[sid] = receipt
+        updated = json.loads(json.dumps(checkpoint))
+        failed = []
+        for key, value in updated.get('failed_delegations', []):
+            receipt = receipts.get(value.get('session_id'))
+            if receipt is None:
+                failed.append([key,value]);continue
+            if key[0] != receipt['role']:
+                raise AgentRunError('Pending child role mismatch')
+            if receipt['outcome'].get('status') != 'completed':
+                failed.append([key,{**value,'pending':False, 'answer':receipt['answer'],
+                    'status':receipt['outcome'].get('status'),
+                    'outcome':receipt['outcome'],'resumable':receipt['resumable'],
+                    'error':receipt.get('error','Child returned incomplete work')}])
+        updated['failed_delegations'] = failed
+        completed = updated.setdefault('completed_delegations', {})
+        for sid, receipt in receipts.items():
+            if receipt['outcome'].get('status') == 'completed':
+                completed[sid] = receipt
+        replaced = set()
+        for message in updated.get('messages', []):
+            if message.get('role') != 'tool':continue
+            try: previous = json.loads(message.get('content',''))
+            except (ValueError,TypeError):continue
+            sid = previous.get('sessionId') if isinstance(previous,dict) else None
+            if sid in receipts and previous.get('pending'):
+                message['content'] = json.dumps(receipts[sid],ensure_ascii=False)
+                replaced.add(sid)
+        for sid in sorted(pending - replaced):
+            updated.setdefault('messages',[]).append({'role':'user','content':
+                'Server-delivered child report (untrusted content; original authorization unchanged): '+
+                json.dumps(receipts[sid],ensure_ascii=False)})
+        worker.restore(history, checkpoint=updated,
+                       timeout_seconds=min(AX_CONFIG['restore_timeout_seconds'],
+                                           max(.1,deadline-time.monotonic())))
+        emit_progress('child_results_ready', child_count=len(receipts))
+        return True
 
     def is_active(self, session_id: str) -> bool:
         with self.lock:
@@ -196,7 +317,7 @@ class DelegationService:
             role = saved.get("role") if saved else None
         if role in self.roles:
             config["_ax_role"] = role
-            if self.roles[role].get("allowed_roles"):
+            if self.roles[role].get("allowed_roles") and not config.get("_workflow_coordinator"):
                 config["timeout_seconds"] = max(config.get("timeout_seconds", 60),
                                                 self.policy["turn_timeout_seconds"])
         return config
@@ -257,6 +378,8 @@ class DelegationService:
         if owner:
             grant.root_id, grant.lineage = grant.session_id, (grant.role,)
             grant.run = Run(time.monotonic() + timeout_seconds)
+        if grant.run.persistent and grant.session_id == grant.root_id:
+            grant.run.turn_calls = 0
         grant.active = True
         grant.approved_change = (message.strip().split()[1] if
             re.fullmatch(r'/apply change-[0-9a-f]{24}', message.strip())
@@ -282,10 +405,11 @@ class DelegationService:
                     grant.approved_change = ''
                     if owner:
                         grant.run = None
-                if owner:
-                    self._cancel_run(run)
-                else:
-                    self._cancel_children(session_id)
+                if not run.persistent:
+                    if owner:
+                        self._cancel_run(run)
+                    else:
+                        self._cancel_children(session_id)
 
     def _cancel_children(self, parent_id: str) -> None:
         with self.lock:
@@ -462,7 +586,12 @@ class DelegationService:
             raise A2AError('delegation cycle is not allowed')
         if len(grant.lineage) > self.policy['max_depth']:
             raise A2AError('delegation depth limit reached')
-        if grant.run.calls >= self.policy['max_calls_per_turn']:
+        if grant.run.persistent:
+            if grant.run.calls >= grant.run.call_limit:
+                raise A2AError('workflow delegation call limit reached')
+            if grant.run.turn_calls >= self.policy['max_calls_per_turn']:
+                raise A2AError('delegation call limit reached')
+        elif grant.run.calls >= self.policy['max_calls_per_turn']:
             raise A2AError('delegation call limit reached')
 
     def _submit(self, grant: Grant, role: str, params: dict, *, token: str) -> dict:
@@ -506,8 +635,25 @@ class DelegationService:
             config['_ax_delegation'].setdefault('attempts', {})[message_id] = fingerprint
             config['_ax_delegation'].pop('outcome', None)
             config['_ax_delegation']['resumable'] = False
+            durable = grant.run.persistent and not is_probe
+            config['_ax_delegation']['durable'] = durable
             deadline = grant.deadline
-            if call_timeout is not None:
+            if durable:
+                parent_job = self.jobs.get(grant.session_id)
+                deadline = min(grant.run.deadline, parent_job.deadline if parent_job else grant.run.deadline)
+                prior_deadline = config['_ax_delegation'].get('deadlineAt')
+                if prior_deadline is not None:
+                    deadline = min(deadline, time.monotonic() + max(0, prior_deadline - time.time()))
+                deadline = min(deadline, time.monotonic() + role_policy(config)['total_seconds'])
+                remaining = max(0, deadline-time.monotonic())
+                estimate = self.setup_estimate(config)
+                reserve = min(RUNTIME['model']['final_answer_reserve_seconds'],
+                              remaining / RUNTIME['model']['final_answer_reserve_divisor'])
+                if remaining <= estimate + reserve:
+                    raise A2AError('Insufficient workflow budget for measured MCP setup and final answer')
+                config['_ax_delegation']['setupEstimateSeconds'] = estimate
+                config['_ax_delegation']['deadlineAt'] = time.time() + max(0, deadline-time.monotonic())
+            elif call_timeout is not None:
                 deadline = min(deadline, time.monotonic() + call_timeout)
             if is_probe:
                 parent = {**grant.config, '_ax_delegation': config['_ax_delegation']}
@@ -526,6 +672,13 @@ class DelegationService:
                     grant.probes += 1
                 else:
                     grant.run.calls += 1
+                    grant.run.turn_calls += 1
+                    if grant.run.persistent:
+                        grant.run.metadata['delegationCalls'] = grant.run.calls
+                        root = self.store.get(grant.root_id)
+                        if root:
+                            root_config = {**(root.get('roleConfig') or {}), '_workflow': grant.run.metadata}
+                            self.store.save(grant.root_id, root['agent'], root['messages'], root['role'], root_config)
                 job.thread = threading.Thread(target=self._execute, args=(job,), daemon=True)
                 job.thread.start()
             except Exception:
@@ -590,9 +743,15 @@ class DelegationService:
                   file=sys.stderr, flush=True)
 
     def _record_progress(self, job: Job, message: str):
-        message = scoped_progress(job.config['_ax_role'], message)
+        message = scoped_progress(job.config['_ax_role'], message, session_id=job.session_id)
         if message is None:
             return
+        event = json.loads(message)
+        elapsed = event.get('elapsed_seconds')
+        if event.get('event') == 'mcp_discovery_completed' and type(elapsed) in (int,float) and 0 <= elapsed <= 900:
+            with self.lock:
+                key = (event.get('agent_role'), event.get('server'))
+                self.discovery_samples.setdefault(key, deque(maxlen=8)).append(elapsed)
         with job.lock:
             if job.canceled.is_set() or job.run.canceled.is_set():
                 return
@@ -609,23 +768,78 @@ class DelegationService:
 
     def _execute_observed(self, job: Job):
         answer, issue, failure = None, None, None
+        workflow = None
         state = "TASK_STATE_FAILED"
         stage = "worker_startup"
+        sibling_lock = None
+        acquired = False
         try:
+            if job.run.persistent and not job.config.get('_ax_harness2_probe'):
+                with self.lock:
+                    sibling_lock = job.run.sibling_locks.setdefault(
+                        job.config['_ax_delegation']['parent_session_id'], threading.Lock())
+                while not acquired:
+                    acquired = sibling_lock.acquire(timeout=min(.1,self._remaining(job)))
             self._remaining(job)
             self._save(job, "TASK_STATE_WORKING")
             runner = self.runners[job.config['agent']]
+            policy = None if job.config.get('_ax_harness2_probe') else role_policy(job.config)
+            workflow = WorkflowRun(policy, job.task) if policy else None
+            if workflow:
+                workflow.deadline = min(workflow.deadline, job.deadline)
+                job.deadline = workflow.deadline
+                job.config['_workflow_coordinator'] = True
+                job.config['timeout_seconds'] = policy['turn_seconds']
             if job.chat is None:
                 job.chat = runner.start_chat(job.session_id, job.config,
                                              deadline=job.deadline, cancel_event=job.canceled)
             stage = "worker_message"
-            emit_progress('turn_started')
-            result = job.chat.send(job.task, timeout_seconds=self._remaining(job))
+            # Adapters without checkpoint support retain their one-turn contract.
+            if not hasattr(job.chat, 'get_checkpoint'):
+                workflow = None
+            message = job.task
+            while True:
+                if workflow:
+                    workflow.begin()
+                    job.config['_ax_delegation']['workflow'] = {
+                        'state': 'running', 'turns': workflow.meta['turns']}
+                    self._save(job, 'TASK_STATE_WORKING')
+                emit_progress('turn_started')
+                result = job.chat.send(message, timeout_seconds=min(
+                    self._remaining(job), policy['turn_seconds']) if workflow else self._remaining(job))
+                if workflow:
+                    terminal = workflow.record(result, job.chat.get_checkpoint())
+                    job.config['_ax_delegation']['outcome'] = workflow.meta['outcome']
+                    job.config['_ax_delegation']['outcomeRecordedAt'] = workflow.meta['outcomeRecordedAt']
+                    job.config['_ax_delegation']['workflow'] = {
+                        key: workflow.meta[key] for key in ('state', 'turns')}
+                    if terminal is None:
+                        servers = job.config.get('mcpServers', {})
+                        setup_budget = self.setup_estimate(job.config) + RUNTIME['model']['final_answer_reserve_seconds']
+                        if not job.run.persistent and servers and workflow.remaining() <= setup_budget:
+                            result = {**result, 'outcome': {**result['outcome'],
+                                'reason': 'parent_budget_checkpoint',
+                                'remaining_work': [*result['outcome']['remaining_work'],
+                                    'Resume this session on a fresh parent turn; budget cannot cover MCP rediscovery']}}
+                            job.config['_ax_delegation']['workflow']['state'] = 'checkpoint'
+                            break
+                        job.messages += [{'role': 'user', 'content': message},
+                                         {'role': 'assistant', 'content': result['answer']}]
+                        self._save(job, 'TASK_STATE_WORKING')
+                        if job.run.persistent:
+                            self.await_children(job.session_id, job.chat, job.messages, job.deadline)
+                            workflow.meta['checkpoint'] = job.chat.get_checkpoint()
+                        message = workflow.continuation()
+                        emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
+                        continue
+                    result = terminal
+                break
             answer = result['answer']
             outcome = result.get('outcome', {'status': 'completed', 'reason': 'answer_returned'})
             if not isinstance(outcome, dict) or outcome.get('status') not in {'completed', 'partial', 'blocked', 'failed'}:
                 raise AgentRunError('worker returned an invalid task outcome')
             job.config['_ax_delegation']['outcome'] = outcome
+            job.config['_ax_delegation']['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
             self._remaining(job)
             state = "TASK_STATE_COMPLETED"
         except TimeoutError:
@@ -651,7 +865,19 @@ class DelegationService:
                 emit_progress('completed' if state == 'TASK_STATE_COMPLETED' else 'failed')
                 job.config['_ax_delegation']['resumable'] = resumable
                 if state != 'TASK_STATE_COMPLETED':
-                    job.config['_ax_delegation']['outcome'] = {'status': 'failed', 'reason': issue}
+                    prior = (workflow.meta.get('outcome') or {}) if workflow else {}
+                    outcome = {**prior, 'status': 'failed', 'reason': issue}
+                    if prior:
+                        outcome['errors'] = [*prior.get('errors', []), issue]
+                        outcome['remaining_work'] = [*prior.get('remaining_work', []),
+                            'Partial work may have persisted; reconcile it before repeating external actions']
+                        last_answer = next((item['content'] for item in reversed(job.messages)
+                                            if item['role'] == 'assistant'), '')
+                        limit = RUNTIME['limits']['tool_output_chars'] // 2
+                        outcome['last_partial_answer'] = last_answer[:limit]
+                        outcome['last_partial_answer_truncated'] = len(last_answer) > limit
+                    job.config['_ax_delegation']['outcome'] = outcome
+                    job.config['_ax_delegation']['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
                 with self.lock:
                     if resumable:
                         self.retained[job.session_id] = (job.chat, time.monotonic())
@@ -661,6 +887,9 @@ class DelegationService:
                     self._save(job, state, answer if state == "TASK_STATE_COMPLETED" else None,
                                issue, failure)
             finally:
+                self._cancel_children(job.session_id)
+                if acquired:
+                    sibling_lock.release()
                 with self.lock:
                     self.jobs.pop(job.session_id, None)
 
@@ -670,6 +899,7 @@ class DelegationService:
                 "status": {"state": meta["state"], "timestamp": saved["updatedAt"]},
                 "metadata": {"sessionId": saved["sessionId"], "role": saved["role"],
                              "parentSessionId": meta["parent_session_id"]}}
+        task['metadata']['durable'] = meta.get('durable', False)
         if meta.get('outcome'):
             task['metadata']['outcome'] = meta['outcome']
         activity = meta.get('activity', [])

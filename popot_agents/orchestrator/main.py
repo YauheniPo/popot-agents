@@ -11,6 +11,8 @@ import threading
 import time
 import uuid
 import weakref
+import secrets
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +25,9 @@ from popot_agents.role_env import validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
 from .session_store import SessionStore
+from .work_status import build_work_status
+from popot_agents.workflow_config import role_policy
+from .workflow import POLICY, WorkflowRun, public_workflow, validate_policy, recover_workflows
 
 
 MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
@@ -120,7 +125,7 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
             raise ValueError(f"invalid role name: {name}")
         required = {"agent", "instructions", "tools"}
         optional = {"permissions", "mcpServers", "timeout_seconds", "max_tool_rounds",
-                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description", "name", "harness2", "memory_project"}
+                    "ttl_seconds", "allowed_roles", "cron", "env_names", "skills", "description", "name", "harness2", "memory_project", "coordination"}
         if not isinstance(config, dict) or not required.issubset(config) \
                 or set(config) - required - optional:
             raise ValueError(f"role {name} must define agent, instructions and tools")
@@ -129,6 +134,7 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
         if 'memory_project' in config and (not isinstance(config['memory_project'],str)
                 or not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}',config['memory_project'])):
             raise ValueError(f'role {name} has invalid memory_project')
+        role_policy(config)
         agent = config["agent"]
         if not isinstance(agent, str) or agent not in agents:
             raise ValueError(f"role {name} uses an unknown agent")
@@ -320,6 +326,8 @@ class ChatServer(ThreadingHTTPServer):
             return lock
 
     def service_actions(self) -> None:
+        if hook := getattr(self, 'workflow_recovery', None):
+            hook()
         for manager in getattr(self, "worker_managers", ()):
             manager.maintenance()
         now = time.monotonic()
@@ -371,6 +379,7 @@ class ChatServer(ThreadingHTTPServer):
                 lock.release()
 
     def server_close(self) -> None:
+        self._workflow_closing = True
         # Wake queued requests before ThreadingHTTPServer joins their threads.
         for manager in getattr(self, "worker_managers", ()):
             manager.shutdown_worker_queue()
@@ -380,6 +389,8 @@ class ChatServer(ThreadingHTTPServer):
             self.live.clear()
         for record in records:
             record.worker.close()
+        for thread in tuple(getattr(self, '_workflow_threads', ())):
+            thread.join(timeout=5)
 
 
 def create_server(
@@ -390,8 +401,12 @@ def create_server(
     idle_seconds: int = RUNTIME["sessions"]["default_idle_seconds"],
     roles: Mapping[str, dict] | None = None,
     store=None,
+    workflow_policy=None,
 ) -> ChatServer:
     roles = roles or {}
+    workflow_policy = validate_policy(workflow_policy or POLICY)
+    workflow_slots = threading.BoundedSemaphore(workflow_policy['max_concurrent'])
+    workflow_token = secrets.token_urlsafe(32)
     class Handler(BaseHTTPRequestHandler):
         def _log_request(self, body) -> None:
             self._request_id = uuid.uuid4().hex[:12]
@@ -481,8 +496,11 @@ def create_server(
                                       else None),
                         "updatedAt": saved["updatedAt"],
                         "turns": len(saved["messages"]) // 2,
-                        "status": statuses.get(saved["sessionId"], "stopped"),
+                        "status": statuses.get(saved["sessionId"], 'running' if
+                            ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('state')
+                            in {'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'} else 'stopped'),
                         "progress": progress.get(saved["sessionId"]),
+                        "workflow": public_workflow(saved),
                     }
                     for saved in self.server.store.list_chats()
                 ]})
@@ -510,14 +528,18 @@ def create_server(
                     with self.server.live_lock:
                         self.server.live.pop(session_id, None)
                     live = None
+                child_state = ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('state')
+                stored_status = 'running' if child_state in {'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'} else 'stopped'
                 self._reply(200, {
                     "sessionId": session_id, "agent": saved["agent"],
                     "role": saved.get("role"),
                     "createdAt": saved.get("createdAt", saved["updatedAt"]),
                     "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
                                   else None),
-                    "status": ("running" if busy else getattr(live.worker, "status", "running")) if live else "stopped",
+                    "status": ("running" if busy else getattr(live.worker, "status", "running")) if live else stored_status,
                     "progress": live.progress.snapshot() if live and live.progress else None,
+                    "workflow": public_workflow(saved, include_result=True),
+                    "work": build_work_status(saved, self.server.store.list_chats()),
                     "container": live.worker.container_name if live else None,
                     "workspace": self._workspace(saved, live),
                     "turns": len(saved["messages"]) // 2,
@@ -572,7 +594,8 @@ def create_server(
                 self._reply(404, {"error": "unknown agent"})
                 return
             if hasattr(agents[agent], "start_chat"):
-                self._message({"agent": agent, "role": role, "message": task.strip()})
+                self._message({"agent": agent, "role": role, "message": task.strip(),
+                               **({'requestId': payload['requestId']} if 'requestId' in payload else {})})
                 return
             result = agents[agent](task.strip(), role_config) if role_config else agents[agent](task.strip())
             if role_config:
@@ -582,14 +605,78 @@ def create_server(
         def _message(self, payload: dict) -> None:
             session_id = payload.get("sessionId")
             if session_id is None:
+                if (isinstance(payload.get('role'), str)
+                        and role_policy(roles.get(payload['role']), workflow_policy)) and not self._workflow_request(
+                        payload, payload.get('message', '').strip() if isinstance(payload.get('message'), str) else None):
+                    return
                 new_session_id = uuid.uuid4().hex[:16]
                 with self.server.session_lock(new_session_id):
-                    self._message_locked(payload, new_session_id)
+                    self._coordinated_message(payload, new_session_id)
             elif isinstance(session_id, str):
+                saved = self.server.store.get(session_id)
+                meta = (saved.get('roleConfig') or {}).get('_workflow') if saved else None
+                recovering = secrets.compare_digest(self.headers.get('X-Popot-Workflow-Recovery', ''), workflow_token)
+                if meta and not recovering:
+                    if not self._workflow_request(payload, payload.get('message'), saved):
+                        return
+                    if meta.get('state') == 'running':
+                        self._reply(409, {'error': 'workflow is already running; read get_chat instead',
+                                          'sessionId': session_id})
+                        return
                 with self.server.session_lock(session_id):
-                    self._message_locked(payload)
+                    self._coordinated_message(payload)
             else:
                 self._message_locked(payload)
+
+        def _workflow_request(self, payload, message, saved=None):
+            request_id = payload.get('requestId')
+            if request_id is None:
+                return True
+            if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 256:
+                self._reply(400, {'error': 'requestId must be a nonempty string up to 256 characters'})
+                return False
+            candidates = [saved] if saved else self.server.store.list_chats()
+            for item in candidates:
+                meta = (item.get('roleConfig') or {}).get('_workflow', {})
+                if meta.get('request_id') != request_id:
+                    continue
+                if meta.get('original_task') != message or (payload.get('role') is not None
+                        and payload['role'] != item.get('role')):
+                    self._reply(409, {'error': 'requestId belongs to another task or role'})
+                elif meta.get('state') == 'running':
+                    self._reply(409, {'error': 'workflow is already running; read get_chat instead',
+                                      'sessionId': item['sessionId']})
+                else:
+                    result = public_workflow(item, include_result=True)['result']
+                    self._reply(200, {'sessionId': item['sessionId'], 'role': item.get('role'),
+                                      'agent': item['agent'], **result})
+                return False
+            return True
+
+        def _coordinated_message(self, payload, new_session_id=None):
+            saved = self.server.store.get(payload['sessionId']) if isinstance(payload.get('sessionId'), str) else None
+            role = saved.get('role') if saved else payload.get('role')
+            config = saved.get('roleConfig') if saved else roles.get(role) if isinstance(role, str) else None
+            selected_policy = role_policy(config, workflow_policy, stored=bool(saved)) if role is not None else None
+            if selected_policy is None:
+                return self._message_locked(payload, new_session_id)
+            if not workflow_slots.acquire(blocking=False):
+                self._reply(429, {'error': 'autonomous workflow capacity reached'})
+                return
+            try:
+                previous = (saved.get('roleConfig') or {}).get('_workflow', {}) if saved else {}
+                recovering = secrets.compare_digest(self.headers.get('X-Popot-Workflow-Recovery', ''), workflow_token)
+                if recovering and (previous.get('state') != 'running' or previous.get('phase') != 'checkpoint'):
+                    self._reply(409, {'error': 'workflow checkpoint is no longer pending'})
+                    return
+                self._workflow = WorkflowRun(selected_policy, payload.get('message', ''), previous if recovering else None)
+                if payload.get('requestId'):
+                    self._workflow.meta['request_id'] = payload['requestId']
+                if isinstance(previous.get('checkpoint'), dict):
+                    self._workflow.meta['checkpoint'] = previous['checkpoint']
+                self._message_locked(payload, new_session_id)
+            finally:
+                workflow_slots.release()
 
         def _message_locked(self, payload: dict, new_session_id: str | None = None) -> None:
             message = payload.get("message")
@@ -616,7 +703,12 @@ def create_server(
                 session_id = new_session_id
                 if getattr(agents[agent], "retain_session_history", False):
                     role_config = {**(role_config or {}), "_retain_history": True}
-                worker = (agents[agent].start_chat(session_id, role_config) if role_config
+                worker_config = {k: v for k, v in (role_config or {}).items() if k != '_workflow'}
+                if getattr(self, '_workflow', None):
+                    worker_config['_workflow_coordinator'] = True
+                    worker_config['timeout_seconds'] = self._workflow.policy['turn_seconds']
+                worker_kwargs = {'deadline': self._workflow.deadline} if getattr(self, '_workflow', None) else {}
+                worker = (agents[agent].start_chat(session_id, worker_config, **worker_kwargs) if worker_config
                           else agents[agent].start_chat(session_id))
                 record = ChatRecord(agent, worker, [], role, role_config)
                 with self.server.live_lock:
@@ -676,10 +768,19 @@ def create_server(
                         self.server.live.pop(session_id, None)
                     record = None
                 if record is None:
-                    worker = (agents[agent].start_chat(session_id, role_config) if role_config
+                    worker_config = {k: v for k, v in (role_config or {}).items() if k != '_workflow'}
+                    if getattr(self, '_workflow', None):
+                        worker_config['_workflow_coordinator'] = True
+                        worker_config['timeout_seconds'] = self._workflow.policy['turn_seconds']
+                    worker_kwargs = {'deadline': self._workflow.deadline} if getattr(self, '_workflow', None) else {}
+                    worker = (agents[agent].start_chat(session_id, worker_config, **worker_kwargs) if worker_config
                               else agents[agent].start_chat(session_id))
                     try:
-                        worker.restore(saved["messages"])
+                        checkpoint = (role_config or {}).get('_workflow', {}).get('checkpoint')
+                        if isinstance(checkpoint, dict):
+                            worker.restore(saved['messages'], checkpoint=checkpoint)
+                        else:
+                            worker.restore(saved["messages"])
                     except Exception:
                         worker.close()
                         raise
@@ -687,34 +788,83 @@ def create_server(
                     with self.server.live_lock:
                         self.server.live[session_id] = record
             with self.server.live_lock:
-                record.progress = TurnProgress()
+                record.progress = TurnProgress(session_id)
                 self._turn_progress = record.progress
+            scope = ExitStack()
+            delegation = getattr(agents[record.agent], 'delegation', None)
             try:
-                emit_progress('turn_started')
-                result = record.worker.send(message.strip())
-                history = record.messages + [
-                    {"role": "user", "content": message.strip()},
-                    {"role": "assistant", "content": result["answer"]},
-                ]
-                emit_progress('saving')
-                self.server.store.save(session_id, record.agent, history,
-                                       record.role, role_config)
-                record.messages = history
-                record.role_config = role_config
-                record.last_used = time.monotonic()
+                workflow = getattr(self, '_workflow', None)
+                if workflow and delegation:
+                    scope.enter_context(delegation.workflow(session_id, workflow.deadline,
+                                        max_turns=workflow.policy['max_turns'], metadata=workflow.meta))
+                    delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
+                while True:
+                    if workflow:
+                        if workflow.remaining() < 1 or workflow.meta['turns'] >= workflow.policy['max_turns']:
+                            result = workflow.stop({'answer': 'Autonomous workflow time budget exhausted'},
+                                                   'workflow_budget_exhausted')
+                            role_config = {**(role_config or {}), '_workflow': workflow.meta}
+                            self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
+                            break
+                        workflow.begin()
+                        role_config = {**(role_config or {}), '_workflow': workflow.meta}
+                        self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
+                    emit_progress('turn_started')
+                    result = (record.worker.send(message.strip(), timeout_seconds=min(
+                        workflow.policy['turn_seconds'], workflow.remaining())) if workflow
+                        else record.worker.send(message.strip()))
+                    terminal = result
+                    if workflow:
+                        checkpoint = record.worker.get_checkpoint() if hasattr(record.worker, 'get_checkpoint') else None
+                        terminal = workflow.record(result, checkpoint)
+                        if terminal is not None:
+                            result = terminal
+                    history = record.messages + [
+                        {"role": "user", "content": message.strip()},
+                        {"role": "assistant", "content": result["answer"]},
+                    ]
+                    emit_progress('saving')
+                    self.server.store.save(session_id, record.agent, history, record.role, role_config)
+                    record.messages, record.role_config = history, role_config
+                    record.last_used = time.monotonic()
+                    if terminal is not None:
+                        break
+                    emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
+                    if delegation:
+                        delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
+                        workflow.meta['checkpoint'] = record.worker.get_checkpoint()
+                        self.server.store.save(session_id, record.agent, history, record.role, role_config)
+                    try:
+                        message = workflow.continuation()
+                    except ValueError:
+                        result = workflow.stop(result, 'workflow_context_limit')
+                        self.server.store.save(session_id, record.agent, history, record.role, role_config)
+                        break
                 if hasattr(record.worker, "after_turn"):
                     record.worker.after_turn()
             except AgentRunError:
+                if workflow := getattr(self, '_workflow', None):
+                    workflow.stop({'answer': 'Worker execution interrupted; reconcile effects before retrying',
+                                   'outcome': workflow.meta.get('outcome')},
+                                  'workflow_execution_uncertain')
+                    self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
                 if not record.worker.is_alive():
                     record.worker.close()
                     with self.server.live_lock:
                         self.server.live.pop(session_id, None)
                 raise
             except (subprocess.TimeoutExpired, OSError):
+                if workflow := getattr(self, '_workflow', None):
+                    workflow.stop({'answer': 'Worker execution interrupted; reconcile effects before retrying',
+                                   'outcome': workflow.meta.get('outcome')},
+                                  'workflow_execution_uncertain')
+                    self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
                 record.worker.close()
                 with self.server.live_lock:
                     self.server.live.pop(session_id, None)
                 raise
+            finally:
+                scope.close()
             self._reply(200, {
                 "sessionId": session_id, "container": record.worker.container_name,
                 "answer": result["answer"], "role": record.role, "agent": record.agent,
@@ -790,4 +940,7 @@ def create_server(
     server.worker_managers = tuple({id(runner): runner for runner in agents.values()
         if getattr(runner, "queues_worker_start", False)
         and hasattr(runner, "shutdown_worker_queue")}.values())
+    server._workflow_recovering = set()
+    server._workflow_threads = set()
+    server.workflow_recovery = lambda: recover_workflows(server, workflow_policy, workflow_token)
     return server

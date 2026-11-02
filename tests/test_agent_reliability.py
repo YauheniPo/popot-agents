@@ -14,6 +14,27 @@ from popot_agents.worker.delegation_policy import delegation_instructions
 
 
 class AgentReliabilityTests(unittest.TestCase):
+    def test_coordinator_keeps_checkpoint_when_claimed_completion_has_no_evidence(self):
+        message = self.result()
+        report = json.loads(message['content']); report['evidence'] = []
+        message['content'] = json.dumps(report)
+        _, state, _ = self.run_sequence([message], role={'_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertTrue(state['messages'])
+
+    def test_coordinator_cannot_finish_implementation_without_review_and_qa_receipts(self):
+        state = {'messages': [{'role': 'user', 'content': 'Implement a fix'}],
+                 'outcome': {'status': 'partial'},
+                 'completed_delegations': {'a'*16: {'sessionId': 'a'*16,
+                     'role': 'backend_engineer', 'answer': 'Patch ready',
+                     'outcome': {'status': 'completed', 'evidence': ['patch'],
+                                 'remaining_work': [], 'errors': []}}}}
+        _, state, _ = self.run_sequence([self.result()], state=state,
+            role={'name': 'planner', '_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertIn('code_reviewer', ' '.join(state['outcome']['remaining_work']))
+        self.assertIn('qa_engineer', ' '.join(state['outcome']['remaining_work']))
+
     def test_review_routing_depends_on_available_role_and_current_owner(self):
         from ax_local.worker.delegation import make_tools
         for role, allowed, delegate_review in (
@@ -60,6 +81,17 @@ class AgentReliabilityTests(unittest.TestCase):
     def delegate_call():
         return {'tool_calls': [{'id': 'qa', 'function': {'name': 'delegate_task',
             'arguments': json.dumps({'role': 'qa_engineer', 'task': 'Run the required tests'})}}]}
+
+    def test_durable_pending_child_yields_without_another_model_round(self):
+        from unittest.mock import Mock
+        delegate=Mock(return_value=json.dumps({'sessionId':'a'*16,'role':'qa_engineer',
+            'state':'TASK_STATE_WORKING','pending':True,'resumable':False,
+            'outcome':{'status':'partial','reason':'child_running','evidence':[],
+                       'errors':[],'remaining_work':['await child']}}))
+        _,state,bodies=self.run_sequence([self.delegate_call()],delegate=delegate)
+        self.assertEqual(len(bodies),1)
+        self.assertEqual(state['outcome']['reason'],'child_pending')
+        self.assertTrue(state['failed_delegations'][0][1]['pending'])
 
     def test_partial_parent_result_finishes_without_forcing_another_child_run(self):
         from unittest.mock import Mock

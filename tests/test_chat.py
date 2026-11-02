@@ -26,11 +26,12 @@ class FakeChat:
         self.closed = False
         self.restored = []
 
-    def send(self, message):
+    def send(self, message, **_kwargs):
         if message == "fail":
             raise AgentRunError("provider failed")
         self.messages.append(message)
-        return {"answer": f"turn {len(self.messages)}"}
+        return {"answer": f"turn {len(self.messages)}", "outcome": {"status": "completed",
+            "evidence": ["worker response"], "remaining_work": [], "errors": []}}
 
     def close(self):
         self.closed = True
@@ -50,7 +51,7 @@ class FakeRunner:
     def __call__(self, task):
         return {"answer": task}
 
-    def start_chat(self, chat_id, role_config=None):
+    def start_chat(self, chat_id, role_config=None, **_kwargs):
         chat = FakeChat(f"worker-{chat_id}")
         self.chats.append(chat)
         return chat

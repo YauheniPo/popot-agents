@@ -89,6 +89,7 @@ class TurnMemory:
         self.saved_count = 0
         self.session_started = False
         self.run_complete = True
+        self.warnings = []
         if self.enabled:
             self.client = client or CogneeMemory(
                 env.get('COGNEE_API_URL', 'http://host.docker.internal:3001'),
@@ -105,6 +106,8 @@ class TurnMemory:
                 'dataset_name': self.dataset, 'role': self.role, 'status': 'running'})
             self.session_started = True
         except Exception as exc:
+            self.enabled = False
+            self.warnings.append('Project memory is unavailable; main work continues without memory.')
             trace('memory_session_failed', phase='start', error_type=type(exc).__name__, error=scrub(str(exc)))
 
     def record_usage(self, result):
@@ -175,6 +178,8 @@ class TurnMemory:
                 return (render_prompt('memory/context') + '\n'
                         + json.dumps(chunks, ensure_ascii=False)[:RUNTIME["memory"]["context_chars"]])
         except Exception as exc:
+            self.enabled = False
+            self.warnings.append('Project memory recall failed; using current sources and tools.')
             self.tools.append({'name': 'cognee.recall', 'status': 'error', 'output_chars': 0})
             trace('memory_recall_failed', dataset=self.dataset, error_type=type(exc).__name__,
                   error=scrub(str(exc))[:500])

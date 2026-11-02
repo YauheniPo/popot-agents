@@ -182,7 +182,7 @@ The optional `nous` profile retains its provider-default reasoning setting,
 but Solar Mini 4 is excluded from AX combos after malformed tool arguments in
 the 2026-10-20 experiment.
 Ollama's configured `qwen2.5-coder:14b` does not advertise a separate thinking
-mode. Backend, frontend, code review and QA use `omniroute_cloud` with
+mode. Planner, backend, frontend, code review and QA use `omniroute_cloud` with
 `OMNIROUTE_CLOUD_MODEL=ax-ollama`. The AX provider proxy forwards requests to
 OmniRoute, which selects the configured Ollama Cloud targets. Direct profiles
 remain available for explicit assignments.
@@ -290,8 +290,62 @@ The gateway exposes `run_task`, `send_message`, `list_chats` and `get_chat`.
 For a copyable request:
 
 ```bash
-curl -N --fail-with-body -sS 'http://127.0.0.1:8003/mcp' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-11-25' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"progressToken":"task-1"},"name":"run_task","arguments":{"role":"backend_engineer","task":"Describe the tools available to you."}}}'
+curl -N --fail-with-body -sS 'http://127.0.0.1:8003/mcp' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-11-25' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"progressToken":"task-1"},"name":"run_task","arguments":{"task":"Describe the tools available to you."}}}'
 ```
+
+MCP accepts any configured `role` (or explicit agent profile). When omitted,
+`config/runtime.json → mcp.default_role` selects the role (`planner` by default).
+Every role coordinates its task automatically, including delegated child roles.
+Each agent may select other roles from `allowed_roles`, collect their results,
+continue recoverable partial work, and return its accepted result to its parent.
+Each configured role has a team-specific delegation list; cycles are rejected and
+the A2A depth limit still applies. Tools and external-system permissions remain
+specific to each specialist.
+
+Optional per-role overrides in `config/roles/<role>.json` contain limits only:
+
+```json
+"coordination": {"turn_seconds": 900, "max_turns": 4}
+```
+
+There is no enable/disable switch. Missing overrides use shared defaults.
+Nested coordinators inherit their parent's deadline; their loops use the same
+worker pool and do not acquire another root workflow slot. A child returns its
+result to the parent that called it, so only the root responds to the MCP client.
+Child tasks belong to the server-side workflow rather than one model turn.
+Delegation returns a pending receipt; the parent checkpoints, the server waits,
+then delivers the child's result into that same parent's next turn. Waiting uses
+the workflow deadline, not its 900-second model-turn budget. Siblings are queued
+before acquiring workers, while nested coordination can continue.
+Cancellation of the workflow cancels its outstanding children. Delegation calls
+are bounded per root turn and by `max_calls_per_turn * workflow.max_turns` across
+the operation; the latter counter survives checkpoint recovery.
+
+Cognee is optional: discovery or memory-service outages produce warnings while
+available GitHub and shell tools continue. Live workers cache discovered MCP
+schemas across turns, invalidating them on configuration/credential changes or
+tool transport failure. Connections are still opened per call; writes are never
+automatically replayed. New-stage admission uses recent measured MCP discovery
+times with a safety margin, falling back to cold-start discovery timeouts when
+there are no observations. Cognee is excluded from this required-tool estimate.
+
+[config/runtime.json](config/runtime.json) → `workflow` supplies shared defaults: four turns,
+900 seconds per turn, 3600 seconds including startup, two unchanged partial
+outcomes without new tool receipts before stopping, and one concurrent workflow.
+Roles may override `max_turns`, `total_seconds`, `turn_seconds` and `max_no_progress`.
+`max_concurrent` is always server-wide. `partial` resumes internally from the
+checkpoint; blockers and failures return immediately. Completion requires reported
+evidence; delegated implementation also requires completed reviewer and QA receipts.
+The owning role must check that evidence matches the current revision.
+
+Check `get_chat(session_id).workflow` for the durable state and terminal
+`result`, including after client disconnect. Session metadata stores checkpoints.
+After API restart, completed-turn checkpoints resume automatically; an interrupted
+in-flight operation becomes blocked for reconciliation rather than being replayed.
+MCP `callId` metadata deduplicates the latest workflow request (HTTP `requestId`);
+reuse with different input is rejected. This is not an unlimited request history.
+Set the client's tool timeout above the workflow budget (4500 seconds in Codex)
+and reconnect after changing MCP settings or tool descriptions.
 
 A nonempty `progressToken` enables MCP progress notifications carrying harness
 and delegated-agent events. An empty or omitted token disables those notifications;
@@ -311,6 +365,26 @@ concurrent session's progress to the task. Arguments, output and reasoning are
 excluded from this snapshot. It resets each turn and exists only while the API
 retains the live session; after restart or eviction it is `null`. A completed
 progress state means the turn ended, not that its task passed verification.
+
+`get_chat` also returns `work`, a durable snapshot of the root and its children.
+Each task has a source session/role, execution state, `coordinatorTurns`, last
+reported outcome (`evidence`, `remaining_work`, `errors`), `reportedAt` and typed
+commit/PR/CI references. Partial receipts are saved before the next child turn,
+so a published commit can be visible while QA is still running. Failed parents
+and siblings do not erase these receipts. Reports survive API restart.
+
+These are worker reports, not independently refreshed GitHub/CI observations.
+A reference URL alone does not prove publication or CI success. `timeSource`
+distinguishes an outcome timestamp from a legacy session-update timestamp.
+The snapshot is capped at 8 tasks and 16 KiB, with explicit truncation markers;
+raw commands, stdout, diffs, prompts and reasoning are excluded.
+
+Progress actions/errors include `observedAt`, sequence and originating
+`agent_session_id`. `eventsAfterLastError` counts subsequent activity and does
+not establish that the error was resolved. Recoverable delegation-input and
+MCP errors include a short redacted message. The top-level `turns` still counts
+saved conversation answers; `workflow.turns` and each task's `coordinatorTurns`
+represent coordinator turns.
 
 Requests can select a role, but cannot override its command, credentials or
 permissions. Keep this local endpoint restricted to trusted callers; it has no
@@ -368,10 +442,10 @@ The feature team roles are:
 | `project_operator` | Analyze local services, model routing, metrics, memory and pods; prepare and apply reviewed local changes | Real Holmes jobs, project inspection/change tools, PromQL and Cognee memory; no shell or worker admin credentials |
 
 The `chat` and `analyst` roles also remain available. `analyst` uses the
-`omniroute_free` profile; backend, frontend, code review and QA use `omniroute_cloud`. Change a role's `agent` field to another configured
+`omniroute_free` profile; planner, backend, frontend, code review and QA use `omniroute_cloud`. Change a role's `agent` field to another configured
 profile if needed, and set that profile's model and credentials in `.env`.
 
-Select `planner` or `qa_engineer` in the MCP request above to use those roles.
+Select any configured role explicitly; its coordination settings determine whether it owns an autonomous workflow.
 
 Harness² uses isolated AX trial executions for analyst and frontend roles
 before the main task. Backend, reviewer and QA roles start directly by default;

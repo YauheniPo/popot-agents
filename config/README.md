@@ -8,11 +8,11 @@
 | [monitoring.json](monitoring.json) | Настройки Grafana/Prometheus и секции `resources` для Grafana, Prometheus, kube-state-metrics и OTEL |
 | [holmes.json](holmes.json) | Бюджет шагов и токенов, параметры LLM, ресурсы Job, deadline, время хранения завершённых Job и адрес шлюза Holmes |
 | [omniroute/combos.json](omniroute/combos.json) | Состав, порядок моделей и бюджеты fallback для `ax-free` и `ax-ollama` |
-| [omniroute/settings.json](omniroute/settings.json) | Настройки шлюза, провайдеры, cooldown/circuit breaker и разрешения ключа AX |
+| [omniroute/settings.json](omniroute/settings.json) | Настройки шлюза, лимиты логирования, провайдеры, cooldown/circuit breaker и разрешения ключа AX |
 | [agents.json](agents.json) | Профили провайдеров, endpoint, имя переменной модели, параметры запросов |
 | [roles/](roles/) | Роли, инструкции, инструменты, память, делегирование, Harness² и бюджеты выполнения |
 | [prompts/](prompts/) | Markdown-шаблоны общих инструкций: делегирование, ревью, отчёт, память, Harness2, skills и Holmes |
-| [runtime.json](runtime.json) | Общие таймауты, ограничения сообщений/инструментов, память и разрешённые имена env |
+| [runtime.json](runtime.json) | Роль MCP по умолчанию (`mcp.default_role`), лимиты координации (`workflow`), общие таймауты, ограничения сообщений/инструментов, память и разрешённые имена env |
 | [../ax_local/config.json](../ax_local/config.json) | Контекст kind, namespace/workers, ресурсы AX Task, прокси и backend сессий |
 | [../pyproject.toml](../pyproject.toml) | Версии образов и зависимостей, включая OmniRoute, Cognee, Holmes, Grafana и kube-state-metrics |
 
@@ -92,3 +92,11 @@ bash ax_local/up.sh
 применяет его после `/apply change-...` в том же чате. При изменении ресурсов
 оператор сохраняет остальные настройки сервисов в `monitoring.json`. Остальные
 настройки редактируются пользователем; оператору доступны только перечисленные операции.
+
+Каждая роль координирует задачу автоматически, включая дочерние роли; переключателя
+enable/disable нет. Общие лимиты берутся из `runtime.json → workflow`; необязательный блок
+`"coordination": {"turn_seconds": 900}` в роли переопределяет `max_turns`,
+`total_seconds`, `turn_seconds`, `max_no_progress`. `max_concurrent` остаётся общим
+лимитом корневых задач сервера. Дочерние координаторы наследуют deadline родителя.
+Каждая роль делегирует только специалистам своего `allowed_roles`, согласно обязанностям; циклы запрещены,
+глубина ограничена A2A. Инструменты и внешние разрешения ролей сохраняются.

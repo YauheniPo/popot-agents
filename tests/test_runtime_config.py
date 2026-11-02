@@ -10,6 +10,43 @@ from unittest.mock import patch
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_workflow_limits_live_in_runtime_and_custom_config_controls_policy(self):
+        from popot_agents.runtime_config import load_runtime_config
+        settings = load_runtime_config()
+        self.assertEqual(settings['workflow']['turn_seconds'], 900)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'runtime.json'
+            settings['workflow']['max_turns'] = 7
+            path.write_text(json.dumps(settings))
+            result = subprocess.run([sys.executable, '-c',
+                'from popot_agents.workflow_config import POLICY; print(POLICY["max_turns"])'],
+                env={**os.environ, 'POPOT_RUNTIME_CONFIG': str(path)}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), '7')
+            for key, value in (('max_turns', 0), ('max_concurrent', True),
+                               ('turn_seconds', settings['timeouts']['max_turn_seconds'] + 1),
+                               ('total_seconds', 1)):
+                invalid = json.loads(json.dumps(settings))
+                invalid['workflow'][key] = value
+                path.write_text(json.dumps(invalid))
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'workflow'):
+                    load_runtime_config(path)
+
+    def test_default_mcp_role_is_configurable_and_validated(self):
+        from popot_agents.runtime_config import load_runtime_config
+        settings = load_runtime_config()
+        self.assertEqual(settings['mcp']['default_role'], 'planner')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'runtime.json'
+            for value in ('backend_engineer', '', None, True, 'bad role'):
+                settings['mcp']['default_role'] = value
+                path.write_text(json.dumps(settings))
+                if value == 'backend_engineer':
+                    self.assertEqual(load_runtime_config(path)['mcp']['default_role'], value)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'default_role'):
+                        load_runtime_config(path)
+
     def test_native_reasoning_effort_is_validated(self):
         from popot_agents.runtime_config import validate_model_parameters
 
@@ -26,7 +63,7 @@ class RuntimeConfigTests(unittest.TestCase):
         from popot_agents.runtime_config import load_runtime_config
 
         settings = load_runtime_config()
-        settings['mcp'] = {'discovery_attempts': 1, 'discovery_backoff_seconds': .25}
+        settings['mcp'].update(discovery_attempts=1, discovery_backoff_seconds=.25)
         settings['timeouts'].update(mcp_http_seconds=11.5, mcp_sse_read_seconds=45.25)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'runtime.json'

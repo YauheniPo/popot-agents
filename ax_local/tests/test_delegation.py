@@ -299,7 +299,12 @@ class DelegationTests(unittest.TestCase):
         self.assertTrue(completed.is_set(), received)
         self.assertEqual(result.get('state'), 'TASK_STATE_COMPLETED', result)
         self.assertEqual(sum(json.loads(m).get('agent_role') == 'qa_engineer' and json.loads(m).get('name') == 'mcp__github__pull_request_read' for m in received), 1)
-        self.assertIn({'event': 'model_request', 'agent_role': 'backend_engineer'}, [json.loads(m) for m in received])
+        events = [json.loads(message) for message in received]
+        self.assertTrue(any(event.get('event') == 'model_request' and
+            event.get('agent_role') == 'backend_engineer' and
+            event.get('agent_session_id') == self.runner.chats[0].session_id for event in events))
+        self.assertTrue(any(event.get('name') == 'mcp__github__pull_request_read' and
+            event.get('agent_session_id') == self.runner.chats[1].session_id for event in events))
         self.assertNotIn('PRIVATE', json.dumps(received))
         wait_for(lambda: not self.service.jobs)
         self.assertTrue(all(chat.closed for chat in self.runner.chats))
@@ -399,13 +404,14 @@ class DelegationTests(unittest.TestCase):
         with patch.dict(RUNTIME['limits'], {'history_bytes': 8192}):
             for index in range(10):
                 self.service._record_progress(job, json.dumps({
-                    'event': 'assistant_reasoning', 'agent_role': 'qa_engineer',
+                    'event': 'assistant_reasoning', 'agent_role': 'qa_engineer', 'agent_session_id': 'd'*16,
                     'reasoning_details': [{'text': '🧪\\"\n' * 5000}], 'index': index}, ensure_ascii=False))
         self.assertTrue(job.activity)
         self.assertLessEqual(len(json.dumps(list(job.activity)).encode()), 2048)
         self.assertEqual(job.activity[-1]['seq'], 10)
         event = json.loads(job.activity[-1]['message'])
         self.assertEqual(event['agent_role'], 'qa_engineer')
+        self.assertEqual(event['agent_session_id'], 'd'*16)
         self.assertTrue(event['truncated'])
 
 
@@ -429,6 +435,260 @@ class DelegationTests(unittest.TestCase):
             with self.assertRaisesRegex(A2AError, "different"):
                 self.send(task="changed input")
         self.assertEqual(len(self.runner.chats), 1)
+
+    def test_workflow_child_survives_parent_turn_and_finishes_before_parent_resumes(self):
+        entered, release = threading.Event(), threading.Event()
+        def callback(chat, task):
+            entered.set()
+            release.wait(2)
+            return {'answer':'child checked', 'outcome':{'status':'completed',
+                'evidence':['child receipt'], 'errors':[], 'remaining_work':[]}}
+        self.runner.callback = callback
+        with self.service.workflow(self.parent, time.monotonic()+5, max_turns=4):
+            with self.service.turn(self.parent, .1):
+                task=self.send(); self.assertTrue(entered.wait(1))
+                job=self.service.jobs[task['id']]
+                self.assertGreater(job.deadline, self.service.grants[self.parent].deadline)
+                self.assertTrue(task['metadata']['durable'])
+            self.assertFalse(job.canceled.is_set())
+            release.set()
+            class Parent:
+                def get_checkpoint(inner):
+                    return {'messages':[{'role':'tool','content':json.dumps({'sessionId':task['id'],'pending':True})}],
+                        'failed_delegations':[[['backend_engineer','implement'],{'session_id':task['id'],'pending':True}]],
+                        'outcome':{'status':'partial'}}
+                def restore(inner, history, **options): inner.checkpoint=options['checkpoint']
+            parent=Parent()
+            self.assertTrue(self.service.await_children(self.parent,parent,[],time.monotonic()+3))
+            self.assertEqual(parent.checkpoint['failed_delegations'],[])
+            self.assertEqual(parent.checkpoint['completed_delegations'][task['id']]['outcome']['status'],'completed')
+            self.assertEqual(json.loads(parent.checkpoint['messages'][0]['content'])['state'],'TASK_STATE_COMPLETED')
+
+    def wait_task_internal(self, sid):
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline:
+            saved=self.store.get(sid)
+            if saved['roleConfig']['_ax_delegation']['state'] not in {'TASK_STATE_SUBMITTED','TASK_STATE_WORKING'}:
+                return self.service._task(saved)
+            time.sleep(.01)
+        self.fail('durable task did not finish')
+
+    def test_server_delivered_blocker_updates_pending_failure_status(self):
+        self.runner.callback = lambda *_: {'answer':'Need a decision', 'outcome':{
+            'status':'blocked','evidence':[],'errors':[],'remaining_work':['User decision']}}
+        with self.service.workflow(self.parent,time.monotonic()+5,max_turns=4):
+            with self.service.turn(self.parent,.1): task=self.send()
+            class Parent:
+                def get_checkpoint(inner): return {'failed_delegations':[[
+                    ['backend_engineer','implement'], {'session_id':task['id'],
+                        'pending':True,'status':'partial'}]]}
+                def restore(inner, history, **options): inner.checkpoint=options['checkpoint']
+            parent=Parent()
+            self.service.await_children(self.parent,parent,[],time.monotonic()+3)
+            failure=parent.checkpoint['failed_delegations'][0][1]
+            self.assertEqual(failure['status'],'blocked')
+            self.assertFalse(failure['pending'])
+
+    def test_durable_workflow_end_cancels_child_and_siblings_do_not_consume_workers(self):
+        entered,release=threading.Event(),threading.Event()
+        def callback(chat,task):
+            entered.set();release.wait(2)
+            return {'answer':'done'}
+        self.runner.callback=callback
+        try:
+            with self.service.workflow(self.parent,time.monotonic()+5,max_turns=2):
+                with self.service.turn(self.parent,.1):
+                    one=self.send(message_id='one');self.assertTrue(entered.wait(1))
+                    two=self.send(message_id='two')
+                self.assertEqual(len(self.runner.chats),1)
+                jobs=[self.service.jobs[one['id']],self.service.jobs[two['id']]]
+            self.assertTrue(all(job.canceled.is_set() for job in jobs))
+        finally:release.set()
+        for job in jobs:job.thread.join(2)
+        self.assertTrue(self.runner.chats[0].closed)
+
+    def test_measured_mcp_setup_replaces_cold_start_estimate(self):
+        from ax_local.api.delegation import Job, Run
+        role=self.roles['backend_engineer'];role['mcpServers']={'github':{},'fetch':{}}
+        cold=self.service.setup_estimate(role)
+        run=Run(time.monotonic()+5)
+        job=Job('a'*16,role,'',run,run.deadline)
+        self.service._record_progress(job,json.dumps({'event':'mcp_discovery_completed',
+            'server':'github','elapsed_seconds':2}))
+        self.service._record_progress(job,json.dumps({'event':'mcp_discovery_completed',
+            'server':'fetch','elapsed_seconds':1}))
+        self.assertLess(self.service.setup_estimate(role),cold)
+        self.assertGreaterEqual(self.service.setup_estimate(role),3)
+
+    def test_durable_admission_uses_measured_setup_and_preserves_call_budget(self):
+        role = self.roles['backend_engineer']
+        role['mcpServers'] = {'github': {}, 'fetch': {}}
+        metadata = {'delegationCalls': 3}
+        with self.service.workflow(self.parent, time.monotonic()+200, max_turns=1, metadata=metadata):
+            with self.service.turn(self.parent, 1):
+                with self.assertRaisesRegex(A2AError, 'setup'):
+                    self.send()
+                self.service.discovery_samples[('backend_engineer','github')] = [2]
+                self.service.discovery_samples[('backend_engineer','fetch')] = [1]
+                self.wait_task_internal(self.send()['id'])
+                self.assertEqual(metadata['delegationCalls'], 4)
+                with self.assertRaisesRegex(A2AError, 'limit'):
+                    self.send(message_id='over-budget')
+
+    def test_single_api_request_resumes_same_parent_after_longer_child(self):
+        from urllib import request
+        service = self.service
+        calls = []
+        class Parent(FakeChat):
+            container_name = 'test-parent'
+            checkpoint = {}
+            def is_alive(inner): return True
+            def get_checkpoint(inner): return inner.checkpoint
+            def restore(inner, history, **options): inner.checkpoint = options.get('checkpoint', {})
+            def send(inner, message, *, timeout_seconds=None):
+                with service.turn(inner.session_id, timeout_seconds):
+                    calls.append(message)
+                    if len(calls) == 1:
+                        token = service.grants[inner.session_id].token
+                        task = self.send(token=token, task='long child')
+                        inner.checkpoint = {'messages': [{'role':'tool', 'content':json.dumps(
+                            {'sessionId':task['id'], 'pending':True})}], 'failed_delegations':[
+                                [['backend_engineer','long child'], {'session_id':task['id'],'pending':True}]]}
+                        return {'answer':'waiting', 'outcome':{'status':'partial', 'reason':'child_pending',
+                            'evidence':[], 'errors':[], 'remaining_work':['Await child']}}
+                    self.assertEqual(len(inner.checkpoint['completed_delegations']), 1)
+                    return {'answer':'verified child', 'outcome':{'status':'completed',
+                        'evidence':['child receipt verified'], 'errors':[], 'remaining_work':[]}}
+        original_start = self.runner.start_chat
+        def start(sid, config, **kwargs):
+            if config['_ax_role'] != 'tech_lead': return original_start(sid, config, **kwargs)
+            service.worker_environment(sid, config)
+            return Parent(self.runner, sid, config)
+        def child(*_):
+            time.sleep(1.1)
+            return {'answer':'checked', 'outcome':{'status':'completed',
+                'evidence':['child verified'], 'errors':[], 'remaining_work':[]}}
+        self.runner.callback = child
+        server = create_server({'test':self.runner}, roles=self.roles, session_dir=self.temporary.name,
+            host='127.0.0.1', port=0, workflow_policy={'max_turns':4,'total_seconds':5,
+                'turn_seconds':1,'max_no_progress':2,'max_concurrent':1})
+        service.store = server.store
+        thread = threading.Thread(target=server.serve_forever); thread.start()
+        try:
+            with patch.object(self.runner, 'start_chat', side_effect=start):
+                call = request.Request(f'http://127.0.0.1:{server.server_port}/tasks',
+                    data=json.dumps({'role':'tech_lead','task':'coordinate'}).encode(),
+                    headers={'Content-Type':'application/json'})
+                with request.urlopen(call, timeout=4) as response: result = json.load(response)
+            self.assertEqual(result['outcome']['status'], 'completed')
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(self.runner.chats), 1)
+            saved = server.store.get(result['sessionId'])
+            self.assertEqual(saved['roleConfig']['_workflow']['delegationCalls'], 1)
+        finally:
+            server.shutdown();thread.join();server.server_close()
+
+    def test_partial_receipts_are_persisted_while_child_is_still_working(self):
+        entered, release = threading.Event(), threading.Event()
+        count = []
+        def callback(chat, task):
+            count.append(task)
+            if len(count) == 1:
+                return {'answer': 'Commit published; QA pending', 'outcome': {'status': 'partial',
+                    'evidence': ['published commit'], 'remaining_work': ['QA'], 'errors': []}}
+            entered.set()
+            release.wait(3)
+            return {'answer': 'QA passed', 'outcome': {'status': 'completed',
+                    'evidence': ['QA passed'], 'remaining_work': [], 'errors': []}}
+        self.runner.callback = callback
+        with patch.object(FakeChat, 'get_checkpoint', return_value={'messages': []}, create=True), \
+             self.service.turn(self.parent, 5):
+            task = self.send()
+            try:
+                self.assertTrue(entered.wait(1))
+                saved = self.store.get(task['id'])
+                meta = saved['roleConfig']['_ax_delegation']
+                self.assertEqual(meta['state'], 'TASK_STATE_WORKING')
+                self.assertEqual(meta['outcome']['evidence'], ['published commit'])
+                self.assertTrue(meta['outcomeRecordedAt'])
+                self.assertEqual(meta['workflow']['turns'], 2)
+            finally:
+                release.set()
+            self.assertEqual(self.wait_task(task['id'])['metadata']['outcome']['status'], 'completed')
+
+    def test_child_failure_after_partial_preserves_evidence_for_parent_reconciliation(self):
+        calls = []
+        def callback(chat, task):
+            calls.append(task)
+            if len(calls) == 1:
+                return {'answer': 'Read CI logs; checks remain', 'outcome': {'status': 'partial',
+                    'evidence': ['CI logs read in this sandbox'], 'errors': [],
+                    'remaining_work': ['verify the patch']}}
+            from popot_agents.orchestrator.main import AgentRunError
+            raise AgentRunError('MCP server fetch timed out during discovery')
+        self.runner.callback = callback
+        with patch.object(FakeChat, 'get_checkpoint', return_value={'messages': []}, create=True), \
+             self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertEqual(task['status']['state'], 'TASK_STATE_FAILED')
+        outcome = task['metadata']['outcome']
+        self.assertEqual(outcome['status'], 'failed')
+        self.assertIn('Read CI logs; checks remain', outcome.get('last_partial_answer', ''))
+        self.assertIn('CI logs read in this sandbox', outcome.get('evidence', []))
+        self.assertIn('verify the patch', outcome.get('remaining_work', []))
+        self.assertIn('MCP server fetch timed out during discovery', outcome.get('errors', []))
+
+    def test_child_yields_checkpoint_when_parent_budget_cannot_cover_mcp_rediscovery(self):
+        calls = []
+        self.roles['backend_engineer']['mcpServers'] = {'fetch': {}}
+        def callback(chat, task):
+            calls.append(task)
+            if task == 'QA now':
+                return {'answer': 'QA verified', 'outcome': {'status': 'completed',
+                    'evidence': ['QA passed'], 'errors': [], 'remaining_work': []}}
+            return {'answer': 'Patch published; QA remains', 'outcome': {'status': 'partial',
+                'evidence': ['published commit'], 'errors': [], 'remaining_work': ['QA']}}
+        self.runner.callback = callback
+        with patch.object(FakeChat, 'get_checkpoint', return_value={'messages': []}, create=True), \
+             self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(task['metadata']['outcome']['status'], 'partial')
+            self.assertTrue(task['metadata']['resumable'])
+            self.assertEqual(task['metadata']['outcome']['evidence'], ['published commit'])
+        with patch.object(FakeChat, 'get_checkpoint', return_value={'messages': []}, create=True), \
+             self.service.turn(self.parent, 500):
+            resumed = self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', {
+                'message': {'messageId': 'fresh-turn', 'taskId': task['id'], 'role': 'ROLE_USER',
+                            'parts': [{'text': 'QA now'}]}})['task']
+            final = self.wait_task(resumed['id'])
+            self.assertEqual(final['metadata']['outcome']['status'], 'completed')
+            self.assertEqual(len(self.runner.chats), 1)
+            self.assertEqual(calls, ['implement', 'QA now'])
+
+    def test_nested_coordinators_continue_partial_without_returning_to_parent(self):
+        counts = {'backend_engineer': 0, 'qa_engineer': 0}
+        received = []
+        def callback(chat, task):
+            role = chat.config['_ax_role']
+            counts[role] += 1
+            if counts[role] == 1:
+                return {'answer': 'more work', 'outcome': {'status': 'partial',
+                    'evidence': [], 'errors': [], 'remaining_work': ['finish ' + role]}}
+            if role == 'backend_engineer':
+                token = self.service.worker_environment(chat.session_id, chat.config)['AX_DELEGATION_TOKEN']
+                received.append(self.wait_task(self.send(token=token, role='qa_engineer')['id'],
+                                               token=token, role='qa_engineer'))
+            return {'answer': role + ' verified', 'outcome': {'status': 'completed',
+                'evidence': [role + ' diagnostic'], 'errors': [], 'remaining_work': []}}
+        self.runner.callback = callback
+        with patch.object(FakeChat, 'get_checkpoint', return_value={'messages': []}, create=True), \
+             self.service.turn(self.parent, 5):
+            result = self.wait_task(self.send()['id'])
+        self.assertEqual(counts, {'backend_engineer': 2, 'qa_engineer': 2})
+        self.assertEqual(result['metadata']['outcome']['status'], 'completed')
+        self.assertEqual(received[0]['metadata']['outcome']['status'], 'completed')
+        self.assertTrue(all(chat.closed for chat in self.runner.chats))
 
     def test_nested_delegation_and_cycle_rejection(self):
         nested = []
@@ -456,7 +716,8 @@ class DelegationTests(unittest.TestCase):
                                                'NotFound' if args[0] == 'get' else '')
         with patch.object(runner, '_run', side_effect=cli) as run, \
              patch.object(runner, '_wait_for_chat', side_effect=lambda chat, *_args: chat), \
-             patch.object(AxChat, 'send', return_value={'answer': 'child result'}):
+             patch.object(AxChat, 'send', return_value={'answer': 'child result', 'outcome': {
+                 'status': 'completed', 'evidence': ['queue fixture result'], 'remaining_work': [], 'errors': []}}):
             try:
                 with self.service.turn(self.parent, 5):
                     tasks = [self.send(message_id=f'child-{index}') for index in range(4)]

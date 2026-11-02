@@ -20,8 +20,8 @@ class FakeChat:
         self.closed = False
         self.restored = None
 
-    def send(self, message):
-        return {"answer": message}
+    def send(self, message, **_kwargs):
+        return {"answer": message, "outcome": {"status": "completed", "evidence": ["role response"], "errors": [], "remaining_work": []}}
 
     def is_alive(self):
         return not self.closed
@@ -44,12 +44,23 @@ class FakeRunner:
         self.tasks.append((task, role_config))
         return {"answer": task}
 
-    def start_chat(self, chat_id, role_config=None):
+    def start_chat(self, chat_id, role_config=None, **_kwargs):
         self.chats.append((chat_id, role_config, FakeChat(f"worker-{chat_id}")))
         return self.chats[-1][2]
 
 
 class RoleDirectoryTests(unittest.TestCase):
+    def test_every_configured_role_can_delegate_with_team_scoped_permissions(self):
+        directory = Path(__file__).resolve().parents[1] / 'config/roles'
+        configs = {path.stem: json.loads(path.read_text()) for path in directory.glob('*.json')}
+        for name, config in configs.items():
+            with self.subTest(role=name):
+                self.assertTrue(config['allowed_roles'])
+                self.assertNotIn(name, config['allowed_roles'])
+                self.assertLess(set(config['allowed_roles']), set(configs) - {name})
+                self.assertTrue(set(config['allowed_roles']).issubset(configs))
+                self.assertNotIn('enabled', config.get('coordination', {}))
+
     def test_diagram_snapshot_matches_role_capabilities(self):
         directory = Path(__file__).resolve().parents[1] / 'config' / 'roles'
         html = (directory / 'index.html').read_text(encoding='utf-8')
@@ -152,7 +163,8 @@ class RoleApiTests(unittest.TestCase):
         self.assertEqual(result["agent"], "nous")
         self.assertEqual(result["answer"], "2+3")
         self.assertEqual(result["sessionId"], self.runner.chats[0][0])
-        self.assertEqual(self.runner.chats[0][1], self.roles["analyst"])
+        self.assertEqual(self.runner.chats[0][1], {**self.roles["analyst"],
+            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"]})
         self.assertEqual(self.runner.tasks, [])
         self.assertEqual(self.request("POST", "/tasks", {"role": "missing", "task": "x"})[0], 404)
         self.assertEqual(self.request("POST", "/tasks", {"role": "analyst", "agent": "other", "task": "x"})[0], 409)
@@ -162,7 +174,8 @@ class RoleApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(first["role"], "analyst")
         session_id = first["sessionId"]
-        self.assertEqual(self.runner.chats[0][1], self.roles["analyst"])
+        self.assertEqual(self.runner.chats[0][1], {**self.roles["analyst"],
+            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"]})
         self.assertEqual(self.request("POST", "/messages", {
             "sessionId": session_id, "role": "chat", "message": "wrong role"})[0], 409)
         self.server.shutdown()
@@ -179,7 +192,8 @@ class RoleApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(reply["role"], "analyst")
         self.assertEqual(self.runner.chats[1][1], {
-            "agent": "nous", "instructions": "Use precise arithmetic.", "tools": ["calculate"]})
+            "agent": "nous", "instructions": "Use precise arithmetic.", "tools": ["calculate"],
+            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"]})
         self.assertEqual(self.runner.chats[1][2].restored, [
             {"role": "user", "content": "start"}, {"role": "assistant", "content": "start"}])
         self.assertEqual(self.request("GET", f"/chats/{session_id}")[1]["role"], "analyst")

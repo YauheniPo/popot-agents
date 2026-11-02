@@ -129,20 +129,33 @@ class GatewayTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "404.*unknown sessionId"):
                 client.send_message("continue", session_id="missing")
 
-    def test_new_chat_requires_role_or_agent_before_http(self):
+    def test_new_chat_defaults_to_coordinator_and_rejects_blank_override(self):
         from popot_agents.mcp_server import OrchestratorClient
 
         client = OrchestratorClient(self.base_url)
         with patch("urllib.request.urlopen", side_effect=self.urlopen):
-            with self.assertRaisesRegex(ValueError, "role or agent"):
-                client.run_task("2+1?")
-            with self.assertRaisesRegex(ValueError, "role or agent"):
-                client.send_message("2+1?")
-            with self.assertRaisesRegex(ValueError, "role or agent"):
-                client.run_task("2+1?", session_id="   ")
+            client.run_task("2+1?")
+            self.assertEqual(self.calls[-1], ('POST', '/tasks', {'task':'2+1?', 'role':'planner'}))
+            client.send_message("2+1?")
+            self.assertEqual(self.calls[-1][2]['role'], 'planner')
+            client.run_task("2+1?", session_id="   ")
+            self.assertEqual(self.calls[-1][2]['role'], 'planner')
+            count = len(self.calls)
             with self.assertRaisesRegex(ValueError, "role must be a nonempty string"):
                 client.run_task("2+1?", role="   ")
-        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.calls), count)
+
+    def test_new_chat_uses_configured_default_role_and_preserves_explicit_selection(self):
+        from popot_agents.mcp_server import OrchestratorClient, RUNTIME
+        client = OrchestratorClient(self.base_url)
+        with patch.dict(RUNTIME['mcp'], {'default_role': 'backend_engineer'}), \
+             patch('urllib.request.urlopen', side_effect=self.urlopen):
+            client.run_task('implement')
+            self.assertEqual(self.calls[-1][2]['role'], 'backend_engineer')
+            client.send_message('inspect')
+            self.assertEqual(self.calls[-1][2]['role'], 'backend_engineer')
+            client.run_task('review', role='code_reviewer')
+            self.assertEqual(self.calls[-1][2]['role'], 'code_reviewer')
 
     def test_list_chats_uses_existing_api(self):
         from popot_agents.mcp_server import OrchestratorClient
@@ -233,9 +246,9 @@ class GatewayTests(unittest.TestCase):
         server = FakeMCPServer.instance
         advertised = {tool.name: tool.input_schema
                       for tool in asyncio.run(server.list_tools())}
-        self.assertEqual(len(advertised["run_task"]["anyOf"]), 4)
-        self.assertEqual(len(advertised["send_message"]["anyOf"]), 3)
-        self.assertIn("chat", advertised["run_task"]["properties"]["role"]["description"])
+        self.assertNotIn('anyOf', advertised['run_task'])
+        self.assertNotIn('anyOf', advertised['send_message'])
+        self.assertIn("each role coordinates", advertised["run_task"]["properties"]["role"]["description"])
         self.assertIn("session", advertised["send_message"]["properties"]["session_id"]["description"])
         self.assertEqual(server.name, "popot-agents")
         self.assertEqual(server.transport, "streamable-http")

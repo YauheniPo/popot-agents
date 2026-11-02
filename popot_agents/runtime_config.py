@@ -1,6 +1,7 @@
 """Load shared, non-secret runtime settings for every service image."""
 
 import json
+import re
 import math
 import os
 from pathlib import Path
@@ -20,7 +21,8 @@ FIELDS = {
                  "memory_session_finish_seconds", "memory_summary_seconds",
                  "memory_capture_min_seconds", "memory_capture_margin_seconds", "memory_recall_min_seconds", "memory_tool_request_seconds",
                  "memory_skill_import_seconds"},
-    "mcp": {"discovery_attempts", "discovery_backoff_seconds"},
+    "workflow": {"max_turns", "total_seconds", "turn_seconds", "max_no_progress", "max_concurrent"},
+    "mcp": {"discovery_attempts", "discovery_backoff_seconds", "default_role"},
     "limits": {"request_bytes", "message_chars", "history_bytes", "socket_message_bytes", "tool_output_chars",
                "write_file_bytes", "download_bytes", "skill_prompt_bytes"},
     "logging": {"mcp_body_max_bytes"},
@@ -75,13 +77,29 @@ def validate_model_parameters(parameters: dict, label: str = "model parameters")
     return result
 
 
+def validate_workflow_policy(policy, max_turn_seconds):
+    fields = {'max_turns', 'total_seconds', 'turn_seconds',
+              'max_no_progress', 'max_concurrent'}
+    if not isinstance(policy, dict) or set(policy) != fields:
+        raise ValueError('workflow config has invalid fields')
+    for key in fields:
+        if type(policy[key]) is not int or policy[key] <= 0:
+            raise ValueError('workflow ' + key + ' must be a positive integer')
+    if policy['turn_seconds'] > max_turn_seconds:
+        raise ValueError('workflow turn_seconds exceeds the runtime maximum')
+    if policy['turn_seconds'] > policy['total_seconds']:
+        raise ValueError('workflow turn_seconds exceeds total_seconds')
+    return dict(policy)
+
+
+
 def load_runtime_config(path: str | Path | None = None) -> dict:
     """Read and validate shared settings; changes take effect on restart."""
     config_path = Path(path or os.getenv("POPOT_RUNTIME_CONFIG", DEFAULT_PATH))
     with config_path.open(encoding="utf-8") as file:
         settings = json.load(file)
     if not isinstance(settings, dict) or set(settings) != set(FIELDS) | {"role_env_names"}:
-        raise ValueError("runtime config must define sessions, timeouts, mcp, limits, logging, model, memory and role_env_names")
+        raise ValueError("runtime config must define sessions, timeouts, mcp, workflow, limits, logging, model, memory and role_env_names")
     try:
         validate_role_env_names(settings["role_env_names"])
     except ValueError as exc:
@@ -92,7 +110,9 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
             raise ValueError(f"runtime config has invalid {section} fields")
         for name, value in values.items():
             field = f"{section}.{name}"
-            if field == "model.temperature":
+            if field == "mcp.default_role":
+                valid = isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", value) is not None
+            elif field == "model.temperature":
                 valid = value is None or (type(value) in (int, float) and 0 <= value <= 2)
             elif field == "model.max_tokens":
                 valid = value is None or (type(value) is int and value > 0)
@@ -112,6 +132,7 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
                 valid = type(value) is int and value > 0
             if not valid:
                 raise ValueError(f"runtime config has invalid {field}")
+    validate_workflow_policy(settings["workflow"], settings["timeouts"]["max_turn_seconds"])
     if settings["limits"]["socket_message_bytes"] <= max(
             settings["limits"]["history_bytes"], settings["limits"]["request_bytes"]) + 1024:
         raise ValueError("runtime config limits.socket_message_bytes must exceed history_bytes and request_bytes")
