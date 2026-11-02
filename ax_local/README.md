@@ -394,7 +394,7 @@ Cognee и совместимые Fetch/Git используют SDK 2.x. Пос�
 его worker, включая дочерние A2A-задачи. Для профиля `omniroute_free`
 thinking отключён, выход ограничен 8192 токенами. Профили `omniroute_cloud`
 и `ollama_cloud` используют `reasoning_effort=max` и `max_tokens=65536`.
-`backend_engineer`, `frontend_engineer`, `code_reviewer` и `qa_engineer` используют
+`backend_engineer`, `frontend_engineer`, `code_reviewer`, `security_engineer` и `qa_engineer` используют
 `omniroute_cloud` с `OMNIROUTE_CLOUD_MODEL=ax-ollama`. Запросы проходят через шлюз.
 Поддержка уровней thinking зависит от выбранной шлюзом модели.
 Для OpenRouter передаётся `reasoning.enabled=false`, для NVIDIA — нативный
@@ -538,7 +538,7 @@ Compose API/MCP. Уже запущенные контейнеры Compose при
 Роль выбирает профиль через `agent` в `config/roles/`. Профиль из
 `config/agents.json` задаёт endpoint, имя переменной модели (`model_env`) и
 параметры модели. Значение модели берётся из `.env`: например,
-`planner / backend_engineer / frontend_engineer / code_reviewer / qa_engineer → omniroute_cloud → OMNIROUTE_CLOUD_MODEL`,
+`planner / backend_engineer / frontend_engineer / code_reviewer / security_engineer / qa_engineer → omniroute_cloud → OMNIROUTE_CLOUD_MODEL`,
 `frontend_engineer → omniroute_cloud → OMNIROUTE_CLOUD_MODEL`,
 `analyst → omniroute_free → OMNIROUTE_FREE_MODEL`,
 `chat → openrouter → OPENROUTER_MODEL`. Общего провайдера или модели AX нет.
@@ -630,7 +630,7 @@ bundle через ConfigMap; проверки TLS у Python, Node и Holmes ос
 | Комбо | Роли | Порядок моделей |
 | --- | --- | --- |
 | `ax-free` | `chat`, `analyst`, `tech_lead`, `cron_demo`, `project_operator`, Holmes, Harness² | OpenRouter North Mini Code `:free` → NVIDIA Nemotron 3.5 Lightning |
-| `ax-ollama` | `planner`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | DeepSeek V4.1 Flash 1017 → GLM 5.3 Flash → DeepSeek V4 Pro 0813 |
+| `ax-ollama` | `planner`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `security_engineer`, `qa_engineer` | DeepSeek V4.1 Flash 1017 → GLM 5.3 Flash → DeepSeek V4 Pro 0813 |
 
 Точные бесплатные model IDs: `nvidia/nemotron-3.5-lightning-30b-a3b` у NVIDIA
 и `cohere/north-mini-code:free` у OpenRouter. Отдельных комбо для кода,
@@ -843,6 +843,16 @@ AX_TEST_OMNIROUTE_LIVE=1 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest ax_local.
 ## Автономное выполнение
 
 MCP может запускать любую настроенную роль: `run_task(role="backend_engineer", task=...)`.
+Для анализа безопасности используйте `run_task(role="security_engineer", task=...)`.
+Роль проверяет исходники и конфигурацию, фиксирует ревизию и подтверждённые риски.
+GitHub доступен только для чтения; исправления она делегирует backend,
+регрессионные проверки — QA, диагностику — оператору проекта,
+независимое ревью и разрешённые PR-комментарии — code reviewer.
+Локальный `engineering/security-review` дополняют навыки архитектуры, диагностики,
+TDD и передачи контекста. Доступ к Sonar/GitGuardian использует существующие ENV;
+установленных сканеров и разрешения на отправку исходников наличие токена не гарантирует.
+Роль не получает Git-идентичность публикации и не создаёт коммиты/PR.
+Обязательная дополнительная стадия security review для всех задач не добавляется.
 Если роль/профиль не указаны, используется `config/runtime.json → mcp.default_role`
 (сейчас `planner`). Это выбор по умолчанию, а не ограничение координации.
 

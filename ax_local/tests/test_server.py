@@ -167,7 +167,7 @@ class AxServerTests(unittest.TestCase):
         self.assertIn("bash", roles["backend_engineer"]["tools"])
         self.assertEqual(set(create.call_args.args[0]), {"omniroute_free", "omniroute_cloud", "omniroute_ops"})
         self.assertNotIn("allowed_roles", server.delegation.policy)
-        self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer"])
+        self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer", "security_engineer"])
         env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
         import json
         self.assertEqual(json.loads(env["AX_DELEGATION_ROLES"]), roles["backend_engineer"]["allowed_roles"])

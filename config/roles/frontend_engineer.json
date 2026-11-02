@@ -22,7 +22,8 @@
   ],
   "allowed_roles": [
     "qa_engineer",
-    "code_reviewer"
+    "code_reviewer",
+    "security_engineer"
   ],
   "env_names": [
     "GITHUB_PERSONAL_ACCESS_TOKEN",

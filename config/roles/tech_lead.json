@@ -19,7 +19,8 @@
     "frontend_engineer",
     "qa_engineer",
     "code_reviewer",
-    "project_operator"
+    "project_operator",
+    "security_engineer"
   ],
   "env_names": [
     "COGNEE_API_URL",

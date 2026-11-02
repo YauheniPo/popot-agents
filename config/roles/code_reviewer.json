@@ -30,7 +30,8 @@
   ],
   "allowed_roles": [
     "qa_engineer",
-    "analyst"
+    "analyst",
+    "security_engineer"
   ],
   "mcpServers": {
     "github": {

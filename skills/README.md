@@ -14,15 +14,15 @@
 | Каталог в исходном репозитории | Роли | Назначение |
 | --- | --- | --- |
 | `skills/productivity/grilling` | `planner`, `analyst` | Уточнение требований, решений и предположений |
-| `skills/productivity/handoff` | `planner`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `project_operator` | Передача контекста следующему агенту |
+| `skills/productivity/handoff` | `planner`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `project_operator`, `security_engineer` | Передача контекста следующему агенту |
 | `skills/engineering/grill-with-docs` | `planner` | Обсуждение с фиксацией общего словаря и архитектурных решений |
 | `skills/engineering/domain-modeling` | `planner`, `tech_lead` | Общий словарь предметной области и проверка модели на сценариях |
 | `skills/engineering/to-spec` | `planner`, `tech_lead` | Спецификация, пользовательские истории и решения по тестированию |
 | `skills/engineering/to-tickets` | `planner`, `tech_lead` | Декомпозиция работы с зависимостями |
 | `skills/engineering/prototype` | `frontend_engineer` | Проверка вариантов интерфейса и моделей состояния прототипами |
-| `skills/engineering/codebase-design` | `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer`, `project_operator` | Границы модулей, интерфейсы и тестируемость |
-| `skills/engineering/tdd` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | Тестирование поведения через публичные интерфейсы |
-| `skills/engineering/diagnosing-bugs` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer`, `project_operator` | Воспроизведение и диагностика ошибок, регрессионная проверка |
+| `skills/engineering/codebase-design` | `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer`, `project_operator`, `security_engineer` | Границы модулей, интерфейсы и тестируемость |
+| `skills/engineering/tdd` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer`, `security_engineer` | Тестирование поведения через публичные интерфейсы |
+| `skills/engineering/diagnosing-bugs` | `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer`, `project_operator`, `security_engineer` | Воспроизведение и диагностика ошибок, регрессионная проверка |
 | `skills/engineering/code-review` | `planner`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `qa_engineer` | Проверка изменений по требованиям и стандартам кода |
 | `skills/engineering/setup-matt-pocock-skills` | `planner`, `tech_lead`, `backend_engineer`, `frontend_engineer`, `qa_engineer` | Справочники трекера и доменной документации |
 | `skills/engineering/pr` | `backend_engineer`, `frontend_engineer` | Описание PR с результатами проверок и оценкой последствий изменений |
@@ -30,6 +30,13 @@
 | `skills/engineering/retro` | `planner` | Ретроспектива сессии по явному запросу пользователя |
 
 Для `chat` и `cron_demo` специальные навыки из этого набора не нужны.
+
+Для `security_engineer` добавлен локальный навык
+[`engineering/security-review`](engineering/security-review/SKILL.md): модель угроз,
+проверка достижимости уязвимостей, безопасное воспроизведение и проверка исправленного SHA.
+Он написан в этом проекте и не входит в импортированный upstream-манифест.
+Роль также использует `codebase-design`, `diagnosing-bugs`, `tdd` и `handoff`;
+навыки не дают ей права на коммиты, PR или публикацию уязвимостей.
 
 Дополнительно импортирован `engineering/setup-matt-pocock-skills`: на него
 ссылаются навыки спецификации, декомпозиции и ревью. Это справочник настройки
