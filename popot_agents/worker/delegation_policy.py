@@ -16,6 +16,11 @@ class DelegationContextError(ToolInputError):
 
 def check_publication_owner(name, arguments, context):
     """Coordinate branch publication; role credentials remain the security boundary."""
+    if context and context.get('role') == 'code_reviewer' and name == 'bash':
+        command = arguments.get('command', '')
+        if isinstance(command, str) and re.search(
+                r'\bgit(?:\s+(?:-c|-C)\s+\S+)*\s+commit\b', command):
+            raise ToolInputError('The code reviewer cannot create commits; delegate authorized fixes to backend_engineer.')
     if context is None or 'publication_owner' not in context or context.get('publication_owner') == context.get('session_id'):
         return
     branch_write = name.rsplit('__',1)[-1] in {

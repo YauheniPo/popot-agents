@@ -18,6 +18,7 @@ from .ax_runner import AxAgentRunner
 from .cron import CronScheduler
 from .delegation import DelegationService, start_a2a_server
 from .worker_queue import WorkerQueue
+from .worker_pool import KubernetesWorkerPool, WorkerPoolController
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -149,18 +150,27 @@ def main() -> None:
     kind_ip = network_address_toward(kind_control_plane_host(context), 6443)
     os.environ["AX_LOCAL_BASE_URL"] = f"http://{kind_ip}:{AX_CONFIG['proxy']['port']}/v1"
     os.environ["AX_LOCAL_BIND_HOST"] = network_address_toward("db", 5432)
-    proxy = a2a = None
+    proxy = a2a = worker_pool = None
     try:
         server = make_server()
         proxy = start_proxy(server.provider_routes, host=kind_ip)
         # All profiles use the same AX namespace; recover its Tasks once.
         server.worker_managers[0].recover_workers()
+        worker_pool = WorkerPoolController(
+            KubernetesWorkerPool(context, AX_CONFIG['atespace'], AX_CONFIG['worker_pool_name'], kubeconfig),
+            warm_workers=AX_CONFIG['warm_workers'], max_workers=AX_CONFIG['max_workers'],
+            idle_seconds=AX_CONFIG['worker_pool_idle_seconds'])
+        for runner in server.worker_managers:
+            runner.worker_pool = worker_pool
+        worker_pool.start()
         if server.delegation:
             server.delegation.recover_interrupted()
             a2a = start_a2a_server(server.delegation, kind_ip, AX_CONFIG["delegation"]["port"])
         server.cron.recover_interrupted()
         server.cron.start()
     except Exception:
+        if worker_pool:
+            worker_pool.close()
         if a2a:
             a2a.server_close()
         if "server" in locals():
@@ -185,6 +195,8 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if worker_pool:
+            worker_pool.close()
         server.cron.close()
         if server.delegation:
             server.delegation.close()

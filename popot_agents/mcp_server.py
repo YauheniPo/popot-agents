@@ -336,6 +336,9 @@ def main() -> None:
         """Start a task with a configured role or agent; omit both to use the configured default role.
         All roles coordinate tasks, select permitted specialists and continue checkpoints,
         and return a final result or blocker. Do not manually continue a running workflow.
+        For an authorized fix after a review, let the reviewer delegate to backend_engineer
+        or start a new implementation workflow. If the user requested MCP execution,
+        report an MCP publication blocker instead of silently implementing locally.
         For a follow-up, pass the returned sessionId or session_id instead.
         For clients that hide progress notifications, monitor the running call with
         list_chats then get_chat; poll every 15-30 seconds and report changed progress.
@@ -367,7 +370,8 @@ def main() -> None:
     async def send_message(message: str, session_id: str | None = None,
                            role: str | None = None, agent: str | None = None,
                            ctx: Context = None) -> dict:
-        """Continue a chat with its returned session_id. For a new chat, use run_task;
+        """Continue a chat with its returned session_id; its role does not change.
+        For a new chat, use run_task;
         Omit role/agent for a new session with the configured default role. Do not send manual
         continuation instructions to an already running workflow; poll get_chat instead.
         """

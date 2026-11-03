@@ -178,7 +178,8 @@ class WorkerHealthMainTests(unittest.TestCase):
             ax.mkdir()
             (ax / "config.json").write_text(json.dumps({
                 "context": "kind-popot-ax", "atespace": "ate-demo-counter",
-                "worker_pool_name": "popot-workers", "startup_timeout_seconds": 300, "task_resources": {
+                "worker_pool_name": "popot-workers", "startup_timeout_seconds": 300,
+                "warm_workers": 3, "task_resources": {
                     "requests": {"cpu": "500m", "memory": "512Mi"},
                     "limits": {"cpu": "2", "memory": "1536Mi"}}}))
             cli = ax / ".local/bin/kubectl-ate"
@@ -190,7 +191,9 @@ class WorkerHealthMainTests(unittest.TestCase):
             with patch.object(worker_health, "__file__", str(ax / "cluster/worker_health.py")), \
                  patch.object(worker_health.subprocess, "run", side_effect=run) as command, \
                  patch.object(worker_health, "ensure_named_pool", create=True) as named, \
+                 patch('ax_local.api.worker_pool.KubernetesWorkerPool') as backend, \
                  patch.object(worker_health, "ensure_workers") as ensure:
+                backend.return_value.inspect.return_value = {'desired': 3, 'busy': set()}
                 worker_health.main()
                 worker_health.main()
             self.assertEqual(sum(c.args[0][0] == "go" for c in command.call_args_list), 1)

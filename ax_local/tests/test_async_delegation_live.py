@@ -9,6 +9,7 @@ import unittest
 import uuid
 
 from ax_local.api.ax_runner import AxAgentRunner
+from ax_local.api.worker_pool import KubernetesWorkerPool, WorkerPoolController
 from ax_local.api.delegation import DelegationService, start_a2a_server
 from ax_local.api.provider_proxy import network_address_toward
 from ax_local.api.server import kind_control_plane_host
@@ -86,6 +87,11 @@ class LiveAsyncDelegationTests(unittest.TestCase):
     def test_parent_and_children_overlap_and_dependent_starts_after_both_results(self):
         host=network_address_toward(kind_control_plane_host(AX_CONFIG['context']),6443)
         runner=FixtureRunner(image=os.environ['AX_TEST_WORKER_IMAGE'],model='fixture',base_url='http://localhost:1/v1')
+        pool=WorkerPoolController(KubernetesWorkerPool(AX_CONFIG['context'], AX_CONFIG['atespace'],
+            AX_CONFIG['worker_pool_name'], os.environ['KUBECONFIG']),
+            warm_workers=AX_CONFIG['warm_workers'], max_workers=AX_CONFIG['max_workers'], idle_seconds=60)
+        runner.worker_pool=pool
+        pool.start()
         roles={r:{'agent':'fixture','_ax_role':r,'instructions':r,'tools':['bash'],'max_tool_rounds':8}
             for r in ('fixture_parent','worker_a','worker_b','worker_c')}
         roles['fixture_parent']['allowed_roles']=['worker_a','worker_b','worker_c']
@@ -127,7 +133,7 @@ class LiveAsyncDelegationTests(unittest.TestCase):
                     'childrenOverlapped':True,'dependencyOrdering':True,'coordinatorTurns':1}),flush=True)
             finally:
                 if parent:parent.close()
-                service.close();server.server_close();runner.shutdown_worker_queue();runner.maintenance()
+                service.close();server.server_close();runner.shutdown_worker_queue();runner.maintenance();pool.close()
                 self.assertEqual(runner.worker_queue.status()['active'],0)
 
 

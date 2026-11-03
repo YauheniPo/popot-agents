@@ -17,7 +17,10 @@ test('AX child, CI and tool waits are distinguished from an unowned stalled requ
     const s=conversationStatus({...args,ax:{status:'running',waitingFor}},a);
     assert.equal(s.continuationState,expected);assert.equal(s.isStalled,false);
   }
-  assert.equal(conversationStatus({...args,ax:{status:'blocked'}},a).continuationState,'blocked');
+  const blocked=conversationStatus({...args,ax:{status:'blocked',reason:'workflow_turn_limit'}},a);
+  assert.equal(blocked.continuationState,'blocked');
+  assert.equal(blocked.continuationCode,'workflow_turn_limit');
+  assert.match(blocked.continuationReason,/workflow_turn_limit/);
 });
 test('Responses output and unavailable artifacts retain honest states',()=>{
   assert.equal(conversationStatus(args,{pipeline:{clientResponse:{status:'completed',output:[{type:'message'}]}}}).continuationState,'completed');
@@ -35,6 +38,7 @@ test('pinned route and browser transformations are guarded and idempotent',async
   const patched=page(browser);
   assert.match(patched,/continuationState:e.continuationState/);
   assert.match(patched,/waiting tool/);
+  assert.match(patched,/popot-continuation-reason/);
   assert.equal(page(patched),patched);
   assert.throws(()=>page('unsupported page'));
 });

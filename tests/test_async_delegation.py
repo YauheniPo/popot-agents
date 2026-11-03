@@ -170,10 +170,8 @@ class AsyncServiceTests(unittest.TestCase):
             with peak_lock:peak[0]=max(peak[0],pool.status()['active'])
             return chat
         self.runner.start_chat=start
-        barrier=threading.Barrier(2)
         def callback(chat,task):
             role=chat.config['_ax_role']
-            if role in {'backend_engineer','qa_engineer'}:barrier.wait(1)
             target={'backend_engineer':'analyst','qa_engineer':'analyst','analyst':'code_reviewer'}.get(role)
             if target:
                 token=self.service.grants[chat.session_id].token
@@ -299,6 +297,13 @@ class AsyncServiceTests(unittest.TestCase):
 
 
 class PublicationOwnershipTests(unittest.TestCase):
+    def test_reviewer_cannot_create_local_commit(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        from popot_agents.tools import ToolInputError
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        with self.assertRaisesRegex(ToolInputError, 'reviewer'):
+            check_publication_owner('bash',{'command':'git -C repo commit -m fix'},context)
+
     def test_non_owner_cannot_publish_branch_but_can_prepare_and_test(self):
         from popot_agents.worker.delegation_policy import check_publication_owner
         from popot_agents.tools import ToolInputError

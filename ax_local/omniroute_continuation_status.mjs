@@ -7,6 +7,7 @@ import {registerHooks} from 'node:module';
 
 export function conversationStatus({isActive=false,lastSeenAt,now=Date.now(),ax,axUnavailable=false}, artifact) {
   let state='unknown', reason='No usable final response artifact is available.';
+  let code=null;
   const response=artifact?.pipeline?.clientResponse??artifact?.responseBody;
   const choice=response?.choices?.[0];
   if(choice) {
@@ -26,14 +27,18 @@ export function conversationStatus({isActive=false,lastSeenAt,now=Date.now(),ax,
     state=({children:'waiting_child',ci:'waiting_ci',model:'active'})[ax.waitingFor]??'waiting_tool';
     reason='AX task is running'+(ax.waitingFor?'; waiting for '+ax.waitingFor:'.');
   } else if(['failed','blocked'].includes(ax?.status)) {
-    state=ax.status;reason='AX workflow reports '+ax.status+'.';
+    state=ax.status;
+    const detail=typeof ax.reason==='string'?ax.reason.trim().slice(0,240):'';
+    code=/^[a-z][a-z0-9_]{0,79}$/.test(detail)?detail:null;
+    reason='AX workflow '+state+(detail?': '+detail:'.');
   } else if(ax?.status==='completed') {state='completed';reason='AX workflow completed.';}
   else if(ax?.status==='partial') {state='waiting_resume';reason='AX returned partial work; continuation requires its coordinator.';}
   else if(axUnavailable) {state='unknown';reason='AX status is unavailable; the gateway cannot determine worker progress.';}
   else if(['waiting_tool','incomplete'].includes(state)&&Number.isFinite(Date.parse(lastSeenAt))&&now-Date.parse(lastSeenAt)>300000) {
     state='stalled';reason='No active request or matching running AX task; the unfinished gateway conversation has no continuation for over 5 minutes.';
   } else if(state!=='unknown') reason=({completed:'The model response finished normally.',waiting_tool:'The model requested a tool; continuation has not been observed.',incomplete:'The response ended incomplete or was truncated.',failed:'The response failed.'})[state]??reason;
-  return {isStalled:state==='stalled',continuationState:state,continuationReason:reason};
+  return {isStalled:state==='stalled',continuationState:state,continuationReason:reason,
+    continuationCode:code};
 }
 
 const statusExpression=/isStalled:\(0,\w+\.ot\)\((\{artifactRelPath:\w+,lastSeenAt:\w+\.lastSeenAt,isActive:\w+\})\)/g;
@@ -54,10 +59,14 @@ export function patchConversationStatusPage(source) {
     const labels={stalled:'stalled',waiting_tool:'waiting tool',waiting_child:'waiting child',waiting_ci:'waiting CI',waiting_resume:'waiting resume',failed:'failed',blocked:'blocked'};
     if(!labels[state])return null;
     const problem=['stalled','failed','blocked'].includes(state);
-    return(0,l.jsxs)('span',{'data-popot':'popot-continuation-badge',title:e.continuationReason||'Gateway continuation status',
+    const badge=(0,l.jsxs)('span',{'data-popot':'popot-continuation-badge',title:e.continuationReason||'Gateway continuation status',
       className:'inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[9px] font-bold border '+(problem?'bg-red-500/15 text-red-500 border-red-500/25':'bg-amber-500/15 text-amber-600 border-amber-500/25'),
       children:[(0,l.jsx)('span',{className:'material-symbols-outlined text-[11px] leading-none',children:problem?'error':'hourglass_empty'}),labels[state]]});
-  }function g(`).replaceAll('isStalled:e.isStalled}', 'isStalled:e.isStalled,continuationState:e.continuationState,continuationReason:e.continuationReason}');
+    if(!['blocked','failed'].includes(state))return badge;
+    return(0,l.jsxs)('div',{className:'flex flex-col gap-1',children:[badge,
+      (0,l.jsx)('span',{'data-popot':'popot-continuation-reason',title:e.continuationReason,
+        className:'max-w-[20rem] truncate text-[10px] text-red-500',children:e.continuationCode||e.continuationReason})]});
+  }function g(`).replaceAll('isStalled:e.isStalled}', 'isStalled:e.isStalled,continuationState:e.continuationState,continuationReason:e.continuationReason,continuationCode:e.continuationCode}');
 }
 
 function header(headers,name) {
@@ -87,7 +96,9 @@ export function installConversationStatus(root='/app/.build/next') {
       if(!r.ok)throw new Error('AX status HTTP '+r.status);
       const body=await r.json(), next=new Map();
       for(const row of body.chats??[]) {
-        next.set(row.sessionId,{status:row.workflow?.state??(row.status==='running'?'running':row.outcomeStatus??row.status),waitingFor:row.waitingFor??row.workflow?.waitingFor,runId:row.workflow?.runId??row.runId});
+        next.set(row.sessionId,{status:row.workflow?.state??(row.status==='running'?'running':row.outcomeStatus??row.status),
+          reason:row.workflow?.reason??row.outcomeReason,waitingFor:row.waitingFor??row.workflow?.waitingFor,
+          runId:row.workflow?.runId??row.runId});
         for(const [id,state]of Object.entries(row.runStates??{}))next.set(row.sessionId+':'+id,{status:state,runId:id});
       }
       ax.clear();for(const [k,v]of next)ax.set(k,v);fetchedAt=Date.now();
