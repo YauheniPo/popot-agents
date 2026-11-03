@@ -449,7 +449,13 @@ class WorkEvidenceTests(unittest.TestCase):
                         'git --bogus=1 rev-parse HEAD',
                         'git --git-dirx=.git rev-parse HEAD',
                         'git --no-pager=true rev-parse HEAD',
-                        'git rev-parse -- HEAD'):
+                        'git rev-parse -- HEAD',
+                        "time '--' git rev-parse HEAD",
+                        'time \\-- git rev-parse HEAD',
+                        "time '-p' '--' git rev-parse HEAD",
+                        "time '-p' -- git rev-parse HEAD",
+                        "time '-p' git rev-parse HEAD",
+                        "time '-p' A=1 git rev-parse HEAD"):
             self.assertIsNone(observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'not-run'), command)
         # The same spellings still count when bash really runs the read-back.

@@ -388,6 +388,8 @@ def _wrapper_arguments(name, tokens, external=False):
                                 else _WRAPPER_OPTIONS[name])
     while tokens and tokens[0].startswith('-'):
         option = tokens[0]
+        if name == 'time' and not external and option.quoted:
+            break             # the keyword reads only unquoted `-p`/`--` as options
         if option == '--':
             return tokens[1:]
         if option == '-':
