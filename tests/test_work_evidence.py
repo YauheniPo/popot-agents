@@ -163,5 +163,10 @@ class WorkEvidenceTests(unittest.TestCase):
             receipt = observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'multiline')
             self.assertEqual(receipt and receipt['revision'], sha, command)
+        for command in ("bash -c 'cd /x &&\ngit rev-parse HEAD'",
+                        "bash -c 'git rev-parse HEAD &&\npwd'"):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'quoted-multiline')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
         self.assertIsNone(observe_tool_result('bash', {'command': 'pytest -q\ntrue # git rev-parse HEAD'},
             f'exit_code=0\n{sha}\n', 'multiline-not-head'))

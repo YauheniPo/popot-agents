@@ -56,10 +56,30 @@ def _line_commands(line):
     return commands
 
 
+def _lines(command):
+    """Physical lines, except that a newline inside quotes stays in its line."""
+    lines, current, quote = [], [], None
+    for char in command or '':
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = None
+        elif char in {'"', "'"}:
+            quote = char
+            current.append(char)
+        elif char == '\n':
+            lines.append(''.join(current))
+            current = []
+        else:
+            current.append(char)
+    lines.append(''.join(current))
+    return lines
+
+
 def _shell_commands(command):
     """Split a command line into simple commands without breaking quoted arguments."""
     commands = []
-    for line in (command or '').splitlines() or ['']:
+    for line in _lines(command):
         commands.extend(_line_commands(line))
     return commands
 
