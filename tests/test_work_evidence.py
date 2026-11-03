@@ -384,3 +384,45 @@ class WorkEvidenceTests(unittest.TestCase):
                         'nice +5 git rev-parse HEAD'):
             self.assertIsNone(observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'not-run'), command)
+
+    def test_wrapper_option_operands_and_assignment_prefixes_match_bash(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'db' * 20
+        # Options that name an operand or print a description instead of running
+        # the command leave the word after them as the command, so git never runs.
+        for command in ('command -v git rev-parse HEAD',
+                        'command -V git rev-parse HEAD',
+                        'command -pv git rev-parse HEAD',
+                        'sudo -u git rev-parse HEAD',
+                        'sudo -p git rev-parse HEAD',
+                        'sudo --preserve-env=GIT_DIR rev-parse HEAD',
+                        'env -u git rev-parse HEAD',
+                        'env --unset=git rev-parse HEAD',
+                        'exec -a git rev-parse HEAD',
+                        'time -f git rev-parse HEAD',
+                        'nohup --help git rev-parse HEAD',
+                        'nice A=b git rev-parse HEAD',
+                        'nohup A=b git rev-parse HEAD',
+                        'timeout 5 A=b git rev-parse HEAD'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'not-run'), command)
+        # The same grammar keeps real read-backs observable, including assignment
+        # prefixes that env, sudo and the time keyword really do apply.
+        for command in ('command -- git rev-parse HEAD',
+                        'command -p git rev-parse HEAD',
+                        'sudo -u deploy git rev-parse HEAD',
+                        'sudo -E A=b git rev-parse HEAD',
+                        'env -u GIT_DIR git rev-parse HEAD',
+                        'env -i A=b git rev-parse HEAD',
+                        'env --chdir=/tmp git rev-parse HEAD',
+                        "env '-u' GIT_DIR git rev-parse HEAD",
+                        'exec -a mygit git rev-parse HEAD',
+                        'sudo --preserve-env=GIT_DIR git rev-parse HEAD',
+                        'sudo --user=deploy git rev-parse HEAD',
+                        'sudo --command-timeout=5s git rev-parse HEAD',
+                        'time A=b git rev-parse HEAD',
+                        'time -p git rev-parse HEAD',
+                        'nohup git rev-parse HEAD'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'runs')
+            self.assertEqual(receipt and receipt['revision'], sha, command)

@@ -14,6 +14,32 @@ _NAME = r'[A-Za-z0-9_.-]+'
 _PULL_REQUEST_URL = re.compile(r'github\.com/(?:repos/)?(' + _NAME + r')/(' + _NAME + r')/(?:pull|pulls)/(\d+)')
 _SHELLS = {'bash', 'dash', 'sh', 'zsh'}
 _WRAPPERS = {'command', 'env', 'exec', 'nice', 'nohup', 'sudo', 'time', 'timeout'}
+# Options a wrapper accepts before its own command: flags that take no operand,
+# options that take one, and options that make the wrapper skip the command.
+# Anything outside a grammar fails closed: the guard must not guess a command ran.
+_WRAPPER_OPTIONS = {
+    'command': ({'-p', '--'}, {}, {'-v', '-V'}),
+    'env': ({'-i', '--ignore-environment', '-0', '--null', '-v', '--debug', '--'},
+            {'-u': 1, '--unset': 1, '-C': 1, '--chdir': 1, '-S': 1, '--split-string': 1},
+            set()),
+    'exec': ({'-c', '-l', '--'}, {'-a': 1}, set()),
+    'nohup': (set(), set(), {'--help', '--version'}),
+    'sudo': ({'-A', '--askpass', '-B', '--bell', '-b', '--background', '-E', '--preserve-env',
+              '-H', '--set-home', '-i', '--login', '-K', '--remove-timestamp', '-k',
+              '--reset-timestamp', '-N', '--no-update', '-n', '--non-interactive', '-P',
+              '--preserve-groups', '-S', '--stdin', '-s', '--shell', '--'},
+             {'-a': 1, '--auth-type': 1, '-c': 1, '--login-class': 1, '-C': 1, '-D': 1,
+              '--chdir': 1, '--close-from': 1, '--command-timeout': 1, '-g': 1,
+              '--group': 1, '-h': 1, '--host': 1, '-p': 1, '--preserve-env': 1,
+              '--prompt': 1, '-R': 1, '--chroot': 1, '-r': 1, '--role': 1, '-T': 1,
+              '-t': 1, '--type': 1, '-U': 1, '--other-user': 1, '-u': 1, '--user': 1},
+             {'-e', '--edit', '-l', '--list', '-v', '--validate', '-V', '--version'}),
+    'time': ({'-p', '--portability'}, {}, set()),
+}
+# GNU `time` is also a binary with its own grammar when the command names a path.
+_GNU_TIME_OPTIONS = ({'-a', '--append', '-v', '--verbose', '-q', '--quiet', '--'},
+                     {'-f': 1, '--format': 1, '-o': 1, '--output': 1}, set())
+_ASSIGNING_WRAPPERS = {'env', 'sudo'}
 _OPERATORS = {'&&', '||', ';', '|', '&'}
 _GIT_GLOBAL_OPTIONS = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix'}
 _DURATION = re.compile(r'\d+(?:\.\d+)?[smhd]?')
@@ -356,6 +382,45 @@ def _timeout_arguments(tokens):
     return tokens[1:]
 
 
+def _wrapper_arguments(name, tokens, external=False):
+    """Arguments after a wrapper's own options; empty when it cannot run a command."""
+    flags, operands, skipped = (_GNU_TIME_OPTIONS if name == 'time' and external
+                                else _WRAPPER_OPTIONS[name])
+    while tokens and tokens[0].startswith('-'):
+        option = tokens[0]
+        if option == '-':
+            break
+        if option in skipped:
+            return []
+        if option in flags:
+            tokens = tokens[1:]
+            continue
+        head, separator, _ = option.partition('=')
+        if head in operands:
+            if separator:
+                tokens = tokens[1:]
+            elif len(tokens) > operands[head]:
+                tokens = tokens[1 + operands[head]:]
+            else:
+                return []
+            continue
+        letters = option[1:]
+        if option.startswith('--') or len(letters) < 2:
+            return []
+        if all('-' + letter in flags for letter in letters):
+            tokens = tokens[1:]
+        elif '-' + letters[0] in operands:
+            if len(letters) > 1:
+                tokens = tokens[1:]
+            elif len(tokens) > operands['-' + letters[0]]:
+                tokens = tokens[1 + operands['-' + letters[0]]:]
+            else:
+                return []
+        else:
+            return []
+    return tokens
+
+
 def _head_read(tokens):
     while tokens and tokens[0] in _RESERVED and not tokens[0].quoted:
         tokens = tokens[1:]
@@ -370,16 +435,21 @@ def _head_read(tokens):
             return False
         if name not in _WRAPPERS:
             break
+        external = '/' in tokens[0]
         tokens = tokens[1:]
         if name == 'nice':
             tokens = _nice_arguments(tokens)
         elif name == 'timeout':
             tokens = _timeout_arguments(tokens)
         else:
-            while tokens and (tokens[0].startswith('-') or _ASSIGNMENT.fullmatch(tokens[0])):
+            tokens = _wrapper_arguments(name, tokens, external)
+        if name in _ASSIGNING_WRAPPERS:
+            # env and sudo re-parse their arguments, so quoting does not hide a prefix.
+            while tokens and _ASSIGNMENT.fullmatch(tokens[0]):
                 tokens = tokens[1:]
-    while _assignment(tokens):
-        tokens = tokens[1:]
+        elif name == 'time' and not external:
+            while _assignment(tokens):
+                tokens = tokens[1:]
     if not tokens or os.path.basename(tokens[0]) != 'git':
         return False
     rest = tokens[1:]
