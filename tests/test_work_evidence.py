@@ -170,3 +170,19 @@ class WorkEvidenceTests(unittest.TestCase):
             self.assertEqual(receipt and receipt['revision'], sha, command)
         self.assertIsNone(observe_tool_result('bash', {'command': 'pytest -q\ntrue # git rev-parse HEAD'},
             f'exit_code=0\n{sha}\n', 'multiline-not-head'))
+
+    def test_escaped_quotes_and_heredocs_keep_head_read_backs_honest(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'b2' * 20
+        for command in ('echo "a \\" b"\ngit rev-parse HEAD',
+                        'bash -c \'echo "a \\" b"\ngit rev-parse HEAD\'',
+                        "cat <<'EOF'\nadjusted\nEOF\ngit rev-parse HEAD"):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'escaped-quote')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+        for command in ("cat > /tmp/head.sh <<'EOF'\ngit rev-parse HEAD\nEOF",
+                        'cat > /tmp/head.sh <<EOF\ngit rev-parse HEAD\nEOF',
+                        "cat > /tmp/head.sh <<'EOF' # helper\ngit rev-parse HEAD\nEOF",
+                        'echo "git rev-parse HEAD"', 'true # git rev-parse HEAD'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'not-head'), command)

@@ -43,11 +43,11 @@ def _line_commands(line):
             if current:
                 commands.append(current)
             current = []
-        elif re.fullmatch(r'\d?[<>]&?', token):
+        elif re.fullmatch(r'\d?[<>]+&?', token):
             if current and current[-1].isdigit():
                 current.pop()
             skip_target = True
-        elif re.fullmatch(r'\d?[<>]&?\S+', token):
+        elif re.fullmatch(r'\d?[<>]+&?\S+', token):
             continue
         else:
             current.append(token)
@@ -57,10 +57,16 @@ def _line_commands(line):
 
 
 def _lines(command):
-    """Physical lines, except that a newline inside quotes stays in its line."""
-    lines, current, quote = [], [], None
+    """Physical lines, except that a quoted or escaped newline stays in its line."""
+    lines, current, quote, escaped = [], [], None, False
     for char in command or '':
-        if quote:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif quote != "'" and char == '\\':
+            current.append(char)
+            escaped = True
+        elif quote:
             current.append(char)
             if char == quote:
                 quote = None
@@ -76,11 +82,63 @@ def _lines(command):
     return lines
 
 
+_HEREDOC_WORD = re.compile(r'[A-Za-z0-9_.-]+')
+
+
+def _heredocs(line):
+    """Heredoc redirections of one physical line as (word, strip_tabs) pairs."""
+    found, quote, index = [], None, 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == '\\' and quote == '"':
+                index += 1
+            elif char == quote:
+                quote = None
+        elif char == '\\':
+            index += 1
+        elif char == '#' and (index == 0 or line[index - 1] in ' \t'):
+            break
+        elif char in {'"', "'"}:
+            quote = char
+        elif line.startswith('<<', index):
+            if line.startswith('<<<', index):
+                index += 3
+                continue
+            index += 2
+            strip_tabs = line.startswith('-', index)
+            index += 1 if strip_tabs else 0
+            while index < len(line) and line[index] in ' \t':
+                index += 1
+            if line[index:index + 1] == '\\':
+                index += 1
+            closer = line[index] if line[index:index + 1] in {'"', "'"} else None
+            if closer:
+                end = line.find(closer, index + 1)
+                word = line[index + 1:end] if end != -1 else ''
+                index = end + 1 if end != -1 else len(line)
+            else:
+                match = _HEREDOC_WORD.match(line, index)
+                word, index = (match[0], match.end()) if match else ('', len(line))
+            if not word:
+                break
+            found.append((word, strip_tabs))
+            continue
+        index += 1
+    return found
+
+
 def _shell_commands(command):
     """Split a command line into simple commands without breaking quoted arguments."""
-    commands = []
+    commands, pending = [], []
     for line in _lines(command):
+        if pending:
+            word, strip_tabs = pending[0]
+            if (line.lstrip('\t') if strip_tabs else line) == word:
+                pending.pop(0)
+            continue
         commands.extend(_line_commands(line))
+        pending.extend(_heredocs(line))
     return commands
 
 
