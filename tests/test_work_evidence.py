@@ -196,6 +196,9 @@ class WorkEvidenceTests(unittest.TestCase):
                         "cat > /tmp/head.sh <<'EOF' # helper\ngit rev-parse HEAD\nEOF",
                         'echo "git rev-parse HEAD"', 'true # git rev-parse HEAD',
                         'printf "x"; echo $(date +%s)#<<EOF\ngit rev-parse HEAD\nEOF',
-                        'echo ${v}#<<EOF\ngit rev-parse HEAD\nEOF'):
+                        'echo ${v}#<<EOF\ngit rev-parse HEAD\nEOF',
+                        'echo hi{#<<EOF\ngit rev-parse HEAD\nEOF',
+                        'echo $((1 << 2))#<<EOF\ngit rev-parse HEAD\nEOF',
+                        'echo {a,b}#<<EOF\ngit rev-parse HEAD\nEOF'):
             self.assertIsNone(observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'not-head'), command)

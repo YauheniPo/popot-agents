@@ -83,7 +83,7 @@ def _lines(command):
 
 
 _HEREDOC_WORD = re.compile(r'[A-Za-z0-9_.-]+')
-_COMMENT_LEAD = frozenset(' \t\n;&|({')
+_COMMENT_LEAD = frozenset(' \t\n;&|(')
 _ARITHMETIC = (('$((', '))'), ('$[', ']'), ('((', '))'))
 
 
