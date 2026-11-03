@@ -101,6 +101,10 @@ def _heredocs(line):
             break
         elif char in {'"', "'"}:
             quote = char
+        elif line.startswith(('$((', '(('), index):
+            end = line.find('))', index + 2)
+            index = end + 2 if end != -1 else len(line)
+            continue
         elif line.startswith('<<', index):
             if line.startswith('<<<', index):
                 index += 3

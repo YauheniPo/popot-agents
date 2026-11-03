@@ -176,7 +176,8 @@ class WorkEvidenceTests(unittest.TestCase):
         sha = 'b2' * 20
         for command in ('echo "a \\" b"\ngit rev-parse HEAD',
                         'bash -c \'echo "a \\" b"\ngit rev-parse HEAD\'',
-                        "cat <<'EOF'\nadjusted\nEOF\ngit rev-parse HEAD"):
+                        "cat <<'EOF'\nadjusted\nEOF\ngit rev-parse HEAD",
+                        'shift=$((1 << 2))\ngit rev-parse HEAD'):
             receipt = observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'escaped-quote')
             self.assertEqual(receipt and receipt['revision'], sha, command)
