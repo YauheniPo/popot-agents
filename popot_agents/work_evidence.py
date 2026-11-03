@@ -83,13 +83,12 @@ def _lines(command):
 
 
 _HEREDOC_WORD = re.compile(r'[A-Za-z0-9_.-]+')
-_COMMENT_LEAD = frozenset(' \t\n;&|(')
 _ARITHMETIC = (('$((', '))'), ('$[', ']'), ('((', '))'))
 
 
 def _scan_line(line, quote=None, closer=None):
     """Heredoc openers on one physical line plus the quote and arithmetic state left."""
-    found, index = [], 0
+    found, index, word_start, substitutions = [], 0, True, 0
     while index < len(line):
         char = line[index]
         if closer:
@@ -98,20 +97,30 @@ def _scan_line(line, quote=None, closer=None):
                 return found, quote, closer
             index = end + len(closer)
             closer = None
+            word_start = False
             continue
         if quote:
             if char == '\\' and quote == '"':
                 index += 1
             elif char == quote:
                 quote = None
-        elif char == '\\':
+            word_start = False
             index += 1
-        elif char == '#' and (index == 0 or line[index - 1] in _COMMENT_LEAD):
+            continue
+        if char == '\\':
+            word_start = False
+            index += 2
+            continue
+        if char == '#' and word_start:
             return found, quote, closer
-        elif char in {'"', "'"}:
+        if char in {'"', "'"}:
             quote = char
-        elif line.startswith('<<', index):
+            word_start = False
+            index += 1
+            continue
+        if line.startswith('<<', index):
             if line.startswith('<<<', index):
+                word_start = False
                 index += 3
                 continue
             index += 2
@@ -132,19 +141,35 @@ def _scan_line(line, quote=None, closer=None):
             if not word:
                 return found, quote, closer
             found.append((word, strip_tabs))
+            word_start = False
             continue
-        else:
-            for opener, end_token in _ARITHMETIC:
-                if not line.startswith(opener, index):
-                    continue
-                end = line.rfind(end_token, index + len(opener))
-                if end < 0:
-                    return found, quote, end_token
-                index = end + len(end_token)
-                break
+        arithmetic = next((pair for pair in _ARITHMETIC if line.startswith(pair[0], index)), None)
+        if arithmetic:
+            opener, end_token = arithmetic
+            end = line.rfind(end_token, index + len(opener))
+            if end < 0:
+                return found, quote, end_token
+            index = end + len(end_token)
+            word_start = False
+            continue
+        if line.startswith('$(', index):
+            substitutions += 1
+            word_start = False
+            index += 2
+            continue
+        if char == ')':
+            if substitutions:
+                substitutions -= 1
+                word_start = False
             else:
-                index += 1
+                word_start = True
+            index += 1
             continue
+        if char in ' \t\n;&|(':
+            word_start = True
+            index += 1
+            continue
+        word_start = False
         index += 1
     return found, quote, closer
 
