@@ -14,7 +14,7 @@ _NAME = r'[A-Za-z0-9_.-]+'
 _PULL_REQUEST_URL = re.compile(r'github\.com/(?:repos/)?(' + _NAME + r')/(' + _NAME + r')/(?:pull|pulls)/(\d+)')
 _SHELLS = {'bash', 'dash', 'sh', 'zsh'}
 _WRAPPERS = {'command', 'env', 'exec', 'nohup', 'sudo', 'time'}
-_OPERATORS = {'&&', '||', ';', '|', '&', '\n'}
+_OPERATORS = {'&&', '||', ';', '|', '&'}
 _GIT_GLOBAL_OPTIONS = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix'}
 _GIT_GLOBAL_FLAGS = {'--no-pager', '-P', '--paginate', '--bare'}
 _REV_PARSE_FLAGS = {'--verify', '-q', '--quiet', '--'}
@@ -33,10 +33,9 @@ def _tokenize(command):
         return []
 
 
-def _shell_commands(command):
-    """Split a command line into simple commands without breaking quoted arguments."""
+def _line_commands(line):
     commands, current, skip_target = [], [], False
-    for token in _tokenize(command):
+    for token in _tokenize(line):
         if skip_target:
             skip_target = False
             continue
@@ -54,6 +53,14 @@ def _shell_commands(command):
             current.append(token)
     if current:
         commands.append(current)
+    return commands
+
+
+def _shell_commands(command):
+    """Split a command line into simple commands without breaking quoted arguments."""
+    commands = []
+    for line in (command or '').splitlines() or ['']:
+        commands.extend(_line_commands(line))
     return commands
 
 

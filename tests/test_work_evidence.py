@@ -154,3 +154,14 @@ class WorkEvidenceTests(unittest.TestCase):
                         'git rev-parse HEAD~1^{commit}'):
             self.assertIsNone(observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'not-head'), command)
+
+    def test_multiline_head_read_backs_are_recognized(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'a1' * 20
+        for command in ('git rev-parse HEAD\npytest -q', 'pytest -q\ngit rev-parse HEAD',
+                        'cd /workspace/repo\ngit -C . rev-parse HEAD\npwd'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'multiline')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+        self.assertIsNone(observe_tool_result('bash', {'command': 'pytest -q\ntrue # git rev-parse HEAD'},
+            f'exit_code=0\n{sha}\n', 'multiline-not-head'))
