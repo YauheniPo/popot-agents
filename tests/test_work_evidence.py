@@ -177,7 +177,13 @@ class WorkEvidenceTests(unittest.TestCase):
         for command in ('echo "a \\" b"\ngit rev-parse HEAD',
                         'bash -c \'echo "a \\" b"\ngit rev-parse HEAD\'',
                         "cat <<'EOF'\nadjusted\nEOF\ngit rev-parse HEAD",
-                        'shift=$((1 << 2))\ngit rev-parse HEAD'):
+                        'shift=$((1 << 2))\ngit rev-parse HEAD',
+                        'shift=$[1 << 2]\ngit rev-parse HEAD',
+                        'value=$((1 +\n2 << 1))\ngit rev-parse HEAD',
+                        'true;#<<EOF\ngit rev-parse HEAD',
+                        'cat > /tmp/head.sh <<EOF\r\ngit rev-parse HEAD\r\nEOF\r\n'
+                        'git rev-parse HEAD',
+                        "cat <<'EOF'\ngit rev-parse HEAD\\\nEOF\ngit rev-parse HEAD"):
             receipt = observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'escaped-quote')
             self.assertEqual(receipt and receipt['revision'], sha, command)

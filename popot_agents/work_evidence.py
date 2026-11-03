@@ -83,6 +83,45 @@ def _lines(command):
 
 
 _HEREDOC_WORD = re.compile(r'[A-Za-z0-9_.-]+')
+_COMMENT_LEAD = frozenset(' \t\n;&|(){}')
+
+
+def _strip_arithmetic(line):
+    """Line without arithmetic expansions, plus the closer the line still owes."""
+    kept, index, quote = [], 0, None
+    while index < len(line):
+        char = line[index]
+        if quote:
+            kept.append(char)
+            if char == '\\' and quote == '"':
+                if index + 1 < len(line):
+                    kept.append(line[index + 1])
+                    index += 1
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char == '\\':
+            kept.append(line[index:index + 2])
+            index += 2
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            kept.append(char)
+            index += 1
+            continue
+        for opener, closer in (('$((', '))'), ('$[', ']'), ('((', '))')):
+            if not line.startswith(opener, index):
+                continue
+            end = line.find(closer, index + len(opener))
+            if end < 0:
+                return ''.join(kept), closer
+            index = end + len(closer)
+            break
+        else:
+            kept.append(char)
+            index += 1
+    return ''.join(kept), None
 
 
 def _heredocs(line):
@@ -97,14 +136,10 @@ def _heredocs(line):
                 quote = None
         elif char == '\\':
             index += 1
-        elif char == '#' and (index == 0 or line[index - 1] in ' \t'):
+        elif char == '#' and (index == 0 or line[index - 1] in _COMMENT_LEAD):
             break
         elif char in {'"', "'"}:
             quote = char
-        elif line.startswith(('$((', '(('), index):
-            end = line.find('))', index + 2)
-            index = end + 2 if end != -1 else len(line)
-            continue
         elif line.startswith('<<', index):
             if line.startswith('<<<', index):
                 index += 3
@@ -132,17 +167,31 @@ def _heredocs(line):
     return found
 
 
-def _shell_commands(command):
-    """Split a command line into simple commands without breaking quoted arguments."""
-    commands, pending = [], []
-    for line in _lines(command):
+def _without_heredoc_bodies(command):
+    """Command without heredoc bodies, which the shell never runs as commands."""
+    kept, pending, arithmetic = [], [], None
+    for raw in (command or '').split('\n'):
+        line = raw.rstrip('\r')
         if pending:
             word, strip_tabs = pending[0]
             if (line.lstrip('\t') if strip_tabs else line) == word:
                 pending.pop(0)
             continue
+        kept.append(line)
+        if arithmetic:
+            arithmetic = None if arithmetic in line else arithmetic
+            continue
+        rest, arithmetic = _strip_arithmetic(line)
+        if not arithmetic:
+            pending.extend(_heredocs(rest))
+    return '\n'.join(kept)
+
+
+def _shell_commands(command):
+    """Split a command line into simple commands without breaking quoted arguments."""
+    commands = []
+    for line in _lines(_without_heredoc_bodies(command)):
         commands.extend(_line_commands(line))
-        pending.extend(_heredocs(line))
     return commands
 
 
