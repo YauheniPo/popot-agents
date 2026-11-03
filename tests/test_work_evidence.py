@@ -231,3 +231,47 @@ class WorkEvidenceTests(unittest.TestCase):
         for command in ("echo '`git rev-parse HEAD`'", 'echo \\`git rev-parse HEAD\\`'):
             self.assertIsNone(observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'literal-backtick'), command)
+
+    def test_control_flow_and_redirections_keep_read_backs_visible(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd4' * 20
+        # Reserved words, negation, brace groups and `&>`/`>|` redirections leave
+        # the command itself intact, so bash really does run git rev-parse HEAD.
+        for command in ('for i in 1; do git rev-parse HEAD; done',
+                        'while true; do git rev-parse HEAD; break; done',
+                        'if git rev-parse HEAD; then echo ok; fi',
+                        '! git rev-parse HEAD',
+                        '{ git rev-parse HEAD; } > /tmp/rev',
+                        'git rev-parse HEAD &>/dev/null',
+                        'git rev-parse HEAD &>> /tmp/log',
+                        'git rev-parse HEAD >| /tmp/rev',
+                        'git rev-parse HEAD HEAD',
+                        'nice -n 5 git rev-parse HEAD',
+                        'timeout -s KILL 30 git rev-parse HEAD',
+                        'git rev-parse \\' + '\n' + 'HEAD',
+                        'git rev-parse HEAD \\' + '\n' + '| cat'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'control-flow')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+        for command in ('nice 5 echo git rev-parse HEAD', 'timeout 30 true',
+                        'git rev-parse HEAD~1 &>/dev/null'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'not-head'), command)
+
+    def test_heredoc_delimiters_that_continue_past_the_scan_stay_opaque(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd5' * 20
+        # Bash reads `<<EOF#tag` and `<<EOF$x` as one delimiter word, so the body
+        # never ends: the read-back below it is body text, not a command.
+        for command in ('cat > /tmp/f <<EOF#tag\nbody\nEOF\ngit rev-parse HEAD',
+                        'cat > /tmp/f <<EOF$x\nbody\nEOF\ngit rev-parse HEAD',
+                        "cat > /tmp/f <<'EOF'#tag\nbody\nEOF\ngit rev-parse HEAD"):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'opaque'), command)
+        # A separator after the delimiter keeps the body closeable.
+        for command in ("cat > /tmp/f <<'EOF' # helper\nbody\nEOF\ngit rev-parse HEAD",
+                        'cat > /tmp/f <<EOF; git rev-parse HEAD\nbody\nEOF',
+                        'cat > /tmp/f <<EOF> /tmp/rev\nbody\nEOF\ngit rev-parse HEAD'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'closed')
+            self.assertEqual(receipt and receipt['revision'], sha, command)

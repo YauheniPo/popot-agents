@@ -13,12 +13,18 @@ _SHA = r'[a-fA-F0-9]{40}'
 _NAME = r'[A-Za-z0-9_.-]+'
 _PULL_REQUEST_URL = re.compile(r'github\.com/(?:repos/)?(' + _NAME + r')/(' + _NAME + r')/(?:pull|pulls)/(\d+)')
 _SHELLS = {'bash', 'dash', 'sh', 'zsh'}
-_WRAPPERS = {'command', 'env', 'exec', 'nohup', 'sudo', 'time'}
+_WRAPPERS = {'command', 'env', 'exec', 'nice', 'nohup', 'sudo', 'time', 'timeout'}
 _OPERATORS = {'&&', '||', ';', '|', '&'}
 _GIT_GLOBAL_OPTIONS = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix'}
+# Wrappers whose first positional argument is an adjustment or a duration, not a command.
+_DURATION_WRAPPERS = {'nice', 'timeout'}
+_DURATION = re.compile(r'\d+(?:\.\d+)?[smhd]?')
 _GIT_GLOBAL_FLAGS = {'--no-pager', '-P', '--paginate', '--bare'}
 _REV_PARSE_FLAGS = {'--verify', '-q', '--quiet', '--'}
-_HEAD_REVISIONS = (['HEAD'], ['HEAD^{commit}'])
+_HEAD_WORDS = ('HEAD', 'HEAD^{commit}')
+# Reserved words that can precede a simple command inside one shell segment.
+_RESERVED = {'!', '{', '}', 'if', 'then', 'elif', 'else', 'fi', 'for', 'while',
+             'until', 'do', 'done', 'case', 'esac', 'select', 'function'}
 _ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=\S*')
 
 
@@ -43,11 +49,11 @@ def _line_commands(line):
             if current:
                 commands.append(current)
             current = []
-        elif re.fullmatch(r'\d?[<>]+&?', token):
+        elif re.fullmatch(r'&?\d?[<>]+\|?&?\d?', token):
             if current and current[-1].isdigit():
                 current.pop()
             skip_target = True
-        elif re.fullmatch(r'\d?[<>]+&?\S+', token):
+        elif re.fullmatch(r'&?\d?[<>]+\|?&?\S+', token):
             continue
         else:
             current.append(token)
@@ -61,7 +67,11 @@ def _lines(command):
     lines, current, quote, escaped = [], [], None, False
     for char in command or '':
         if escaped:
-            current.append(char)
+            if char == '\n':
+                # The shell removes a backslash-newline continuation entirely.
+                current.pop()
+            else:
+                current.append(char)
             escaped = False
         elif quote != "'" and char == '\\':
             current.append(char)
@@ -141,6 +151,11 @@ def _scan_line(line, quote=None, closer=None):
                 word, index = (match[0], match.end()) if match else ('', len(line))
             if not word:
                 return found, quote, closer
+            if index < len(line) and line[index] not in ' \t;&|<>()':
+                # The delimiter word continues past what the scan can resolve
+                # (for example `<<EOF#tag`): keep the body opaque instead of
+                # closing it before the shell would.
+                return found + [(None, strip_tabs, True)], quote, closer
             found.append((word, strip_tabs, escaped or bool(closing)))
             word_start = False
             continue
@@ -195,6 +210,8 @@ def _without_heredoc_bodies(command):
             continue
         kept.append(line)
         found, quote, closer = _scan_line(line, quote, closer)
+        if any(word is None for word, _, _ in found):
+            return ''
         if not closer:
             pending.extend(found)
     return '\n'.join(kept)
@@ -209,6 +226,8 @@ def _shell_commands(command):
 
 
 def _head_read(tokens):
+    while tokens and tokens[0] in _RESERVED:
+        tokens = tokens[1:]
     while tokens:
         name = os.path.basename(tokens[0])
         if name in _SHELLS:
@@ -220,6 +239,13 @@ def _head_read(tokens):
         tokens = tokens[1:]
         while tokens and (tokens[0].startswith('-') or _ASSIGNMENT.fullmatch(tokens[0])):
             tokens = tokens[1:]
+        if name in _DURATION_WRAPPERS:
+            # `nice -n 5` / `timeout -s KILL 5` leave a value in front of the command.
+            if (tokens and not _DURATION.fullmatch(tokens[0]) and len(tokens) > 1
+                    and _DURATION.fullmatch(tokens[1])):
+                tokens = tokens[1:]
+            if tokens and _DURATION.fullmatch(tokens[0]):
+                tokens = tokens[1:]
     while tokens and _ASSIGNMENT.fullmatch(tokens[0]):
         tokens = tokens[1:]
     if not tokens or os.path.basename(tokens[0]) != 'git':
@@ -237,7 +263,7 @@ def _head_read(tokens):
     arguments = rest[1:]
     revisions = [a for a in arguments if not a.startswith('-')]
     flags = {a for a in arguments if a.startswith('-')}
-    return revisions in _HEAD_REVISIONS and flags <= _REV_PARSE_FLAGS
+    return bool(revisions) and all(r in _HEAD_WORDS for r in revisions) and flags <= _REV_PARSE_FLAGS
 
 
 def _rev_parse_head(command):
