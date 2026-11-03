@@ -275,3 +275,55 @@ class WorkEvidenceTests(unittest.TestCase):
             receipt = observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'closed')
             self.assertEqual(receipt and receipt['revision'], sha, command)
+
+    def test_wrapper_option_grammar_matches_bash(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd6' * 20
+        # nice and timeout run the command only after their own options and, for
+        # timeout, a duration; the read-back below the wrapper is the real command.
+        for command in ('nice -n 5 git rev-parse HEAD',
+                        'nice -n5 git rev-parse HEAD',
+                        'nice -5 git rev-parse HEAD',
+                        'nice --adjustment=5 git rev-parse HEAD',
+                        'nice -- git rev-parse HEAD',
+                        'command nice -n 5 git rev-parse HEAD',
+                        'timeout -s KILL 30 git rev-parse HEAD',
+                        'timeout -sKILL 30 git rev-parse HEAD',
+                        'timeout --signal=TERM 30 git rev-parse --verify HEAD',
+                        'timeout -k 5s 30s git rev-parse HEAD',
+                        'timeout 0.5s git rev-parse HEAD'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'wrapper')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+        # `nice 5` runs the word `5` and `timeout git` rejects its duration, so
+        # neither reaches git even though a sha-shaped line follows.
+        for command in ('nice 5 git rev-parse HEAD',
+                        'timeout git rev-parse HEAD',
+                        'timeout 30 true',
+                        'nice 5 echo git rev-parse HEAD',
+                        'timeout -s 30 true',
+                        'nice -n git rev-parse HEAD'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'not-run'), command)
+
+    def test_quoted_reserved_words_and_assignments_are_commands(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd7' * 20
+        # Quoting or escaping turns a reserved word or an assignment into the
+        # command name, so git never runs even though a sha-shaped line follows.
+        for command in ("printf '%s\\n' " + sha + "; 'done' git rev-parse HEAD || true",
+                        "printf '%s\\n' " + sha + "; \\done git rev-parse HEAD || true",
+                        "'then' git rev-parse HEAD",
+                        "'A=b' git rev-parse HEAD",
+                        "printf '%s\\n' " + sha + "; 'fi git rev-parse HEAD' || true"):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'quoted'), command)
+        # Quoting the command name still runs it, and unquoted grammar keeps working.
+        for command in ("'git' rev-parse HEAD",
+                        'A=b git rev-parse HEAD',
+                        "env 'A=b' git rev-parse HEAD",
+                        'for i in 1; do git rev-parse HEAD; done',
+                        'if git rev-parse HEAD; then echo ok; fi'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'runs')
+            self.assertEqual(receipt and receipt['revision'], sha, command)

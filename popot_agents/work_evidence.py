@@ -16,9 +16,8 @@ _SHELLS = {'bash', 'dash', 'sh', 'zsh'}
 _WRAPPERS = {'command', 'env', 'exec', 'nice', 'nohup', 'sudo', 'time', 'timeout'}
 _OPERATORS = {'&&', '||', ';', '|', '&'}
 _GIT_GLOBAL_OPTIONS = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix'}
-# Wrappers whose first positional argument is an adjustment or a duration, not a command.
-_DURATION_WRAPPERS = {'nice', 'timeout'}
 _DURATION = re.compile(r'\d+(?:\.\d+)?[smhd]?')
+_INTEGER = re.compile(r'[+-]?\d+')
 _GIT_GLOBAL_FLAGS = {'--no-pager', '-P', '--paginate', '--bare'}
 _REV_PARSE_FLAGS = {'--verify', '-q', '--quiet', '--'}
 _HEAD_WORDS = ('HEAD', 'HEAD^{commit}')
@@ -28,15 +27,59 @@ _RESERVED = {'!', '{', '}', 'if', 'then', 'elif', 'else', 'fi', 'for', 'while',
 _ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=\S*')
 
 
+_QUOTED = '\x01'
+_QUOTE_END = '\x02'
+
+
+class _Word(str):
+    """A shell word that remembers whether quoting or escaping produced it."""
+
+    quoted = False
+
+
+def _marked(command):
+    """Command with markers inside quoted and escaped words, invisible to the lexer."""
+    pieces, quote, index = [], None, 0
+    while index < len(command):
+        char = command[index]
+        if quote:
+            if char == quote:
+                pieces.append(_QUOTE_END + char)
+                quote = None
+            elif char == '\\' and quote == '"' and index + 1 < len(command):
+                index += 1
+                pieces.append('\\' + command[index])
+            else:
+                pieces.append(char)
+        elif char in {'"', "'"}:
+            quote = char
+            pieces.append(char + _QUOTED)
+        elif char == '\\' and index + 1 < len(command):
+            index += 1
+            escaped = command[index]
+            marker = _QUOTED if escaped.isalnum() or escaped in '_.-' else ''
+            pieces.append('\\' + marker + escaped)
+        else:
+            pieces.append(char)
+        index += 1
+    return ''.join(pieces)
+
+
 def _tokenize(command):
     """Shell tokens with unquoted operators separated and quoted text kept intact."""
-    lexer = shlex.shlex(command or '', posix=True, punctuation_chars='();<>|&`')
+    lexer = shlex.shlex(_marked(command or ''), posix=True, punctuation_chars='();<>|&`')
     lexer.whitespace_split = True
     lexer.commenters = '#'
     try:
-        return list(lexer)
+        raw = list(lexer)
     except ValueError:
         return []
+    tokens = []
+    for token in raw:
+        word = _Word(token.replace(_QUOTED, '').replace(_QUOTE_END, ''))
+        word.quoted = _QUOTED in token or _QUOTE_END in token
+        tokens.append(word)
+    return tokens
 
 
 def _line_commands(line):
@@ -225,8 +268,62 @@ def _shell_commands(command):
     return commands
 
 
+def _assignment(tokens):
+    """True when the leading word is an unquoted NAME=value prefix, not a command."""
+    return bool(tokens) and not tokens[0].quoted and bool(_ASSIGNMENT.fullmatch(tokens[0]))
+
+
+def _nice_arguments(tokens):
+    """Arguments after nice's own options; empty when nice cannot run a command."""
+    while tokens:
+        option = tokens[0]
+        if option in {'-n', '--adjustment'}:
+            if len(tokens) < 2 or not _INTEGER.fullmatch(tokens[1]):
+                return []
+            tokens = tokens[2:]
+        elif option.startswith('--adjustment='):
+            if not _INTEGER.fullmatch(option.split('=', 1)[1]):
+                return []
+            tokens = tokens[1:]
+        elif option.startswith('-n') and _INTEGER.fullmatch(option[2:]):
+            tokens = tokens[1:]
+        elif re.fullmatch(r'-[+-]?\d+', option) and not option.startswith('--'):
+            tokens = tokens[1:]
+        elif option == '--':
+            return tokens[1:]
+        else:
+            break
+    return tokens
+
+
+def _timeout_arguments(tokens):
+    """Arguments after timeout's own options; empty when timeout cannot run a command."""
+    while tokens and tokens[0].startswith('-'):
+        option = tokens[0]
+        name, _, value = option.partition('=')
+        if option == '--':
+            tokens = tokens[1:]
+            break
+        if name in {'-s', '--signal', '-k', '--kill-after'}:
+            if value:
+                tokens = tokens[1:]
+            elif len(tokens) > 1:
+                tokens = tokens[2:]
+            else:
+                return []
+        elif option.startswith(('-s', '-k')) and not option.startswith('--') and len(option) > 2:
+            tokens = tokens[1:]
+        elif option in {'-v', '--verbose', '--foreground', '--preserve-status'}:
+            tokens = tokens[1:]
+        else:
+            return []
+    if not tokens or not _DURATION.fullmatch(tokens[0]):
+        return []
+    return tokens[1:]
+
+
 def _head_read(tokens):
-    while tokens and tokens[0] in _RESERVED:
+    while tokens and tokens[0] in _RESERVED and not tokens[0].quoted:
         tokens = tokens[1:]
     while tokens:
         name = os.path.basename(tokens[0])
@@ -237,16 +334,14 @@ def _head_read(tokens):
         if name not in _WRAPPERS:
             break
         tokens = tokens[1:]
-        while tokens and (tokens[0].startswith('-') or _ASSIGNMENT.fullmatch(tokens[0])):
-            tokens = tokens[1:]
-        if name in _DURATION_WRAPPERS:
-            # `nice -n 5` / `timeout -s KILL 5` leave a value in front of the command.
-            if (tokens and not _DURATION.fullmatch(tokens[0]) and len(tokens) > 1
-                    and _DURATION.fullmatch(tokens[1])):
+        if name == 'nice':
+            tokens = _nice_arguments(tokens)
+        elif name == 'timeout':
+            tokens = _timeout_arguments(tokens)
+        else:
+            while tokens and (tokens[0].startswith('-') or _ASSIGNMENT.fullmatch(tokens[0])):
                 tokens = tokens[1:]
-            if tokens and _DURATION.fullmatch(tokens[0]):
-                tokens = tokens[1:]
-    while tokens and _ASSIGNMENT.fullmatch(tokens[0]):
+    while _assignment(tokens):
         tokens = tokens[1:]
     if not tokens or os.path.basename(tokens[0]) != 'git':
         return False
