@@ -183,13 +183,19 @@ class WorkEvidenceTests(unittest.TestCase):
                         'true;#<<EOF\ngit rev-parse HEAD',
                         'cat > /tmp/head.sh <<EOF\r\ngit rev-parse HEAD\r\nEOF\r\n'
                         'git rev-parse HEAD',
-                        "cat <<'EOF'\ngit rev-parse HEAD\\\nEOF\ngit rev-parse HEAD"):
+                        "cat <<'EOF'\ngit rev-parse HEAD\\\nEOF\ngit rev-parse HEAD",
+                        'x=$(( ((1)) << 3 ))\ngit rev-parse HEAD',
+                        '(( 1 +\n2 << 1 ))\ngit rev-parse HEAD',
+                        "bash -c 'echo start\ncat <<EOF\nbody\nEOF\ngit rev-parse HEAD'",
+                        "bash -lc 'echo start\ncat <<-EOF\n\tbody\n\tEOF\ngit rev-parse HEAD'"):
             receipt = observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'escaped-quote')
             self.assertEqual(receipt and receipt['revision'], sha, command)
         for command in ("cat > /tmp/head.sh <<'EOF'\ngit rev-parse HEAD\nEOF",
                         'cat > /tmp/head.sh <<EOF\ngit rev-parse HEAD\nEOF',
                         "cat > /tmp/head.sh <<'EOF' # helper\ngit rev-parse HEAD\nEOF",
-                        'echo "git rev-parse HEAD"', 'true # git rev-parse HEAD'):
+                        'echo "git rev-parse HEAD"', 'true # git rev-parse HEAD',
+                        'printf "x"; echo $(date +%s)#<<EOF\ngit rev-parse HEAD\nEOF',
+                        'echo ${v}#<<EOF\ngit rev-parse HEAD\nEOF'):
             self.assertIsNone(observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'not-head'), command)

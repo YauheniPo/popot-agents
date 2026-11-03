@@ -83,52 +83,22 @@ def _lines(command):
 
 
 _HEREDOC_WORD = re.compile(r'[A-Za-z0-9_.-]+')
-_COMMENT_LEAD = frozenset(' \t\n;&|(){}')
+_COMMENT_LEAD = frozenset(' \t\n;&|({')
+_ARITHMETIC = (('$((', '))'), ('$[', ']'), ('((', '))'))
 
 
-def _strip_arithmetic(line):
-    """Line without arithmetic expansions, plus the closer the line still owes."""
-    kept, index, quote = [], 0, None
+def _scan_line(line, quote=None, closer=None):
+    """Heredoc openers on one physical line plus the quote and arithmetic state left."""
+    found, index = [], 0
     while index < len(line):
         char = line[index]
-        if quote:
-            kept.append(char)
-            if char == '\\' and quote == '"':
-                if index + 1 < len(line):
-                    kept.append(line[index + 1])
-                    index += 1
-            elif char == quote:
-                quote = None
-            index += 1
-            continue
-        if char == '\\':
-            kept.append(line[index:index + 2])
-            index += 2
-            continue
-        if char in {'"', "'"}:
-            quote = char
-            kept.append(char)
-            index += 1
-            continue
-        for opener, closer in (('$((', '))'), ('$[', ']'), ('((', '))')):
-            if not line.startswith(opener, index):
-                continue
-            end = line.find(closer, index + len(opener))
+        if closer:
+            end = line.rfind(closer, index)
             if end < 0:
-                return ''.join(kept), closer
+                return found, quote, closer
             index = end + len(closer)
-            break
-        else:
-            kept.append(char)
-            index += 1
-    return ''.join(kept), None
-
-
-def _heredocs(line):
-    """Heredoc redirections of one physical line as (word, strip_tabs) pairs."""
-    found, quote, index = [], None, 0
-    while index < len(line):
-        char = line[index]
+            closer = None
+            continue
         if quote:
             if char == '\\' and quote == '"':
                 index += 1
@@ -137,7 +107,7 @@ def _heredocs(line):
         elif char == '\\':
             index += 1
         elif char == '#' and (index == 0 or line[index - 1] in _COMMENT_LEAD):
-            break
+            return found, quote, closer
         elif char in {'"', "'"}:
             quote = char
         elif line.startswith('<<', index):
@@ -151,25 +121,37 @@ def _heredocs(line):
                 index += 1
             if line[index:index + 1] == '\\':
                 index += 1
-            closer = line[index] if line[index:index + 1] in {'"', "'"} else None
-            if closer:
-                end = line.find(closer, index + 1)
+            closing = line[index] if line[index:index + 1] in {'"', "'"} else None
+            if closing:
+                end = line.find(closing, index + 1)
                 word = line[index + 1:end] if end != -1 else ''
                 index = end + 1 if end != -1 else len(line)
             else:
                 match = _HEREDOC_WORD.match(line, index)
                 word, index = (match[0], match.end()) if match else ('', len(line))
             if not word:
-                break
+                return found, quote, closer
             found.append((word, strip_tabs))
             continue
+        else:
+            for opener, end_token in _ARITHMETIC:
+                if not line.startswith(opener, index):
+                    continue
+                end = line.rfind(end_token, index + len(opener))
+                if end < 0:
+                    return found, quote, end_token
+                index = end + len(end_token)
+                break
+            else:
+                index += 1
+            continue
         index += 1
-    return found
+    return found, quote, closer
 
 
 def _without_heredoc_bodies(command):
     """Command without heredoc bodies, which the shell never runs as commands."""
-    kept, pending, arithmetic = [], [], None
+    kept, pending, quote, closer = [], [], None, None
     for raw in (command or '').split('\n'):
         line = raw.rstrip('\r')
         if pending:
@@ -178,12 +160,9 @@ def _without_heredoc_bodies(command):
                 pending.pop(0)
             continue
         kept.append(line)
-        if arithmetic:
-            arithmetic = None if arithmetic in line else arithmetic
-            continue
-        rest, arithmetic = _strip_arithmetic(line)
-        if not arithmetic:
-            pending.extend(_heredocs(rest))
+        found, quote, closer = _scan_line(line, quote, closer)
+        if not closer:
+            pending.extend(found)
     return '\n'.join(kept)
 
 
