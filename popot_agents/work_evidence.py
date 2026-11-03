@@ -29,16 +29,28 @@ _ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=\S*')
 
 _QUOTED = '\x01'
 _QUOTE_END = '\x02'
+_ESCAPED = {}
+_ESCAPE_VALUES = {}
+
+
+def _placeholder(char):
+    """A word character standing in for an escaped character until tokenizing."""
+    if char not in _ESCAPED:
+        placeholder = chr(0xE000 + len(_ESCAPED))
+        _ESCAPED[char] = placeholder
+        _ESCAPE_VALUES[placeholder] = char
+    return _ESCAPED[char]
 
 
 class _Word(str):
-    """A shell word that remembers whether quoting or escaping produced it."""
+    """A shell word that remembers which parts quoting or escaping produced."""
 
     quoted = False
+    name_quoted = False
 
 
 def _marked(command):
-    """Command with markers inside quoted and escaped words, invisible to the lexer."""
+    """Command with markers inside quoted words and stand-ins for escaped characters."""
     pieces, quote, index = [], None, 0
     while index < len(command):
         char = command[index]
@@ -57,8 +69,9 @@ def _marked(command):
         elif char == '\\' and index + 1 < len(command):
             index += 1
             escaped = command[index]
-            marker = _QUOTED if escaped.isalnum() or escaped in '_.-' else ''
-            pieces.append('\\' + marker + escaped)
+            # An escaped newline is a continuation the shell removes; every other
+            # escaped character is a literal that cannot end the word or start one.
+            pieces.append('\\\n' if escaped == '\n' else _placeholder(escaped))
         else:
             pieces.append(char)
         index += 1
@@ -74,10 +87,17 @@ def _tokenize(command):
         raw = list(lexer)
     except ValueError:
         return []
+    marks = [_QUOTED, _QUOTE_END, *_ESCAPE_VALUES]
     tokens = []
     for token in raw:
-        word = _Word(token.replace(_QUOTED, '').replace(_QUOTE_END, ''))
-        word.quoted = _QUOTED in token or _QUOTE_END in token
+        text = token
+        for placeholder, char in _ESCAPE_VALUES.items():
+            text = text.replace(placeholder, char)
+        word = _Word(text.replace(_QUOTED, '').replace(_QUOTE_END, ''))
+        word.quoted = any(mark in token for mark in marks)
+        equals = token.find('=')
+        # `A='b'` is an assignment, while `'A'=b`, `A"=b"` and `A\=b` are commands.
+        word.name_quoted = equals < 0 or any(mark in token[:equals] for mark in marks)
         tokens.append(word)
     return tokens
 
@@ -88,15 +108,16 @@ def _line_commands(line):
         if skip_target:
             skip_target = False
             continue
-        if token in _OPERATORS or token and set(token) <= set('();|&`'):
+        if not token.quoted and (token in _OPERATORS
+                                 or token and set(token) <= set('();|&`')):
             if current:
                 commands.append(current)
             current = []
-        elif re.fullmatch(r'&?\d?[<>]+\|?&?\d?', token):
+        elif not token.quoted and re.fullmatch(r'&?\d?[<>]+\|?&?\d?', token):
             if current and current[-1].isdigit():
                 current.pop()
             skip_target = True
-        elif re.fullmatch(r'&?\d?[<>]+\|?&?\S+', token):
+        elif not token.quoted and re.fullmatch(r'&?\d?[<>]+\|?&?\S+', token):
             continue
         else:
             current.append(token)
@@ -269,8 +290,8 @@ def _shell_commands(command):
 
 
 def _assignment(tokens):
-    """True when the leading word is an unquoted NAME=value prefix, not a command."""
-    return bool(tokens) and not tokens[0].quoted and bool(_ASSIGNMENT.fullmatch(tokens[0]))
+    """True when the leading word is a NAME=value prefix, not a command name."""
+    return bool(tokens) and not tokens[0].name_quoted and bool(_ASSIGNMENT.fullmatch(tokens[0]))
 
 
 def _nice_arguments(tokens):
@@ -287,7 +308,7 @@ def _nice_arguments(tokens):
             tokens = tokens[1:]
         elif option.startswith('-n') and _INTEGER.fullmatch(option[2:]):
             tokens = tokens[1:]
-        elif re.fullmatch(r'-[+-]?\d+', option) and not option.startswith('--'):
+        elif re.fullmatch(r'--?[+-]?\d+', option):
             tokens = tokens[1:]
         elif option == '--':
             return tokens[1:]
@@ -300,23 +321,36 @@ def _timeout_arguments(tokens):
     """Arguments after timeout's own options; empty when timeout cannot run a command."""
     while tokens and tokens[0].startswith('-'):
         option = tokens[0]
-        name, _, value = option.partition('=')
         if option == '--':
             tokens = tokens[1:]
             break
-        if name in {'-s', '--signal', '-k', '--kill-after'}:
-            if value:
+        if option.startswith('--'):
+            name, _, value = option.partition('=')
+            if name in {'--signal', '--kill-after'}:
+                if value:
+                    tokens = tokens[1:]
+                elif len(tokens) > 1:
+                    tokens = tokens[2:]
+                else:
+                    return []
+            elif option in {'--verbose', '--foreground', '--preserve-status'}:
                 tokens = tokens[1:]
-            elif len(tokens) > 1:
-                tokens = tokens[2:]
             else:
                 return []
-        elif option.startswith(('-s', '-k')) and not option.startswith('--') and len(option) > 2:
-            tokens = tokens[1:]
-        elif option in {'-v', '--verbose', '--foreground', '--preserve-status'}:
-            tokens = tokens[1:]
-        else:
-            return []
+            continue
+        letters, consumed = option[1:], 1
+        while letters:
+            letter, letters = letters[0], letters[1:]
+            if letter in 'vfp':
+                continue
+            if letter not in 'sk':
+                return []
+            if not letters:
+                if len(tokens) < 2:
+                    return []
+                consumed = 2
+            letters = ''
+        tokens = tokens[consumed:]
     if not tokens or not _DURATION.fullmatch(tokens[0]):
         return []
     return tokens[1:]
@@ -324,6 +358,9 @@ def _timeout_arguments(tokens):
 
 def _head_read(tokens):
     while tokens and tokens[0] in _RESERVED and not tokens[0].quoted:
+        tokens = tokens[1:]
+    # `A=1 timeout 5 git ...` assigns for the wrapper, so strip prefixes first.
+    while _assignment(tokens):
         tokens = tokens[1:]
     while tokens:
         name = os.path.basename(tokens[0])

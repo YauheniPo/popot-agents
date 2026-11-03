@@ -327,3 +327,60 @@ class WorkEvidenceTests(unittest.TestCase):
             receipt = observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'runs')
             self.assertEqual(receipt and receipt['revision'], sha, command)
+
+    def test_assignment_quoting_follows_bash(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd8' * 20
+        # Quoting the value keeps NAME=value an assignment for the command it prefixes.
+        for command in ("A='b' git rev-parse HEAD",
+                        'A="b" git rev-parse HEAD',
+                        "A=b'c' git rev-parse HEAD",
+                        "A='' git rev-parse HEAD",
+                        "A='b' B=c git rev-parse HEAD",
+                        "A='b' command git rev-parse HEAD",
+                        'A=1 timeout 5 git rev-parse HEAD'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'assignment')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+        # Quoting the name or the `=` makes the whole word the command name instead.
+        for command in ("'A'=b git rev-parse HEAD",
+                        'A"=b" git rev-parse HEAD',
+                        'A\\=b git rev-parse HEAD'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'not-assignment'), command)
+
+    def test_escaped_punctuation_is_a_command_name(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd9' * 20
+        # Quoting or escaping an operator or a reserved word keeps it a word, so
+        # bash looks for a command with that name and never reaches git.
+        for command in ('\\! git rev-parse HEAD',
+                        '\\{ git rev-parse HEAD',
+                        '\\} git rev-parse HEAD',
+                        "';' git rev-parse HEAD",
+                        "printf '%s\\n' " + sha + "; ';' git rev-parse HEAD"):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'word'), command)
+
+    def test_timeout_short_flags_and_nice_legacy_adjustment(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'da' * 20
+        for command in ('timeout -f 30 git rev-parse HEAD',
+                        'timeout -p 30 git rev-parse HEAD',
+                        'timeout -v 30 git rev-parse HEAD',
+                        'timeout -v -f 30 git rev-parse HEAD',
+                        'timeout -vs KILL 30 git rev-parse HEAD',
+                        'timeout -fk5 30 git rev-parse HEAD',
+                        'timeout -fsKILL 30 git rev-parse HEAD',
+                        'nice --5 git rev-parse HEAD',
+                        'nice --10 git rev-parse HEAD',
+                        'nice -n -5 git rev-parse HEAD',
+                        'nice -n +5 git rev-parse HEAD'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'wrapper')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+        for command in ('timeout -x 30 git rev-parse HEAD',
+                        'timeout -f 30 true',
+                        'nice +5 git rev-parse HEAD'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'not-run'), command)
