@@ -205,3 +205,29 @@ class WorkEvidenceTests(unittest.TestCase):
                         'echo {a,b}#<<EOF\ngit rev-parse HEAD\nEOF'):
             self.assertIsNone(observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'not-head'), command)
+
+    def test_heredoc_backslash_continuations_and_backticks_match_bash(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'c3' * 20
+        # An unquoted here-document body continues on a trailing backslash, so the
+        # delimiter line and the command after it stay inside the body: bash warns
+        # and never runs git, hence no revision read-back.
+        for command in ('cat > /tmp/f <<EOF\nfoo\\\nEOF\ngit rev-parse HEAD',
+                        'cat > /tmp/f <<EOF\nfoo\\\\\\\nEOF\ngit rev-parse HEAD',
+                        'cat > /tmp/f <<-EOF\n\tfoo\\\n\tEOF\ngit rev-parse HEAD'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'continued'), command)
+        # A quoted delimiter, an even backslash run or a CRLF ending keeps the
+        # delimiter literal, so bash does reach the command and prints the revision.
+        for command in ("cat > /tmp/f <<'EOF'\nfoo\\\nEOF\ngit rev-parse HEAD",
+                        'cat > /tmp/f <<\\EOF\nfoo\\\nEOF\ngit rev-parse HEAD',
+                        'cat > /tmp/f <<EOF\nfoo\\\\\nEOF\ngit rev-parse HEAD',
+                        'cat > /tmp/f <<EOF\r\nfoo\\\r\nEOF\r\ngit rev-parse HEAD',
+                        'rev=`git rev-parse HEAD`; echo "$rev"'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'executed')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+        # Quoted or escaped backticks are literal text, so nothing runs git.
+        for command in ("echo '`git rev-parse HEAD`'", 'echo \\`git rev-parse HEAD\\`'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'literal-backtick'), command)

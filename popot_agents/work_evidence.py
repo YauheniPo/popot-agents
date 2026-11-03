@@ -24,7 +24,7 @@ _ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=\S*')
 
 def _tokenize(command):
     """Shell tokens with unquoted operators separated and quoted text kept intact."""
-    lexer = shlex.shlex(command or '', posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(command or '', posix=True, punctuation_chars='();<>|&`')
     lexer.whitespace_split = True
     lexer.commenters = '#'
     try:
@@ -39,7 +39,7 @@ def _line_commands(line):
         if skip_target:
             skip_target = False
             continue
-        if token in _OPERATORS or token and set(token) <= set('();|&'):
+        if token in _OPERATORS or token and set(token) <= set('();|&`'):
             if current:
                 commands.append(current)
             current = []
@@ -128,7 +128,8 @@ def _scan_line(line, quote=None, closer=None):
             index += 1 if strip_tabs else 0
             while index < len(line) and line[index] in ' \t':
                 index += 1
-            if line[index:index + 1] == '\\':
+            escaped = line[index:index + 1] == '\\'
+            if escaped:
                 index += 1
             closing = line[index] if line[index:index + 1] in {'"', "'"} else None
             if closing:
@@ -140,7 +141,7 @@ def _scan_line(line, quote=None, closer=None):
                 word, index = (match[0], match.end()) if match else ('', len(line))
             if not word:
                 return found, quote, closer
-            found.append((word, strip_tabs))
+            found.append((word, strip_tabs, escaped or bool(closing)))
             word_start = False
             continue
         arithmetic = next((pair for pair in _ARITHMETIC if line.startswith(pair[0], index)), None)
@@ -174,15 +175,23 @@ def _scan_line(line, quote=None, closer=None):
     return found, quote, closer
 
 
+def _continued_body(raw):
+    """An unquoted body line ending in an odd backslash run continues onto the next line."""
+    return (len(raw) - len(raw.rstrip('\\'))) % 2 == 1
+
+
 def _without_heredoc_bodies(command):
     """Command without heredoc bodies, which the shell never runs as commands."""
-    kept, pending, quote, closer = [], [], None, None
+    kept, pending, quote, closer, continued = [], [], None, None, False
     for raw in (command or '').split('\n'):
         line = raw.rstrip('\r')
         if pending:
-            word, strip_tabs = pending[0]
-            if (line.lstrip('\t') if strip_tabs else line) == word:
+            word, strip_tabs, quoted = pending[0]
+            if not continued and (line.lstrip('\t') if strip_tabs else line) == word:
                 pending.pop(0)
+                continued = False
+            else:
+                continued = not quoted and _continued_body(raw)
             continue
         kept.append(line)
         found, quote, closer = _scan_line(line, quote, closer)
