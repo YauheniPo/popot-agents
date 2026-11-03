@@ -104,3 +104,36 @@ class WorkEvidenceTests(unittest.TestCase):
             result = observe_tool_result('bash', {'command':'python3 -m pytest; echo EXIT_CODE=$?'},
                 'exit_code=0\n'+output, 'masked')
             self.assertEqual(result['status'], 'failed')
+
+    def test_revision_receipt_requires_a_real_head_read_back(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd' * 40
+        for command in ('true # git rev-parse HEAD', 'echo "git rev-parse HEAD"',
+                        'git rev-parse HEAD~1', 'git rev-parse HEAD2', 'git rev-parse --short HEAD'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'fake'), command)
+        for command in ('git rev-parse HEAD', 'cd repo && git rev-parse --verify HEAD 2>/dev/null',
+                        'git -C /workspace/repo rev-parse HEAD'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'real')
+            self.assertEqual(receipt['revision'], sha, command)
+            self.assertEqual(receipt['kind'], 'revision')
+
+    def test_pr_head_receipt_binds_the_observed_pull_request(self):
+        from popot_agents.work_evidence import observe_tool_result, evidence_event
+        sha = 'e' * 40
+        payload = json.dumps({'number': 37, 'head': {'sha': sha},
+            'html_url': 'https://github.com/YauheniPo/popot-agents/pull/37'})
+        receipt = observe_tool_result('mcp__github__get_pull_request',
+            {'owner': 'YauheniPo', 'repo': 'popot-agents', 'pullNumber': 37}, payload, 'pr')
+        self.assertEqual(receipt['revisionSource'], 'pr_head')
+        self.assertEqual(receipt['repository'], 'yauhenipo/popot-agents')
+        self.assertEqual(receipt['pullRequest'], 37)
+        forwarded = evidence_event(json.dumps({'event': 'work_evidence', 'receipt': receipt}))
+        self.assertEqual(forwarded['repository'], 'yauhenipo/popot-agents')
+        self.assertEqual(forwarded['pullRequest'], 37)
+        bare = observe_tool_result('mcp__github__pull_request_read', {}, json.dumps({
+            'number': 12, 'headRefOid': sha,
+            'base': {'repo': {'full_name': 'YauheniPo/Other-Repo'}}}), 'bare')
+        self.assertEqual(bare['repository'], 'yauhenipo/other-repo')
+        self.assertEqual(bare['pullRequest'], 12)

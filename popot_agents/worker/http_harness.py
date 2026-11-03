@@ -21,7 +21,8 @@ from .context import compact_tool_results
 from . import mcp_client
 from .delegation_policy import (available_roles, completed_answer, delegation_instructions,
                                 handoff_task, publication_policy, check_publication_owner)
-from .verification import observed_revision, acceptance_revision, verified_roles
+from .verification import (observed_revision, acceptance_revision, requested_pull_request,
+                          verified_roles)
 from .turn_memory import TurnMemory, parse_summary
 from .final_result import evidence_transcript, parse_result, retained_receipts
 from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA as REVIEW_SCHEMA
@@ -384,7 +385,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     def save_result(answer, status, reason, report=None):
         revision = observed_revision(report, tool_evidence,
             (run_context or {}).get('target_revision') if role_config.get('name',role_config.get('_ax_role')) in {'code_reviewer','qa_engineer'} else None)
-        target = acceptance_revision(list(completed_delegations.values()), tool_evidence)
+        target = acceptance_revision(list(completed_delegations.values()), tool_evidence,
+                                     requested_pull_request(user_context))
         if status == 'completed' and target and (report or {}).get('revision') not in (None,target):
             status, reason = 'partial','acceptance_revision_mismatch'
             report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +

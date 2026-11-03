@@ -1,13 +1,75 @@
 """Bounded observations of actual tool results, distinct from task acceptance."""
 import hashlib
 import json
+import os
 import re
+import shlex
 from datetime import datetime, timezone
 
 from popot_agents.progress import redact_text
 
 MAX_RECEIPTS = 16
 _SHA = r'[a-fA-F0-9]{40}'
+_NAME = r'[A-Za-z0-9_.-]+'
+_PULL_REQUEST_URL = re.compile(r'github\.com/(?:repos/)?(' + _NAME + r')/(' + _NAME + r')/(?:pull|pulls)/(\d+)')
+_SHELLS = {'bash', 'dash', 'sh', 'zsh'}
+_GIT_GLOBAL_OPTIONS = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix'}
+_GIT_GLOBAL_FLAGS = {'--no-pager', '-P', '--paginate', '--bare'}
+_REV_PARSE_FLAGS = {'--verify', '-q', '--quiet'}
+
+
+def _rev_parse_head(command):
+    """True only when a shell segment really invokes `git rev-parse HEAD`."""
+    for segment in re.split(r'&&|\|\||[;|\n]', command or ''):
+        segment = re.sub(r'\d?>>?\s*\S+|\d?<&\d|<<\s*\S+', ' ', segment)
+        try:
+            tokens = shlex.split(segment, comments=True)
+        except ValueError:
+            continue
+        if tokens and os.path.basename(tokens[0]) in _SHELLS:
+            if len(tokens) == 3 and tokens[1] == '-c':
+                return _rev_parse_head(tokens[2])
+            continue
+        while tokens and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=\S*', tokens[0]):
+            tokens = tokens[1:]
+        if not tokens or os.path.basename(tokens[0]) != 'git':
+            continue
+        rest = tokens[1:]
+        while rest:
+            if rest[0] in _GIT_GLOBAL_OPTIONS and len(rest) > 1:
+                rest = rest[2:]
+            elif rest[0] in _GIT_GLOBAL_FLAGS or rest[0].startswith('--') and '=' in rest[0]:
+                rest = rest[1:]
+            else:
+                break
+        if not rest or rest[0] != 'rev-parse':
+            continue
+        arguments = rest[1:]
+        if ([a for a in arguments if not a.startswith('-')] == ['HEAD']
+                and set(a for a in arguments if a.startswith('-')) <= _REV_PARSE_FLAGS):
+            return True
+    return False
+
+
+def _pull_reference(data, arguments):
+    """Repository and number of the pull request a github call or payload describes."""
+    arguments = arguments if isinstance(arguments, dict) else {}
+    owner, repo, number = arguments.get('owner'), arguments.get('repo'), arguments.get('pullNumber')
+    named = (isinstance(owner, str) and isinstance(repo, str) and re.fullmatch(_NAME, owner)
+             and re.fullmatch(_NAME, repo) and type(number) is int and number > 0)
+    base = data.get('base') if isinstance(data.get('base'), dict) else {}
+    payload_repo = base.get('repo') if isinstance(base.get('repo'), dict) else {}
+    full_name = payload_repo.get('full_name')
+    if not named and isinstance(full_name, str) and full_name.count('/') == 1:
+        owner, repo, number = full_name.split('/')[0], full_name.split('/')[1], data.get('number')
+        named = bool(owner and repo and type(number) is int and number > 0)
+    if named:
+        return f'{owner}/{repo}'.lower(), number
+    for link in (data.get('html_url'), data.get('url')):
+        match = _PULL_REQUEST_URL.search(link) if isinstance(link, str) else None
+        if match:
+            return f'{match[1]}/{match[2]}'.lower(), int(match[3])
+    return None
 
 
 def observe_tool_result(name, arguments, output, call_id):
@@ -40,7 +102,7 @@ def observe_tool_result(name, arguments, output, call_id):
             kind, summary = 'commit', 'Git commit returned successfully; publication is separate.'
         elif exit_code == 0 and re.search(r'\bgit\b[^\n;|&]*\bpush\b', command) and re.search(r'(?m)^\s+\S+\s+\S+\s+->\s+\S+', text):
             kind, summary = 'publication', 'Git push returned a remote-ref update; verify the remote head and CI.'
-        if re.search(r'git\s+rev-parse\s+HEAD', command):
+        if _rev_parse_head(command):
             match = re.search(r'(?m)^('+_SHA+r')\s*$', text)
             revision = match[1].lower() if match else None
             if revision and kind is None:
@@ -86,6 +148,9 @@ def observe_tool_result(name, arguments, output, call_id):
         receipt['revision'] = revision
         if data.get('headRefOid') or isinstance(data.get('head'),dict) and data['head'].get('sha'):
             receipt['revisionSource'] = 'pr_head'
+            pull = _pull_reference(data, arguments)
+            if pull:
+                receipt['repository'], receipt['pullRequest'] = pull
     if exit_code is not None:
         receipt['exitCode'] = exit_code
     if command:
@@ -131,6 +196,10 @@ def evidence_event(message):
         result['revision'] = value['revision'].lower()
     if value.get('revisionSource') == 'pr_head':
         result['revisionSource'] = 'pr_head'
+        if isinstance(value.get('repository'), str) and re.fullmatch(_NAME + '/' + _NAME, value['repository']):
+            result['repository'] = value['repository'].lower()
+        if type(value.get('pullRequest')) is int and value['pullRequest'] > 0:
+            result['pullRequest'] = value['pullRequest']
     if type(value.get('exitCode')) is int:
         result['exitCode'] = value['exitCode']
     if value.get('outcomeUnknown') is True:
