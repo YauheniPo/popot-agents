@@ -137,3 +137,20 @@ class WorkEvidenceTests(unittest.TestCase):
             'base': {'repo': {'full_name': 'YauheniPo/Other-Repo'}}}), 'bare')
         self.assertEqual(bare['repository'], 'yauhenipo/other-repo')
         self.assertEqual(bare['pullRequest'], 12)
+
+    def test_wrapped_and_quoted_head_read_backs_are_recognized(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'f' * 40
+        for command in ("bash -c 'cd /x && git rev-parse HEAD'",
+                        "bash -lc 'cd /repo && git rev-parse HEAD'",
+                        'sudo git rev-parse HEAD', 'env GIT_DIR=/r git rev-parse HEAD',
+                        'rev=$(git rev-parse HEAD); echo "$rev"',
+                        'bash -c "git status" && git rev-parse HEAD',
+                        'git rev-parse HEAD --', 'git rev-parse HEAD^{commit}'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'wrapped')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+        for command in ("echo 'cd /x && git rev-parse HEAD'",
+                        'git rev-parse HEAD~1^{commit}'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'not-head'), command)

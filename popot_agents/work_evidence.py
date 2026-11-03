@@ -13,42 +13,85 @@ _SHA = r'[a-fA-F0-9]{40}'
 _NAME = r'[A-Za-z0-9_.-]+'
 _PULL_REQUEST_URL = re.compile(r'github\.com/(?:repos/)?(' + _NAME + r')/(' + _NAME + r')/(?:pull|pulls)/(\d+)')
 _SHELLS = {'bash', 'dash', 'sh', 'zsh'}
+_WRAPPERS = {'command', 'env', 'exec', 'nohup', 'sudo', 'time'}
+_OPERATORS = {'&&', '||', ';', '|', '&', '\n'}
 _GIT_GLOBAL_OPTIONS = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix'}
 _GIT_GLOBAL_FLAGS = {'--no-pager', '-P', '--paginate', '--bare'}
-_REV_PARSE_FLAGS = {'--verify', '-q', '--quiet'}
+_REV_PARSE_FLAGS = {'--verify', '-q', '--quiet', '--'}
+_HEAD_REVISIONS = (['HEAD'], ['HEAD^{commit}'])
+_ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=\S*')
+
+
+def _tokenize(command):
+    """Shell tokens with unquoted operators separated and quoted text kept intact."""
+    lexer = shlex.shlex(command or '', posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = '#'
+    try:
+        return list(lexer)
+    except ValueError:
+        return []
+
+
+def _shell_commands(command):
+    """Split a command line into simple commands without breaking quoted arguments."""
+    commands, current, skip_target = [], [], False
+    for token in _tokenize(command):
+        if skip_target:
+            skip_target = False
+            continue
+        if token in _OPERATORS or token and set(token) <= set('();|&'):
+            if current:
+                commands.append(current)
+            current = []
+        elif re.fullmatch(r'\d?[<>]&?', token):
+            if current and current[-1].isdigit():
+                current.pop()
+            skip_target = True
+        elif re.fullmatch(r'\d?[<>]&?\S+', token):
+            continue
+        else:
+            current.append(token)
+    if current:
+        commands.append(current)
+    return commands
+
+
+def _head_read(tokens):
+    while tokens:
+        name = os.path.basename(tokens[0])
+        if name in _SHELLS:
+            if len(tokens) > 2 and re.fullmatch(r'-[A-Za-z]*c', tokens[1]):
+                return _rev_parse_head(tokens[2])
+            return False
+        if name not in _WRAPPERS:
+            break
+        tokens = tokens[1:]
+        while tokens and (tokens[0].startswith('-') or _ASSIGNMENT.fullmatch(tokens[0])):
+            tokens = tokens[1:]
+    while tokens and _ASSIGNMENT.fullmatch(tokens[0]):
+        tokens = tokens[1:]
+    if not tokens or os.path.basename(tokens[0]) != 'git':
+        return False
+    rest = tokens[1:]
+    while rest:
+        if rest[0] in _GIT_GLOBAL_OPTIONS and len(rest) > 1:
+            rest = rest[2:]
+        elif rest[0] in _GIT_GLOBAL_FLAGS or rest[0].startswith('--') and '=' in rest[0]:
+            rest = rest[1:]
+        else:
+            break
+    if not rest or rest[0] != 'rev-parse':
+        return False
+    arguments = rest[1:]
+    revisions = [a for a in arguments if not a.startswith('-')]
+    flags = {a for a in arguments if a.startswith('-')}
+    return revisions in _HEAD_REVISIONS and flags <= _REV_PARSE_FLAGS
 
 
 def _rev_parse_head(command):
     """True only when a shell segment really invokes `git rev-parse HEAD`."""
-    for segment in re.split(r'&&|\|\||[;|\n]', command or ''):
-        segment = re.sub(r'\d?>>?\s*\S+|\d?<&\d|<<\s*\S+', ' ', segment)
-        try:
-            tokens = shlex.split(segment, comments=True)
-        except ValueError:
-            continue
-        if tokens and os.path.basename(tokens[0]) in _SHELLS:
-            if len(tokens) == 3 and tokens[1] == '-c':
-                return _rev_parse_head(tokens[2])
-            continue
-        while tokens and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=\S*', tokens[0]):
-            tokens = tokens[1:]
-        if not tokens or os.path.basename(tokens[0]) != 'git':
-            continue
-        rest = tokens[1:]
-        while rest:
-            if rest[0] in _GIT_GLOBAL_OPTIONS and len(rest) > 1:
-                rest = rest[2:]
-            elif rest[0] in _GIT_GLOBAL_FLAGS or rest[0].startswith('--') and '=' in rest[0]:
-                rest = rest[1:]
-            else:
-                break
-        if not rest or rest[0] != 'rev-parse':
-            continue
-        arguments = rest[1:]
-        if ([a for a in arguments if not a.startswith('-')] == ['HEAD']
-                and set(a for a in arguments if a.startswith('-')) <= _REV_PARSE_FLAGS):
-            return True
-    return False
+    return any(_head_read(tokens) for tokens in _shell_commands(command))
 
 
 def _pull_reference(data, arguments):

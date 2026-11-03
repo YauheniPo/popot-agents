@@ -2,7 +2,10 @@
 import re
 from datetime import datetime, timezone
 
-_PULL_REQUEST = re.compile(r'github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)')
+_PULL_REQUEST = re.compile(r'github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)',
+                          re.IGNORECASE)
+# Several requested pull requests: acceptance must not trust any pr_head receipt.
+AMBIGUOUS = object()
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
 
@@ -33,8 +36,10 @@ def requested_pull_request(messages):
         if isinstance(content, str):
             targets.update((owner.lower(), repo.lower(), int(number))
                            for owner, repo, number in _PULL_REQUEST.findall(content))
-    if len(targets) != 1:
+    if not targets:
         return None
+    if len(targets) != 1:
+        return AMBIGUOUS
     owner, repo, number = targets.pop()
     return {'repository': f'{owner}/{repo}', 'pullRequest': number}
 
@@ -56,6 +61,8 @@ def acceptance_revision(children, receipts, target=None):
     latest = implementations[-1] if implementations else {}
     revision = latest.get('outcome',{}).get('revision')
     reported = _moment(latest.get('reportedAt'))
+    if target is AMBIGUOUS:
+        return revision
     # A newer parent read-back can establish that the PR head changed again, but only
     # for the pull request the user asked about and only at its latest observed head.
     fresh = [r for r in receipts
