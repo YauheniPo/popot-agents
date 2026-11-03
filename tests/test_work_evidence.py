@@ -414,6 +414,8 @@ class WorkEvidenceTests(unittest.TestCase):
                         'sudo -E A=b git rev-parse HEAD',
                         'env -u GIT_DIR git rev-parse HEAD',
                         'env -i A=b git rev-parse HEAD',
+                        'env - git rev-parse HEAD',
+                        'env - A=b git rev-parse HEAD',
                         'env --chdir=/tmp git rev-parse HEAD',
                         "env '-u' GIT_DIR git rev-parse HEAD",
                         'exec -a mygit git rev-parse HEAD',
@@ -423,6 +425,45 @@ class WorkEvidenceTests(unittest.TestCase):
                         'time A=b git rev-parse HEAD',
                         'time -p git rev-parse HEAD',
                         'nohup git rev-parse HEAD'):
+            receipt = observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'runs')
+            self.assertEqual(receipt and receipt['revision'], sha, command)
+
+    def test_double_dash_option_end_and_git_global_grammar(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'dc' * 20
+        # `--` ends option parsing, so a dash word after it is the command name,
+        # env rejects `-0` with a command, a shell builtin cannot follow an
+        # exec'd wrapper, and unknown git global options abort git.
+        for command in ('env -- -i git rev-parse HEAD',
+                        'env -- -u GIT_DIR git rev-parse HEAD',
+                        'command -- -p git rev-parse HEAD',
+                        'command -p -- -p git rev-parse HEAD',
+                        'exec -- -c git rev-parse HEAD',
+                        'exec -- -a custom git rev-parse HEAD',
+                        'env -0i git rev-parse HEAD',
+                        'env -0 git rev-parse HEAD',
+                        'env command git rev-parse HEAD',
+                        'nice command git rev-parse HEAD',
+                        'exec command git rev-parse HEAD',
+                        'git --bogus=1 rev-parse HEAD',
+                        'git --git-dirx=.git rev-parse HEAD',
+                        'git --no-pager=true rev-parse HEAD',
+                        'git rev-parse -- HEAD'):
+            self.assertIsNone(observe_tool_result('bash', {'command': command},
+                f'exit_code=0\n{sha}\n', 'not-run'), command)
+        # The same spellings still count when bash really runs the read-back.
+        for command in ('env -- git rev-parse HEAD',
+                        'env - git rev-parse HEAD',
+                        'env - A=b git rev-parse HEAD',
+                        'command -- git rev-parse HEAD',
+                        'nohup -- git rev-parse HEAD',
+                        'time -- git rev-parse HEAD',
+                        'time -p -- git rev-parse HEAD',
+                        'git rev-parse HEAD --',
+                        'git --git-dir=.git rev-parse HEAD',
+                        'exec env git rev-parse HEAD',
+                        "env bash -c 'git rev-parse HEAD'"):
             receipt = observe_tool_result('bash', {'command': command},
                 f'exit_code=0\n{sha}\n', 'runs')
             self.assertEqual(receipt and receipt['revision'], sha, command)

@@ -19,9 +19,9 @@ _WRAPPERS = {'command', 'env', 'exec', 'nice', 'nohup', 'sudo', 'time', 'timeout
 # Anything outside a grammar fails closed: the guard must not guess a command ran.
 _WRAPPER_OPTIONS = {
     'command': ({'-p', '--'}, {}, {'-v', '-V'}),
-    'env': ({'-i', '--ignore-environment', '-0', '--null', '-v', '--debug', '--'},
+    'env': ({'-i', '--ignore-environment', '-v', '--debug', '--'},
             {'-u': 1, '--unset': 1, '-C': 1, '--chdir': 1, '-S': 1, '--split-string': 1},
-            set()),
+            {'-0', '--null'}),
     'exec': ({'-c', '-l', '--'}, {'-a': 1}, set()),
     'nohup': (set(), set(), {'--help', '--version'}),
     'sudo': ({'-A', '--askpass', '-B', '--bell', '-b', '--background', '-E', '--preserve-env',
@@ -388,7 +388,12 @@ def _wrapper_arguments(name, tokens, external=False):
                                 else _WRAPPER_OPTIONS[name])
     while tokens and tokens[0].startswith('-'):
         option = tokens[0]
+        if option == '--':
+            return tokens[1:]
         if option == '-':
+            if name == 'env':      # `env -` is `env -i`, not a command named `-`.
+                tokens = tokens[1:]
+                continue
             break
         if option in skipped:
             return []
@@ -406,6 +411,8 @@ def _wrapper_arguments(name, tokens, external=False):
             continue
         letters = option[1:]
         if option.startswith('--') or len(letters) < 2:
+            return []
+        if any('-' + letter in skipped for letter in letters):
             return []
         if all('-' + letter in flags for letter in letters):
             tokens = tokens[1:]
@@ -427,6 +434,7 @@ def _head_read(tokens):
     # `A=1 timeout 5 git ...` assigns for the wrapper, so strip prefixes first.
     while _assignment(tokens):
         tokens = tokens[1:]
+    shell = True
     while tokens:
         name = os.path.basename(tokens[0])
         if name in _SHELLS:
@@ -435,6 +443,8 @@ def _head_read(tokens):
             return False
         if name not in _WRAPPERS:
             break
+        if not shell and name in {'command', 'exec', 'time'}:
+            return False
         external = '/' in tokens[0]
         tokens = tokens[1:]
         if name == 'nice':
@@ -450,19 +460,26 @@ def _head_read(tokens):
         elif name == 'time' and not external:
             while _assignment(tokens):
                 tokens = tokens[1:]
+        shell = name == 'command' or name == 'time' and not external
     if not tokens or os.path.basename(tokens[0]) != 'git':
         return False
     rest = tokens[1:]
     while rest:
+        head, separator, _ = rest[0].partition('=')
         if rest[0] in _GIT_GLOBAL_OPTIONS and len(rest) > 1:
             rest = rest[2:]
-        elif rest[0] in _GIT_GLOBAL_FLAGS or rest[0].startswith('--') and '=' in rest[0]:
+        elif separator and head in _GIT_GLOBAL_OPTIONS:
+            rest = rest[1:]
+        elif rest[0] in _GIT_GLOBAL_FLAGS:
             rest = rest[1:]
         else:
             break
     if not rest or rest[0] != 'rev-parse':
         return False
     arguments = rest[1:]
+    if '--' in arguments and any(word in _HEAD_WORDS
+                                 for word in arguments[arguments.index('--'):]):
+        return False
     revisions = [a for a in arguments if not a.startswith('-')]
     flags = {a for a in arguments if a.startswith('-')}
     return bool(revisions) and all(r in _HEAD_WORDS for r in revisions) and flags <= _REV_PARSE_FLAGS
