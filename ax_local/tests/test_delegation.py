@@ -300,6 +300,33 @@ class DelegationTests(unittest.TestCase):
         self.assertTrue(self.runner.chats[0].closed)
         self.assertNotIn(self.token, str(saved))
 
+    def test_running_child_can_read_only_its_queued_comments(self):
+        from urllib import request, error
+        self.policy['max_depth'] = 1
+        received = []
+        def callback(chat, _):
+            own = self.store.enqueue_intervention(chat.session_id, 'Change the API contract')
+            environment = self.service.worker_environment(chat.session_id, chat.config)
+            self.assertNotIn('AX_DELEGATION_ROLES', environment)
+            call = request.Request(self.service.base_url + '/interventions', data=b'{}',
+                headers={'Authorization': 'Bearer ' + environment['AX_DELEGATION_TOKEN']})
+            with request.urlopen(call, timeout=2) as response:
+                received.extend(json.load(response)['interventions'])
+            self.assertEqual(received[0]['id'], own['id'])
+            with self.assertRaises(error.HTTPError) as denied:
+                request.urlopen(request.Request(self.service.base_url + '/interventions', data=b'{}'),
+                                timeout=2)
+            self.assertEqual(denied.exception.code, 403)
+            return {'answer': 'child result', 'interventionIds': [own['id']]}
+        self.runner.callback = callback
+        a2a = start_a2a_server(self.service, '127.0.0.1', 0)
+        self.addCleanup(a2a.shutdown)
+        with self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertEqual(task['status']['state'], 'TASK_STATE_COMPLETED')
+        self.assertEqual([item['message'] for item in received], ['Change the API contract'])
+        self.assertEqual(self.store.pending_interventions(task['id']), [])
+
     def test_root_call_id_reaches_delegated_session(self):
         with self.service.workflow(self.parent,time.monotonic()+5,max_turns=4,
                 metadata={'turns':1,'request_id':'call-root','run_id':'run'}), \
@@ -927,7 +954,10 @@ class DelegationTests(unittest.TestCase):
         self.policy["max_depth"] = 1
         failures = []
         def callback(chat, _):
-            self.assertEqual(self.service.worker_environment(chat.session_id, chat.config), {})
+            environment = self.service.worker_environment(chat.session_id, chat.config)
+            self.assertEqual(environment['AX_DELEGATION_URL'], self.service.base_url)
+            self.assertEqual(environment['AX_DELEGATION_TOKEN'], self.service.grants[chat.session_id].token)
+            self.assertNotIn('AX_DELEGATION_ROLES', environment)
             # Even a caller holding a previously issued capability cannot bypass the depth limit.
             token = self.service.grants[chat.session_id].token
             with self.assertRaisesRegex(A2AError, "depth limit"):

@@ -712,7 +712,7 @@ class AxChat:
                 {'role': 'assistant', 'content': result['answer']},
             ]
         self._checkpoint = result.get('checkpoint', {})
-        return {key: result[key] for key in ('answer', 'outcome') if key in result}
+        return {key: result[key] for key in ('answer', 'outcome', 'interventionIds') if key in result}
 
     def close(self) -> None:
         with self._close_lock:

@@ -436,7 +436,8 @@ class DelegationService:
             if len(grant.lineage) > self.policy["max_depth"]:
                 allowed = []
             if not allowed:
-                return environment
+                return {**environment, 'AX_DELEGATION_URL': self.base_url,
+                        'AX_DELEGATION_TOKEN': grant.token}
             return {**environment, "AX_DELEGATION_URL": self.base_url, "AX_DELEGATION_TOKEN": grant.token,
                     "AX_DELEGATION_ROLES": json.dumps(allowed),
                     "AX_DELEGATION_DESCRIPTIONS": json.dumps({target:
@@ -526,6 +527,18 @@ class DelegationService:
                     or not getattr(self, 'operations', None):
                 raise A2AError('operator capability is expired or invalid')
             return grant
+
+    def authorized_interventions(self, token: str) -> Grant:
+        with self.lock:
+            grant = self.tokens.get(hashlib.sha256(token.encode()).hexdigest())
+            if (self.closed or not grant or not secrets.compare_digest(token, grant.token)
+                    or not grant.active or not grant.run or grant.run.canceled.is_set()
+                    or time.monotonic() >= grant.deadline):
+                raise A2AError('intervention capability is expired or invalid')
+            return grant
+
+    def pending_interventions(self, token: str) -> list[dict]:
+        return self.store.pending_interventions(self.authorized_interventions(token).session_id)
 
     def _authorized(self, token: str, role: str) -> Grant:
         with self.lock:
@@ -922,6 +935,7 @@ class DelegationService:
         answer, issue, failure = None, None, None
         workflow = None
         state = "TASK_STATE_FAILED"
+        intervention_ids = []
         stage = "worker_startup"
         try:
             if job.run.persistent and not job.config.get('_ax_harness2_probe'):
@@ -964,6 +978,7 @@ class DelegationService:
                 emit_progress('turn_started')
                 result = job.chat.send(message, timeout_seconds=min(
                     self._remaining(job), policy['turn_seconds']) if workflow else self._remaining(job))
+                intervention_ids = result.get('interventionIds', [])
                 if workflow:
                     terminal = workflow.record(result, job.chat.get_checkpoint())
                     job.config['_ax_delegation']['outcome'] = workflow.meta['outcome']
@@ -1052,6 +1067,9 @@ class DelegationService:
                         self.revoke(job.session_id)
                     self._save(job, state, answer if state == "TASK_STATE_COMPLETED" else None,
                                issue, failure)
+                    if job.config['_ax_delegation']['state'] == 'TASK_STATE_COMPLETED':
+                        self.store.acknowledge_interventions(job.session_id,
+                            intervention_ids)
                     self.jobs.pop(job.session_id, None)
             finally:
                 with job.run.lane_condition:

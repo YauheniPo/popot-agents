@@ -559,6 +559,7 @@ def create_server(
                                if k in {'run_id','started_at','finished_at','deadlineAt','state','turns'}}]
                              if (saved.get('roleConfig') or {}).get('_workflow') else []),
                     "work": build_work_status(saved, self.server.store.list_chats()),
+                    "interventions": self.server.store.recent_interventions(session_id),
                     "container": live.worker.container_name if live else None,
                     "workspace": self._workspace(saved, live),
                     "turns": len(saved["messages"]) // 2,
@@ -634,7 +635,41 @@ def create_server(
             elif isinstance(session_id, str):
                 saved = self.server.store.get(session_id)
                 meta = (saved.get('roleConfig') or {}).get('_workflow') if saved else None
+                child = (saved.get('roleConfig') or {}).get('_ax_delegation', {}) if saved else {}
                 recovering = secrets.compare_digest(self.headers.get('X-Popot-Workflow-Recovery', ''), workflow_token)
+                if not recovering and (meta and meta.get('state') == 'running' or
+                        child.get('state') in {'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'}):
+                    message = payload.get('message')
+                    request_id = payload.get('requestId')
+                    if not isinstance(message, str) or not message.strip() or len(message) > MAX_TASK_LENGTH:
+                        self._reply(400, {'error': f'message must be a nonempty string up to {MAX_TASK_LENGTH} characters'})
+                        return
+                    if request_id is not None and (not isinstance(request_id, str)
+                            or not request_id.strip() or len(request_id) > 256):
+                        self._reply(400, {'error': 'requestId must be a nonempty string up to 256 characters'})
+                        return
+                    if meta and request_id is not None and request_id == meta.get('request_id'):
+                        self._reply(409, {'error': 'workflow is already running; read get_chat instead',
+                                          'sessionId': session_id})
+                        return
+                    if (payload.get('role') not in (None, saved['role']) or
+                            payload.get('agent') not in (None, saved['agent'])):
+                        self._reply(409, {'error': 'sessionId belongs to another role or agent'})
+                        return
+                    try:
+                        item = self.server.store.enqueue_intervention(session_id, message.strip(), request_id)
+                    except ValueError as exc:
+                        self._reply(409, {'error': str(exc)})
+                        return
+                    except OverflowError:
+                        self._reply(429, {'error': 'too many pending comments'})
+                        return
+                    if item is None:
+                        self._reply(404, {'error': 'unknown sessionId'})
+                        return
+                    self._reply(202, {'sessionId': session_id, 'interventionId': item['id'],
+                                      'status': item['status']})
+                    return
                 if meta and not recovering:
                     if not self._workflow_request(payload, payload.get('message'), saved):
                         return
@@ -882,6 +917,7 @@ def create_server(
                     result = (record.worker.send(message.strip(), timeout_seconds=min(
                         workflow.policy['turn_seconds'], workflow.remaining())) if workflow
                         else record.worker.send(message.strip()))
+                    intervention_ids = result.get('interventionIds', [])
                     terminal = result
                     if workflow:
                         stage = 'record_result'
@@ -897,6 +933,8 @@ def create_server(
                     emit_progress('saving')
                     stage = 'save_result'
                     self.server.store.save(session_id, record.agent, history, record.role, role_config)
+                    self.server.store.acknowledge_interventions(session_id,
+                        intervention_ids)
                     record.messages, record.role_config = history, role_config
                     record.last_used = time.monotonic()
                     if terminal is not None:

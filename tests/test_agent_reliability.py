@@ -155,6 +155,19 @@ class AgentReliabilityTests(unittest.TestCase):
                                 if message['role'] == 'system')
         self.assertIn('first durable backend_engineer or frontend_engineer child becomes owner', instructions)
 
+    def test_comment_is_included_before_next_model_request(self):
+        comment = {'id': 'c' * 32, 'message': 'Check the new API contract', 'status': 'queued'}
+        first = {'tool_calls': [{'id': 'calc', 'function': {
+            'name': 'calculate', 'arguments': json.dumps({'expression': '1+1'})}}]}
+        with patch('popot_agents.worker.http_harness._pending_interventions',
+                   side_effect=[[], [comment]]):
+            _, state, bodies = self.run_sequence([first, self.result()],
+                                                 role={'tools': ['calculate']})
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual(state['intervention_ids'], [comment['id']])
+        self.assertTrue(any(item['role'] == 'user' and item['content'] == comment['message']
+                            for item in bodies[1]['messages']))
+
     def test_verification_handoff_shares_only_checks_for_requested_revision(self):
         from unittest.mock import Mock
         from popot_agents.work_evidence import observe_tool_result

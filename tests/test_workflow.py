@@ -203,6 +203,53 @@ class WorkflowTests(unittest.TestCase):
         calls,_,_=self.run_workflow([while_running])
         self.assertEqual(len(calls),1)
 
+    def test_comment_to_running_workflow_is_queued_without_starting_another_turn(self):
+        accepted = []
+        def while_running():
+            sid = self.server.store.list_chats()[0]['sessionId']
+            call = request.Request(f'http://127.0.0.1:{self.server.server_port}/messages',
+                data=json.dumps({'sessionId': sid, 'message': 'Use the new API contract',
+                                 'requestId': 'comment-1'}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with request.urlopen(call, timeout=.5) as response:
+                self.assertEqual(response.status, 202)
+                receipt = json.load(response)
+            self.assertEqual(receipt['sessionId'], sid)
+            self.assertEqual(receipt['status'], 'queued')
+            with request.urlopen(call, timeout=.5) as response:
+                self.assertEqual(json.load(response)['interventionId'], receipt['interventionId'])
+            self.assertEqual(self.server.store.pending_interventions(sid)[0]['message'],
+                             'Use the new API contract')
+            with request.urlopen(f'http://127.0.0.1:{self.server.server_port}/chats/{sid}',
+                                 timeout=.5) as response:
+                self.assertEqual(json.load(response)['interventions'][0]['status'], 'queued')
+            accepted.append(receipt)
+            return {**result('completed'), 'interventionIds': [receipt['interventionId']]}
+        calls, data, saved = self.run_workflow([while_running])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(data['outcome']['status'], 'completed')
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(saved['interventions'][0]['status'], 'delivered')
+
+    def test_comment_can_target_an_active_child_session(self):
+        accepted = []
+        def while_running():
+            sid = 'c' * 16
+            self.server.store.save(sid, 'test', [], 'backend_engineer',
+                {'_ax_delegation': {'state': 'TASK_STATE_WORKING'}})
+            call = request.Request(f'http://127.0.0.1:{self.server.server_port}/messages',
+                data=json.dumps({'sessionId': sid, 'message': 'Use the new API contract'}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with request.urlopen(call, timeout=.5) as response:
+                accepted.append(json.load(response))
+                self.assertEqual(response.status, 202)
+            self.assertEqual(self.server.store.pending_interventions(sid)[0]['message'],
+                             'Use the new API contract')
+            return result('completed')
+        _, data, _ = self.run_workflow([while_running])
+        self.assertEqual(data['outcome']['status'], 'completed')
+        self.assertEqual(accepted[0]['sessionId'], 'c' * 16)
+
     def test_repeated_completed_request_returns_saved_result_without_new_execution(self):
         def repeat(first):
             url=f'http://127.0.0.1:{self.server.server_port}/tasks'

@@ -32,6 +32,25 @@ def _trace(event: str, **fields) -> None:
     trace_event(event, **fields)
 
 
+def _pending_interventions() -> list[dict]:
+    url, token = os.getenv('AX_DELEGATION_URL'), os.getenv('AX_DELEGATION_TOKEN')
+    if not url or not token:
+        return []
+    call = request.Request(url.rstrip('/') + '/interventions', data=b'{}',
+                           headers={'Authorization': 'Bearer ' + token,
+                                    'Content-Type': 'application/json'}, method='POST')
+    try:
+        with request.urlopen(call, timeout=2) as response:
+            items = json.load(response).get('interventions', [])
+        if not isinstance(items, list):
+            raise ValueError('invalid intervention list')
+        return [item for item in items if isinstance(item, dict)
+                and isinstance(item.get('id'), str) and isinstance(item.get('message'), str)]
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        _trace('intervention_poll_failed', error_type=type(exc).__name__)
+        return []
+
+
 def _trace_arguments(name: str, arguments: dict) -> dict:
     if name == "calculate":
         return {"expression": arguments.get("expression")}
@@ -184,6 +203,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             user_context.append(previous_answer)
     resuming = bool(state and state.get('messages') and
                     state.get('outcome', {}).get('status') in {'partial', 'blocked', 'failed'})
+    included_intervention_ids = set(state.get('included_intervention_ids', [])) if resuming else set()
+    delivered_intervention_ids = set(state.get('intervention_ids', [])) if resuming else set()
     if resuming:
         messages = [*state['messages'], messages[-1]]
     extra_tools = dict(extra_tools or {})
@@ -428,6 +449,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                           'failed_delegations': [[list(key), value] for key, value in failed_delegations.items()],
                           'completed_delegations': completed_delegations if status != 'completed' else {},
                           'tool_evidence': tool_evidence,
+                          'included_intervention_ids': sorted(included_intervention_ids),
+                          'intervention_ids': sorted(delivered_intervention_ids),
                           'outcome': outcome}
             if requested_wait:
                 checkpoint['await_tasks'] = requested_wait
@@ -522,6 +545,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                            'delegated_task_incomplete' if incomplete_child else 'work_budget_exhausted', report)
 
     def completion(round_number, final):
+        for item in _pending_interventions():
+            if item['id'] not in included_intervention_ids:
+                messages.append({'role': 'user', 'content': item['message']})
+                user_context.append({'role': 'user', 'content': item['message']})
+                included_intervention_ids.add(item['id'])
+                _trace('intervention_included', intervention_id=item['id'])
         changed = compact_tool_results(messages, save_tool_output,
             budget_chars=RUNTIME['model']['context_tool_budget_chars'],
             recent_results=RUNTIME['model']['context_recent_tool_results'], receipts=tool_evidence)
@@ -556,9 +585,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 body.update(reasoning_effort='none', temperature=0)
         call = request.Request(f"{base_url}/chat/completions",
             data=json.dumps(body).encode('utf-8'), headers=headers, method='POST')
-        return _model_request(call, round_number=round_number, messages=request_messages,
+        response = _model_request(call, round_number=round_number, messages=request_messages,
             schemas=selected_schemas, remaining_seconds=remaining_seconds if final else work_seconds,
             final=final)
+        delivered_intervention_ids.update(included_intervention_ids)
+        return response
 
     max_tool_rounds = role_config.get('max_tool_rounds', RUNTIME['model']['default_max_tool_rounds'])
     for round_number in range(1, max_tool_rounds + 3):

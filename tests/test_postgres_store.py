@@ -33,6 +33,20 @@ class PostgresSessionStoreTests(unittest.TestCase):
         self.assertEqual(restored["roleConfig"], role)
         self.assertEqual(restored["createdAt"], created_at)
 
+    def test_intervention_survives_reconnection_and_is_acknowledged(self):
+        from popot_agents.orchestrator.postgres_session_store import PostgresSessionStore
+
+        self.store.save(self.session_id, 'test_agent', [], 'planner', {})
+        item = self.store.enqueue_intervention(self.session_id, 'Use the new API', 'comment-1')
+        self.assertEqual(self.store.enqueue_intervention(self.session_id, 'Use the new API', 'comment-1')['id'],
+                         item['id'])
+        self.store.save(self.session_id, 'test_agent', [{'role': 'user', 'content': 'task'}], 'planner', {})
+        reopened = PostgresSessionStore()
+        self.assertEqual(reopened.pending_interventions(self.session_id)[0]['id'], item['id'])
+        reopened.acknowledge_interventions(self.session_id, [item['id']])
+        self.assertEqual(reopened.pending_interventions(self.session_id), [])
+        self.assertEqual(reopened.recent_interventions(self.session_id)[0]['status'], 'delivered')
+
     def test_work_evidence_survives_stale_role_config_and_concurrent_updates(self):
         from concurrent.futures import ThreadPoolExecutor
         from popot_agents.work_evidence import observe_tool_result

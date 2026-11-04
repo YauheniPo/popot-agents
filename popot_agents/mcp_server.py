@@ -335,7 +335,8 @@ def main() -> None:
                        ctx: Context = None) -> dict:
         """Start a task with a configured role or agent; omit both to use the configured default role.
         All roles coordinate tasks, select permitted specialists and continue checkpoints,
-        and return a final result or blocker. Do not manually continue a running workflow.
+        and return a final result or blocker. A message to a running session is
+        queued as a comment for its next model request.
         For an authorized fix after a review, let the reviewer delegate to backend_engineer
         or start a new implementation workflow. If the user requested MCP execution,
         report an MCP publication blocker instead of silently implementing locally.
@@ -373,7 +374,9 @@ def main() -> None:
         """Continue a chat with its returned session_id; its role does not change.
         For a new chat, use run_task;
         Omit role/agent for a new session with the configured default role. Do not send manual
-        continuation instructions to an already running workflow; poll get_chat instead.
+        continuation instructions to an already running workflow. A new comment
+        to an active session is queued for its next model request; poll get_chat
+        for queued/delivered status.
         """
         selected = _normalized_session_id(session_id)
         if selected is None and role is None and agent is None:

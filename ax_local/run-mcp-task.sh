@@ -71,6 +71,7 @@ if result is None:
 if result.get('error') or result.get('result', {}).get('isError'):
     sys.exit('MCP tool returned an error; see the response above')
 task_result = None
+queued = None
 for item in result.get('result', {}).get('content', []):
     if item.get('type') != 'text':
         continue
@@ -81,6 +82,12 @@ for item in result.get('result', {}).get('content', []):
     if isinstance(parsed, dict) and isinstance(parsed.get('outcome'), dict):
         task_result = parsed
         break
+    if isinstance(parsed, dict) and parsed.get('status') in {'queued', 'delivered'}:
+        queued = parsed
+if queued is not None:
+    print(f"Comment {queued.get('sessionId', '?')}: {queued['status']} "
+          f"(interventionId={queued.get('interventionId', '?')})", file=sys.stderr)
+    sys.exit(0)
 if task_result is None:
     sys.exit('MCP returned no task outcome')
 status = task_result['outcome'].get('status')

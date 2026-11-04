@@ -28,7 +28,9 @@ if mode == 'transport_error':
 if mode == 'mcp_error':
     result = {'content': [{'type': 'text', 'text': 'orchestrator HTTP 502'}], 'isError': True}
 else:
-    task = {'sessionId': 'new-session', 'outcome': {'status': mode, 'reason': 'workflow_turn_limit'}}
+    task = ({'sessionId': 'new-session', 'status': 'queued', 'interventionId': 'comment-id'}
+            if mode == 'queued' else
+            {'sessionId': 'new-session', 'outcome': {'status': mode, 'reason': 'workflow_turn_limit'}})
     result = {'content': [{'type': 'text', 'text': json.dumps(task)}], 'isError': False}
 print('event: message')
 print('data: ' + json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': result}))
@@ -40,6 +42,7 @@ print('data: ' + json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': result}))
                 ('mcp_error', 1, 'backend_engineer', ''),
                 ('transport_error', 7, 'backend_engineer', ''),
                 ('completed', 0, 'backend_engineer', 'existing-session'),
+                ('queued', 0, '', 'existing-session'),
             ]:
                 with self.subTest(mode=mode, session=session):
                     capture = Path(directory) / 'request.json'
@@ -63,6 +66,8 @@ print('data: ' + json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': result}))
                         self.assertIn('Task new-session: blocked (workflow_turn_limit)', run.stderr)
                     if mode == 'completed':
                         self.assertIn('Task new-session: completed', run.stderr)
+                    if mode == 'queued':
+                        self.assertIn('Comment new-session: queued (interventionId=comment-id)', run.stderr)
 
     def test_printed_command_keeps_unicode_task_with_c_locale(self):
         with tempfile.TemporaryDirectory() as directory:
