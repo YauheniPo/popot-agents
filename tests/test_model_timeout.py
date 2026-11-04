@@ -6,7 +6,7 @@ from contextlib import redirect_stderr
 from urllib.error import HTTPError, URLError
 from unittest.mock import Mock, patch
 
-from popot_agents.worker.http_harness import run_http
+from popot_agents.worker.http_harness import _model_request, run_http
 from popot_agents.runtime_config import RUNTIME
 
 
@@ -195,7 +195,7 @@ class ModelTimeoutTests(unittest.TestCase):
             {'id': 'write-1', 'function': {'name': 'write_file',
                                          'arguments': '{"path":"a.txt","content":"done"}'}}]}}]}
         final = b'{"choices":[{"message":{"content":"done"}}]}'
-        for failure in (TimeoutError(), URLError(TimeoutError()),
+        for failure in (TimeoutError(), URLError(TimeoutError()), ConnectionResetError(),
                         HTTPError('http://model', 504, 'timeout', {}, io.BytesIO())):
             with self.subTest(failure=type(failure).__name__), \
                  patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1',
@@ -210,6 +210,15 @@ class ModelTimeoutTests(unittest.TestCase):
                 self.assertEqual(call.call_count, 3)
                 self.assertEqual(call.call_args_list[1].args[0].data, call.call_args_list[2].args[0].data)
                 self.assertIn('model_retry', logs.getvalue())
+
+    def test_connection_reset_gets_one_retry_when_general_retries_are_disabled(self):
+        with patch.dict(RUNTIME['model'], {'request_retries': 0}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=[
+                 ConnectionResetError(), io.BytesIO(b'{"choices": []}')]) as call, \
+             redirect_stderr(io.StringIO()):
+            self.assertEqual(_model_request(object(), round_number=1, messages=[], schemas=[],
+                                            remaining_seconds=lambda: 300), {'choices': []})
+        self.assertEqual(call.call_count, 2)
 
     def test_retries_are_bounded_and_permanent_errors_are_not_retried(self):
         for code, expected in ((401, 1), (403, 1), (400, 1), (504, 2), (503, 2)):

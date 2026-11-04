@@ -34,7 +34,8 @@ class TurnProgress:
         if event in {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer'}:
             return
         action = {'event': redact_text(event)[:160]}
-        for key in ('name', 'model', 'server', 'agent_role', 'agent_session_id', 'error_type', 'code', 'stage', 'reason'):
+        for key in ('name', 'model', 'server', 'agent_role', 'agent_session_id', 'error_type',
+                    'code', 'stage', 'phase', 'reason'):
             if isinstance(value.get(key), str):
                 action[key] = redact_text(value[key])[:160]
         if (event == 'tool_error' and value.get('recoverable') is True

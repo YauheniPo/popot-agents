@@ -116,6 +116,10 @@ class WorkflowRun:
             items = outcome.get(key)
             outcome[key] = [item for item in items if isinstance(item, str) and item.strip()] if isinstance(items, list) else []
         outcome['remaining_work'] = outcome['remaining_work'] or ['Workflow needs reconciliation before continuing']
+        if reason == 'workflow_no_progress':
+            outcome['remaining_work'].append(
+                'Reconcile external effects and local work in the same session; give a concrete new instruction '
+                'for the remaining work or report the blocker without repeating the unchanged task')
         self.meta.update(state='blocked', phase='finished', outcome=outcome,
                          finished_at=datetime.now(timezone.utc).isoformat(),
                          outcomeRecordedAt=datetime.now(timezone.utc).isoformat())

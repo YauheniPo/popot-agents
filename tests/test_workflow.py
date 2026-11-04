@@ -79,6 +79,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(saved['roleConfig']['_workflow']['turns'],2)
         self.assertLessEqual(calls[0][1],900)
 
+    def test_new_user_run_does_not_inherit_terminal_workflow_checkpoint(self):
+        observed = {}
+        def second_run():
+            current = self.server.store.get(observed['session_id'])
+            observed['checkpoint'] = current['roleConfig']['_workflow'].get('checkpoint')
+            return result('completed')
+        def after(first):
+            observed['session_id'] = first['sessionId']
+            call = request.Request(f'http://127.0.0.1:{self.server.server_port}/messages',
+                data=json.dumps({'sessionId': first['sessionId'], 'message': 'Verify the new head'}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with request.urlopen(call, timeout=3) as response:
+                self.assertEqual(json.load(response)['outcome']['status'], 'completed')
+        old_checkpoint = {'messages': [{'role': 'tool', 'content': 'old error'}],
+                          'failed_delegations': [[['backend_engineer', 'old task'], {
+                              'session_id': 'a' * 16, 'pending': False, 'error': 'old error'}]]}
+        _, _, saved = self.run_workflow([result('blocked', errors=('old error',)), second_run],
+                                       checkpoint=old_checkpoint, after=after)
+        self.assertIsNone(observed['checkpoint'])
+        self.assertEqual(saved['roleConfig']['_workflow']['state'], 'completed')
+
     def test_explicit_backend_role_can_coordinate_with_its_own_turn_limit(self):
         calls, data, saved = self.run_workflow(
             [result('partial', remaining=('review',)), result('completed')],
@@ -346,7 +367,7 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(len(calls),1)
                 self.assertNotEqual(calls[0],'original authorized task')
                 self.assertIn('Do not repeat',calls[0])
-                self.assertEqual(restored[0][1],checkpoint)
+                self.assertEqual(restored[0][1],{**checkpoint, 'run_id': workflow.meta['run_id']})
             finally:
                 server.shutdown();thread.join();server.server_close()
 

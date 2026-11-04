@@ -185,6 +185,9 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
         [sys.executable, "-I", str(Path(__file__).parent / "worker" / "file_worker.py"),
          action], **options)
     if completed.returncode != 0:
+        if action == 'read_tool_output' and b'No such file or directory' in completed.stderr:
+            raise ToolExecutionError('saved tool output is unavailable in this workspace; '
+                                     'verify the source again without repeating writes')
         raise ToolExecutionError(f"{action} failed with exit code {completed.returncode}; "
                                  "check the path, file permissions and workspace state before retrying")
     return completed.stdout.decode('utf-8')

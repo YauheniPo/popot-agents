@@ -34,6 +34,19 @@ class WorkflowStabilityTests(unittest.TestCase):
                 'content':json.dumps({'isError':True,'error':'same input error'})} for i in range(count)]})
         self.assertEqual(terminal['outcome']['reason'], 'workflow_no_progress')
 
+    def test_no_progress_explains_how_to_reconcile_a_child_checkpoint(self):
+        run = WorkflowRun(POLICY, 'finish PR work')
+        result = {'answer': 'No new result', 'outcome': {'status': 'partial',
+            'evidence': ['commit was pushed'], 'errors': [],
+            'remaining_work': ['verify review threads']}}
+        for _ in range(2):
+            run.begin()
+            terminal = run.record(result, {'messages': []})
+        self.assertEqual(terminal['outcome']['reason'], 'workflow_no_progress')
+        self.assertIn('verify review threads', terminal['outcome']['remaining_work'])
+        self.assertTrue(any('reconcile' in item.lower() and 'same session' in item.lower()
+                            for item in terminal['outcome']['remaining_work']))
+
     def test_independent_runs_have_stable_distinct_identifiers(self):
         first = WorkflowRun(POLICY, 'one')
         second = WorkflowRun(POLICY, 'two')

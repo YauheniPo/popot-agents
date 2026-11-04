@@ -14,6 +14,46 @@ from popot_agents.worker.delegation_policy import delegation_instructions
 
 
 class AgentReliabilityTests(unittest.TestCase):
+    def test_new_run_does_not_reuse_previous_run_child_failure(self):
+        old_run, new_run = 'a' * 32, 'b' * 32
+        old_error = 'old sandbox failed before PR head changed'
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                state = {'messages': [{'role': 'user', 'content': 'old task'},
+                                      {'role': 'assistant', 'content': old_error}],
+                         'outcome': {'status': 'blocked', 'reason': 'workflow_no_progress'},
+                         'failed_delegations': [[['backend_engineer', 'old task'], {
+                             'role': 'backend_engineer', 'session_id': 'c' * 16,
+                             'status': 'blocked', 'error': old_error, 'pending': False}]],
+                         'completed_delegations': {'d' * 16: {'role': 'backend_engineer',
+                             'outcome': {'status': 'completed', 'revision': 'a' * 40}}},
+                         'tool_evidence': [{'kind': 'checks', 'status': 'passed',
+                             'revision': 'a' * 40}]}
+                if not legacy:
+                    state['run_id'] = old_run
+                _, state, bodies = self.run_sequence([self.result()], state=state,
+                    role={'name': 'planner', '_workflow_coordinator': True, 'tools': []},
+                    run_context={'run_id': new_run, 'authorization': ['Verify the current PR head']})
+                self.assertEqual(state['outcome']['status'], 'completed')
+                self.assertEqual(state['failed_delegations'], [])
+                self.assertEqual(state['completed_delegations'], {})
+                self.assertEqual(state['tool_evidence'], [])
+                self.assertEqual(state['run_id'], new_run)
+                self.assertNotIn(old_error, json.dumps(bodies[0]['messages']))
+
+    def test_same_run_preserves_unfinished_child_for_reconciliation(self):
+        run_id = 'a' * 32
+        state = {'run_id': run_id,
+                 'messages': [{'role': 'user', 'content': 'old task'}],
+                 'outcome': {'status': 'partial'},
+                 'failed_delegations': [[['qa_engineer', 'verify'], {
+                     'role': 'qa_engineer', 'session_id': 'c' * 16,
+                     'status': 'partial', 'error': 'tests pending', 'pending': True}]]}
+        _, state, _ = self.run_sequence([self.result()], state=state,
+            run_context={'run_id': run_id, 'authorization': ['Finish verification']})
+        self.assertEqual(state['outcome']['reason'], 'child_pending')
+        self.assertEqual(state['failed_delegations'][0][1]['session_id'], 'c' * 16)
+
     def test_coordinator_keeps_checkpoint_when_claimed_completion_has_no_evidence(self):
         message = self.result()
         report = json.loads(message['content']); report['evidence'] = []
@@ -308,6 +348,65 @@ class AgentReliabilityTests(unittest.TestCase):
         self.assertTrue(failure['resumable'])
         self.assertEqual(failure['session_id'], 'a'*16)
         self.assertIn('review-123 may be published', state['outcome']['evidence'])
+
+    def test_no_progress_child_requires_reconciliation_in_its_saved_session(self):
+        from unittest.mock import Mock
+        child_id = 'a' * 16
+        delegate = Mock(return_value=json.dumps({'sessionId': child_id, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_COMPLETED', 'resumable': True, 'answer': 'No new evidence',
+            'outcome': {'status': 'blocked', 'reason': 'workflow_no_progress',
+                        'evidence': ['commit may exist'], 'remaining_work': ['verify remote head'],
+                        'errors': []}}))
+        _, state, bodies = self.run_sequence([self.delegate_call(), self.delegate_call(),
+            self.result('partial', remaining=['verify remote head'])], delegate=delegate)
+        delegate.assert_called_once()
+        tool_result = json.loads(bodies[-1]['messages'][-1]['content'])
+        self.assertIn(child_id, tool_result['error'])
+        self.assertIn('reconcile', tool_result['error'].lower())
+        self.assertTrue(state['failed_delegations'][0][1]['resumable'])
+
+    def test_terminal_worker_failure_does_not_repeat_coordinator_turn(self):
+        from unittest.mock import Mock
+        child_id = 'a' * 16
+        delegate = Mock(return_value=json.dumps({'sessionId': child_id, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_FAILED', 'isError': True, 'resumable': False,
+            'error': 'AX worker connection reset; reconcile external effects before retrying',
+            'outcome': {'status': 'failed', 'reason': 'worker_transport_interrupted',
+                        'evidence': [], 'remaining_work': [], 'errors': []}}))
+        _, state, bodies = self.run_sequence([self.delegate_call(), self.result()], delegate=delegate,
+            role={'name': 'planner', '_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(state['outcome']['status'], 'blocked')
+        self.assertEqual(state['outcome']['reason'], 'delegated_task_blocked')
+        self.assertIn(child_id, state['messages'][-1]['content'])
+        self.assertEqual(len(bodies), 2)
+
+    def test_lost_child_sandbox_allows_explicit_replacement_after_reconciliation(self):
+        from unittest.mock import Mock
+        old, new = 'a' * 16, 'b' * 16
+        delegate = Mock(side_effect=[
+            json.dumps({'sessionId': old, 'role': 'qa_engineer',
+                'state': 'TASK_STATE_COMPLETED', 'resumable': True, 'answer': 'Read-back pending',
+                'outcome': {'status': 'partial', 'evidence': ['commit may exist'],
+                            'remaining_work': ['verify remote head'], 'errors': []}}),
+            json.dumps({'sessionId': old, 'role': 'qa_engineer', 'isError': True,
+                        'error': 'continuation sandbox is unavailable; reconcile before replacement'}),
+            json.dumps({'sessionId': new, 'role': 'qa_engineer',
+                'state': 'TASK_STATE_COMPLETED', 'answer': 'Remote head verified',
+                'outcome': {'status': 'completed', 'evidence': ['remote head verified'],
+                            'remaining_work': [], 'errors': []}}),
+        ])
+        continuation = self.delegate_call()
+        continuation['tool_calls'][0]['function']['arguments'] = json.dumps({
+            'role': 'qa_engineer', 'task': 'Reconcile remote head', 'session_id': old})
+        replacement = self.delegate_call()
+        replacement['tool_calls'][0]['function']['arguments'] = json.dumps({
+            'role': 'qa_engineer', 'task': 'Verify remaining checks', 'replaces_session_id': old})
+        _, state, _ = self.run_sequence([self.delegate_call(), continuation, replacement,
+            self.result()], delegate=delegate)
+        self.assertEqual(delegate.call_count, 3)
+        self.assertEqual(state['failed_delegations'], [])
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertIn('commit may exist', delegate.call_args.args[0]['task'])
 
     def test_completed_child_is_not_resumed_to_request_another_summary(self):
         from unittest.mock import Mock

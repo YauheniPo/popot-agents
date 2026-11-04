@@ -92,6 +92,9 @@ def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
     code, reason = "worker_failed", "delegated AX worker failed; inspect local worker logs"
     if isinstance(exc, subprocess.TimeoutExpired):
         code, reason = "ax_command_timeout", "AX command timed out"
+    elif isinstance(exc, ConnectionResetError):
+        code, reason = "worker_transport_interrupted", (
+            "AX worker connection reset; reconcile external effects before retrying")
     elif isinstance(exc, AgentConfigurationError):
         code, reason = "worker_configuration_failed", "AX worker configuration failed"
     elif isinstance(exc, AgentRunError):
@@ -101,6 +104,9 @@ def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
                        r"(failed|timed out) during discovery(?:$|:)", detail)
         if model_http:
             code, reason = "model_http_error", model_http[0]
+        elif re.fullmatch(r"(?:\[Errno (?:54|104)\] )?Connection reset by peer", detail):
+            code, reason = "worker_transport_interrupted", (
+                "AX worker connection reset; reconcile external effects before retrying")
         elif mcp:
             code = "mcp_discovery_failed"
             reason = f"MCP server {mcp[1]} {mcp[2]} during discovery"
@@ -385,9 +391,22 @@ class DelegationService:
                 # Task deletion is independent of the old provider, which may
                 # no longer be configured after a restart.
                 next(iter(self.runners.values())).close_session(saved["sessionId"])
-                meta.update(state="TASK_STATE_FAILED", error="AX API restarted during delegation")
+                meta.update(state="TASK_STATE_FAILED", error="AX API restarted during delegation",
+                            resumable=False)
                 self.store.save(saved["sessionId"], saved["agent"], saved["messages"],
                                 saved["role"], config)
+            elif meta and meta.get('resumable') and saved['sessionId'] not in self.retained:
+                # A completed child's in-memory AxChat does not survive the API process.
+                # Preserve its evidence while making replacement possible after read-back.
+                outcome = dict(meta.get('outcome') or {})
+                error = 'Continuation sandbox unavailable after API restart'
+                outcome['errors'] = [*outcome.get('errors', []), error]
+                outcome['remaining_work'] = [*outcome.get('remaining_work', []),
+                    'Reconcile external effects and saved child evidence before submitting a replacement child; '
+                    'uncommitted sandbox work may be lost']
+                meta.update(resumable=False, outcome=outcome)
+                self.store.save(saved['sessionId'], saved['agent'], saved['messages'],
+                                saved['role'], config)
 
     def prepare_config(self, session_id: str, config: dict | None) -> dict:
         config = dict(config or {})
@@ -751,7 +770,8 @@ class DelegationService:
                     raise A2AError('only unfinished checkpointed tasks can continue')
                 retained = self.retained.get(session_id)
                 if not retained or retained[0].closed:
-                    raise A2AError('continuation sandbox is unavailable; refusing to create an empty replacement')
+                    raise A2AError('continuation sandbox is unavailable; refusing to create an empty replacement; '
+                                   'reconcile external effects and saved evidence, then submit an explicit replacement child')
                 config = json.loads(json.dumps(saved['roleConfig']))
                 previous_messages, chat = saved['messages'], retained[0]
                 config['_ax_delegation'].update(message_id=message_id, fingerprint=fingerprint, input=task)

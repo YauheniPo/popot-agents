@@ -1041,6 +1041,30 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(replay["status"]["state"], "TASK_STATE_FAILED")
         self.assertEqual(len(self.runner.chats), 1)
 
+    def test_restart_marks_lost_child_checkpoint_non_resumable(self):
+        self.runner.callback = lambda *_: {'answer': 'Patch may be published',
+            'outcome': {'status': 'partial', 'evidence': ['commit abc may exist'],
+                        'errors': [], 'remaining_work': ['check remote head']}}
+        with self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertTrue(task['metadata']['resumable'])
+        self.service.retained.clear()  # A fresh API process has no in-memory chat.
+        self.runner.chats[0].close()
+        self.service.recover_interrupted()
+        saved = self.store.get(task['id'])['roleConfig']['_ax_delegation']
+        self.assertFalse(saved['resumable'])
+        self.assertEqual(saved['outcome']['evidence'], ['commit abc may exist'])
+        self.assertIn('check remote head', saved['outcome']['remaining_work'])
+        self.assertTrue(any('sandbox' in item.lower() for item in saved['outcome']['errors']))
+        with self.service.turn(self.parent, 5):
+            recovered = self.service.dispatch(self.token, 'backend_engineer', 'GetTask', {'id': task['id']})
+            self.assertFalse(recovered['metadata']['resumable'])
+            self.assertEqual(recovered['metadata']['outcome']['evidence'], ['commit abc may exist'])
+            with self.assertRaisesRegex(A2AError, 'reconcile.*replacement'):
+                self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', {
+                    'message': {'messageId': 'after-restart', 'taskId': task['id'],
+                                'role': 'ROLE_USER', 'parts': [{'text': 'Continue'}]}})
+
     def test_parent_turn_end_cancels_a_running_child(self):
         release = threading.Event()
         self.runner.callback = lambda *_: release.wait(1)

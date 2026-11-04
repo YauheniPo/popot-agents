@@ -732,8 +732,10 @@ def create_server(
                     self._workflow.meta['authorization'] = authority
                 if payload.get('requestId'):
                     self._workflow.meta['request_id'] = payload['requestId']
-                if isinstance(previous.get('checkpoint'), dict):
-                    self._workflow.meta['checkpoint'] = previous['checkpoint']
+                if recovering and isinstance(previous.get('checkpoint'), dict):
+                    checkpoint = dict(previous['checkpoint'])
+                    checkpoint.setdefault('run_id', self._workflow.meta['run_id'])
+                    self._workflow.meta['checkpoint'] = checkpoint
                 self._message_locked(payload, new_session_id)
             finally:
                 workflow_slots.release()

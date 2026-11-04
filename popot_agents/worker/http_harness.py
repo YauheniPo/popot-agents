@@ -87,7 +87,8 @@ class _ModelRequestError(RuntimeError):
 
 def _model_request(call, *, round_number, messages, schemas, remaining_seconds, final=False):
     """Retry only completion generation; tools run after a complete response."""
-    attempts = 1 if final else 1 + RUNTIME["model"]["request_retries"]
+    configured_attempts = 1 if final else 1 + RUNTIME["model"]["request_retries"]
+    attempts = configured_attempts if final else max(2, configured_attempts)
     for attempt in range(1, attempts + 1):
         request_timeout = min(RUNTIME["timeouts"]["model_request_seconds"], remaining_seconds())
         if request_timeout < RUNTIME['timeouts']['min_turn_seconds']:
@@ -97,7 +98,7 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
                timeout_seconds=round(request_timeout, 3),
                available_tools=[schema["function"]["name"] for schema in schemas])
         trace_output(f"LLM request started round={round_number} attempt={attempt}")
-        retryable = False
+        retryable = reset = False
         try:
             with request.urlopen(call, timeout=request_timeout) as response:
                 result = json.load(response)
@@ -107,6 +108,11 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
             failure = f"model endpoint returned HTTP {code}"
             retryable = code in {502, 503, 504}
             _trace("model_http_error", round=round_number, attempt=attempt, status=code)
+        except ConnectionResetError:
+            failure = "model connection reset before a complete response"
+            retryable = reset = True
+            _trace("model_transport_error", round=round_number, attempt=attempt,
+                   error_type="ConnectionResetError")
         except (TimeoutError, error.URLError) as exc:
             if isinstance(exc, TimeoutError) or isinstance(exc.reason, TimeoutError):
                 elapsed = time.monotonic() - started_at
@@ -114,7 +120,7 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
                        elapsed_seconds=round(elapsed, 1), timeout_seconds=round(request_timeout, 3))
                 failure = (f"model request timed out (round={round_number}, "
                            f"socket timeout={request_timeout:.1f}s, elapsed={elapsed:.1f}s, "
-                           f"attempt={attempt}/{attempts})")
+                           f"attempt={attempt}/{configured_attempts})")
                 retryable = True
             else:
                 failure = "model endpoint is unreachable"
@@ -123,11 +129,17 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
             return result
         if retryable and not final:
             remaining_seconds()  # Preserve the reserved final-answer budget, even on the last attempt.
-        if not retryable or attempt == attempts:
+        if not retryable or attempt >= (attempts if reset else configured_attempts):
             raise _ModelRequestError(failure, retryable=retryable) from None
         remaining = remaining_seconds()
         _trace("model_retry", round=round_number, next_attempt=attempt + 1,
                reason=failure, remaining_seconds=round(remaining, 3))
+
+
+def _checkpoint_matches_run(state, run_context):
+    run_id = run_context.get('run_id') if isinstance(run_context, dict) else None
+    return bool(state and state.get('messages') and
+                (not run_id or state.get('run_id') == run_id))
 
 
 def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
@@ -152,7 +164,7 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     memory.start_session()
     success = False
     try:
-        if role_config.get('harness2', {}).get('enabled') and not (state and state.get('messages')):
+        if role_config.get('harness2', {}).get('enabled') and not _checkpoint_matches_run(state, run_context):
             from .harness2 import refine_role
             role_config = refine_role(messages, role_config, deadline=deadline,
                                       tool_names=list(extra_tools or {}))
@@ -201,7 +213,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         previous_answer = next((m for m in reversed(messages) if m.get('role')=='assistant'),None)
         if previous_answer:
             user_context.append(previous_answer)
-    resuming = bool(state and state.get('messages') and
+    run_id = (run_context or {}).get('run_id')
+    resuming = bool(_checkpoint_matches_run(state, run_context) and
                     state.get('outcome', {}).get('status') in {'partial', 'blocked', 'failed'})
     included_intervention_ids = set(state.get('included_intervention_ids', [])) if resuming else set()
     delivered_intervention_ids = set(state.get('intervention_ids', [])) if resuming else set()
@@ -356,10 +369,23 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                         summary_body.update(reasoning_effort='none', temperature=0)
                     summary_call = request.Request(f"{base_url}/chat/completions",
                         data=json.dumps(summary_body).encode(), headers=headers, method="POST")
-                    # Retry only invalid extraction output; never repeat a memory write or task.
-                    with request.urlopen(summary_call, timeout=min(RUNTIME["timeouts"]["memory_summary_seconds"],
-                        budget - RUNTIME["timeouts"]["memory_capture_margin_seconds"])) as response:
-                        extraction = json.load(response)
+                    # A summary request may be repeated after a reset; never repeat a memory write or task.
+                    summary_deadline = time.monotonic() + min(
+                        RUNTIME["timeouts"]["memory_summary_seconds"],
+                        budget - RUNTIME["timeouts"]["memory_capture_margin_seconds"])
+                    for transport_attempt in range(2):
+                        try:
+                            with request.urlopen(summary_call,
+                                    timeout=max(.1, summary_deadline - time.monotonic())) as response:
+                                extraction = json.load(response)
+                            break
+                        except ConnectionResetError:
+                            remaining = summary_deadline - time.monotonic()
+                            if transport_attempt or remaining < 2:
+                                raise
+                            _trace('memory_summary_retry', dataset=memory.dataset,
+                                   reason='connection_reset')
+                            time.sleep(min(.5, remaining / 4))
                     memory.record_usage(extraction)
                     retry_reason = 'invalid_summary_shape'
                     try:
@@ -452,6 +478,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                           'included_intervention_ids': sorted(included_intervention_ids),
                           'intervention_ids': sorted(delivered_intervention_ids),
                           'outcome': outcome}
+            if run_id:
+                checkpoint['run_id'] = run_id
             if requested_wait:
                 checkpoint['await_tasks'] = requested_wait
             if review_progress and review_progress.snapshot is not None:
@@ -491,7 +519,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             if receipts:
                 answer = (answer.strip() + '\n\n' if answer else '') + ('Retained evidence '
                     '(not a completion claim):\n' + '\n'.join(receipts))
-        blocked_child = any(value.get('status') == 'blocked' for value in failed_delegations.values())
+        blocked_child = any(value.get('status') == 'blocked' or
+                            value.get('status') == 'failed' and not value.get('resumable')
+                            for value in failed_delegations.values())
         incomplete_child = failed_delegations and not forced_final and not model_failure
         if failed_delegations:
             # Full child answers stay in the checkpoint/tool history. Do not recursively
@@ -751,6 +781,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 if key[0] == arguments['role'] and value.get('resumable')), {})
                             if previous.get('resumable') and not arguments.get('session_id'):
                                 delegation_key = None
+                                if previous.get('outcome', {}).get('reason') == 'workflow_no_progress':
+                                    raise ToolInputError('Child made no progress. Reconcile external effects and '
+                                                         'local work in the saved session_id=' + previous['session_id'] +
+                                                         '; give that session a concrete new instruction for remaining '
+                                                         'work or report the blocker. Do not create a replacement sandbox')
                                 raise ToolInputError('Continue the unfinished child using role and session_id=' +
                                                      previous['session_id'] + '; do not create a replacement sandbox')
                             task_text = arguments['task']

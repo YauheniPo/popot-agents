@@ -126,6 +126,13 @@ class LiveProgressTests(unittest.TestCase):
         self.assertEqual(second['lastError'], first['lastError'])
         self.assertEqual(second['lastAction']['agent_session_id'], 'a' * 16)
 
+    def test_memory_failure_snapshot_identifies_capture_phase(self):
+        from popot_agents.progress import TurnProgress
+        progress = TurnProgress('a' * 16)
+        progress.update(json.dumps({'event': 'memory_capture_failed', 'phase': 'summary',
+                                    'error_type': 'ConnectionResetError'}))
+        self.assertEqual(progress.snapshot()['lastError']['phase'], 'summary')
+
     def test_progress_is_bounded_and_excludes_reasoning_and_tool_payloads(self):
         from popot_agents.progress import TurnProgress
         progress = TurnProgress()

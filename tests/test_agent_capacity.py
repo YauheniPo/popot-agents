@@ -69,6 +69,14 @@ class AgentCapacityTests(unittest.TestCase):
                 self.assertEqual(tools.execute_tool('read_tool_output',
                     {'path': path, 'offset': 30000}, ['read_tool_output']), 'TAIL')
 
+    def test_missing_saved_output_explains_workspace_scope(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(tools, 'WORKSPACE_ROOT', Path(directory)):
+            path = '.tool-results/' + 'a' * 32 + '.txt'
+            with self.assertRaises(tools.ToolExecutionError) as caught:
+                tools.execute_tool('read_tool_output', {'path': path}, ['read_tool_output'])
+        self.assertIn('unavailable in this workspace', str(caught.exception))
+        self.assertNotIn(directory, str(caught.exception))
+
     def test_saved_output_reader_rejects_symlinked_file_or_directory(self):
         for directory_link in (False, True):
             with self.subTest(directory_link=directory_link), tempfile.TemporaryDirectory() as directory, \
