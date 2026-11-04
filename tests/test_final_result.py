@@ -169,3 +169,15 @@ class FinalResultTests(unittest.TestCase):
         self.assertNotIn('secret-test-value', '\n'.join(receipts))
         self.assertIn('isError', receipts[0])
         self.assertIn('outcome requires interpretation', receipts[0])
+
+    def test_retained_tool_receipt_is_short_and_links_full_output(self):
+        from popot_agents.worker.final_result import retained_receipts
+        artifact='.tool-results/'+'a'*32+'.txt'
+        content='exit_code=0\n'+'long output\n'*300+f'Full output: {artifact}\n'
+        receipts=retained_receipts([{'role':'assistant','tool_calls':[
+            {'id':'shell','function':{'name':'bash'}}]},
+            {'role':'tool','tool_call_id':'shell','content':content}],{})
+        self.assertEqual(len(receipts),1)
+        self.assertLess(len(receipts[0]),500)
+        self.assertIn('exit_code=0',receipts[0])
+        self.assertIn(artifact,receipts[0])

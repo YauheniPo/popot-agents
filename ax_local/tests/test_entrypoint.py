@@ -21,6 +21,15 @@ class EntrypointTests(unittest.TestCase):
                     entrypoint.load_capabilities()
                 self.assertEqual(os.environ['HOME'], '/workspace')
 
+    def test_capability_bundle_restores_resource_metrics(self):
+        values = {'POPOT_RESOURCE_METRICS_ROLE': 'backend_engineer',
+                  'POPOT_RESOURCE_METRICS_CALL_ID': 'call-root'}
+        with patch.dict(os.environ, {'AX_CAPABILITIES_JSON': json.dumps(values)}, clear=True):
+            entrypoint.load_capabilities()
+            self.assertEqual(os.environ['POPOT_RESOURCE_METRICS_ROLE'], 'backend_engineer')
+            self.assertEqual(os.environ['POPOT_RESOURCE_METRICS_CALL_ID'], 'call-root')
+            self.assertNotIn('AX_CAPABILITIES_JSON', os.environ)
+
     def test_data_restart_removes_only_a_stale_socket(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / 'chat.sock')

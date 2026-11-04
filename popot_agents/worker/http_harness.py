@@ -235,9 +235,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     if instructions and not resuming:
         messages.insert(0, {"role": "system", "content": instructions})
     if run_context and 'publication_owner' in run_context:
+        owner = run_context['publication_owner']
         messages.append({'role':'system','content':
-            'Server-designated branch integration/publication owner: '+str(run_context['publication_owner'])+
-            '; your session: '+str(run_context.get('session_id'))+'. Other workers prepare local commits/patches '
+            'Server-designated branch integration/publication owner: '+str(owner or 'not assigned yet')+
+            '; your session: '+str(run_context.get('session_id'))+'. The first durable backend_engineer or '
+            'frontend_engineer child becomes owner when none is assigned. Other workers prepare local commits/patches '
             'and checks; return them for integration instead of publishing branch updates. '
             'The owner integrates all prepared changes before final revision verification. '
             'This designation grants no new user authorization or role permission.'})
@@ -885,8 +887,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     _trace('work_evidence', receipt={k:v for k,v in receipt.items() if k != 'command'})
                 memory.observe(call_id, name, arguments, output)
             if requested_wait:
-                return wait_for_children()
+                return wait_for_children(report={'errors':[structural_blocker]} if structural_blocker else None)
             if structural_blocker:
+                if any(value.get('pending') for value in failed_delegations.values()):
+                    return wait_for_children(report={'errors':[structural_blocker]})
                 return save_result('Tool input requires reconciliation: '+structural_blocker, 'blocked',
                     'non_retryable_tool_input', {'evidence':retained_receipts(messages,completed_delegations),
                     'errors':[structural_blocker], 'remaining_work':['Correct the structural input before repeating this operation']})

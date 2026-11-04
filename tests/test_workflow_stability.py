@@ -8,6 +8,15 @@ from tests import test_agent_reliability as reliability
 
 
 class WorkflowStabilityTests(unittest.TestCase):
+    def test_continuation_reports_remaining_workflow_budget(self):
+        run = WorkflowRun(POLICY, 'finish the task')
+        run.begin()
+        run.record({'answer':'more work','outcome':{'status':'partial','evidence':['checked'],
+            'errors':[],'remaining_work':['publish']}}, {'messages':[]})
+        continuation = run.continuation()
+        self.assertIn('3 coordinator turns remain', continuation)
+        self.assertRegex(continuation, r'\d+ seconds remain')
+
     def test_optional_prior_answer_cannot_displace_authorization(self):
         authority = 'Do not push. ' + 'x'*27500
         text = handoff_task('Review the requested revision', [

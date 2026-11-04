@@ -1,5 +1,7 @@
 # Popot Agents
 
+[Run a task with curl](#run-a-task-with-curl)
+
 Agents run through AX Tasks in a local kind cluster. The MCP gateway accepts a
 role and task; the AX API selects the role's provider, starts or resumes a
 sandbox, and returns the answer with a `sessionId`. Follow-up messages reuse that
@@ -287,11 +289,24 @@ base images. Rebuild the MCP and worker images together after SDK upgrades.
 
 Configure a Streamable HTTP client with `http://127.0.0.1:8003/mcp`.
 The gateway exposes `run_task`, `send_message`, `list_chats` and `get_chat`.
-For a copyable request:
+
+### Run a task with curl
+
+Run this as **one line** in Bash or Zsh. The script prints the complete `curl`
+command, streams progress, then reports the task outcome:
 
 ```bash
-curl -N --fail-with-body -sS 'http://127.0.0.1:8003/mcp' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-11-25' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"progressToken":"task-1"},"name":"run_task","arguments":{"task":"Describe the tools available to you."}}}'
+TASK='подготовь https://github.com/YauheniPo/popot-bot-2.0/pull/92 к merge' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
+
+`TASK` is the request. Empty `ROLE` uses `config/runtime.json → mcp.default_role`;
+set a role such as `backend_engineer` to select it explicitly. Empty `SESSION_ID`
+starts a new session; set it to a returned ID to continue an existing session.
+The script generates `CALL_ID` and `PROGRESS_TOKEN` for each new request. After
+an uncertain response, reuse the printed `curl` command with the same IDs and
+payload; generating a new `CALL_ID` would start another request. You may also
+set `CALL_ID` and `PROGRESS_TOKEN` in the command's environment. A `blocked` or
+`partial` task, an MCP error, or a failed `curl` returns a nonzero status.
 
 MCP accepts any configured `role` (or explicit agent profile). When omitted,
 `config/runtime.json → mcp.default_role` selects the role (`planner` by default).

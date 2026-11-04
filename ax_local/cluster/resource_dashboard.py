@@ -5,6 +5,8 @@ def dashboard() -> dict:
     ns = 'namespace=~"$namespace",pod=~"$pod"'
     containers = ns + ',container!="",container!="POD"'
     process = 'role=~"$role",task=~"$task",process=~"$process"'
+    task_scope = ('role=~"$role",task=~"$task",root_session_id!="",'
+                  'root_session_id=~"$root_session_id",session_id=~"$session_id",call_id=~"$call_id"')
     # Collector caches gauges briefly after exit. Hide them in current views,
     # while keeping the historical samples available for range queries.
     active = f'(time() - popot_sandbox_process_sampled_at_seconds{{{process}}} < 20)'
@@ -79,6 +81,25 @@ def dashboard() -> dict:
     panels[-1]['options'] = {'reduceOptions': {'calcs': ['lastNotNull'], 'fields': '', 'values': False},
                             'textMode': 'value_and_name', 'colorMode': 'value'}
 
+    task_active = f'(time() - popot_sandbox_process_sampled_at_seconds{{{task_scope}}} < 20)'
+    identity = 'root_session_id,call_id,session_id,role,agent'
+    agent_legend = '{{root_session_id}} / {{call_id}} / {{role}} ({{agent}}) [{{session_id}}]'
+    panel('Agent activity by task', f'clamp_max(count by({identity})({task_active}), 1)',
+          'short', agent_legend, '1 while this agent session is active. Filter by root sessionId or initiating callId.')
+    panel('Agent CPU by task and role',
+          f'sum by({identity})(100 * rate(popot_sandbox_process_cpu_seconds_total{{{task_scope}}}[$__rate_interval]) and on({pid}) {task_active})',
+          'percent', agent_legend, 'CPU for each agent session in the selected root task. 100% = one CPU core.')
+    panel('Agent RSS by task and role',
+          f'sum by({identity})(popot_sandbox_process_memory_bytes{{{task_scope}}} and on({pid}) {task_active})',
+          'bytes', agent_legend, 'Sum of process RSS for each agent session; shared pages may be counted more than once.')
+    panel('Agents involved in selected period',
+          f'clamp_max(count by({identity})(max_over_time(popot_sandbox_process_sampled_at_seconds{{{task_scope}}}[$__range])), 1)',
+          'short', agent_legend, 'Includes finished and suspended agent sessions sampled in the selected time range.')
+    panels[-1]['type'] = 'stat'
+    panels[-1]['targets'][0].update(instant=True, range=False)
+    panels[-1]['options'] = {'reduceOptions': {'calcs': ['lastNotNull'], 'fields': '', 'values': False},
+                            'textMode': 'name', 'colorMode': 'value'}
+
     def variable(name, query):
         return {'name': name, 'label': name.title(), 'type': 'query',
                 'datasource': {'type': 'prometheus', 'uid': 'popot-prometheus'},
@@ -94,5 +115,8 @@ def dashboard() -> dict:
                 variable('pod', 'label_values(kube_pod_info{namespace=~"$namespace"},pod)'),
                 variable('role', 'label_values(popot_sandbox_process_sampled_at_seconds,role)'),
                 variable('task', 'label_values(popot_sandbox_process_sampled_at_seconds{role=~"$role"},task)'),
+                variable('root_session_id', 'label_values(popot_sandbox_process_sampled_at_seconds,root_session_id)'),
+                variable('call_id', 'label_values(popot_sandbox_process_sampled_at_seconds{root_session_id=~"$root_session_id"},call_id)'),
+                variable('session_id', 'label_values(popot_sandbox_process_sampled_at_seconds{root_session_id=~"$root_session_id"},session_id)'),
                 variable('process', 'label_values(popot_sandbox_process_sampled_at_seconds{role=~"$role",task=~"$task"},process)')]},
             'panels': panels}

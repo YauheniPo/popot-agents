@@ -42,7 +42,8 @@ def sample_processes(proc: Path = Path('/proc'), *, clock_ticks: int | None = No
 
 
 def make_payload(samples: list[dict], *, task: str, timestamp_ns: int,
-                 role: str = 'unassigned') -> dict:
+                 role: str = 'unassigned', agent: str = 'unassigned',
+                 session_id: str = '', root_session_id: str = '', call_id: str = '') -> dict:
     metrics = []
     for suffix, unit, key in [('cpu', 's', 'cpu_seconds'),
                               ('memory', 'By', 'rss_bytes'),
@@ -51,8 +52,10 @@ def make_payload(samples: list[dict], *, task: str, timestamp_ns: int,
                               ('sampled_at', 's', None)]:
         points = []
         for process in samples:
-            labels = dict(task=task, role=role, pid=str(process['pid']), process=process['name'],
+            labels = dict(task=task, role=role, agent=agent, pid=str(process['pid']), process=process['name'],
                           process_start=str(process['start_ticks']))
+            labels.update({key: value for key, value in (
+                ('session_id', session_id), ('root_session_id', root_session_id), ('call_id', call_id)) if value})
             points.append({
                 'attributes': [{'key': k, 'value': {'stringValue': v}}
                                for k, v in labels.items()],
@@ -74,9 +77,11 @@ def make_payload(samples: list[dict], *, task: str, timestamp_ns: int,
 
 class ProcessMetrics:
     def __init__(self, endpoint: str = '', task: str = '', interval: float = 5,
-                 *, role: str = 'unassigned'):
+                 *, role: str = 'unassigned', agent: str = 'unassigned',
+                 session_id: str = '', root_session_id: str = '', call_id: str = ''):
         self.endpoint, self.task, self.interval = endpoint, task, interval
-        self.role = role
+        self.role, self.agent = role, agent
+        self.session_id, self.root_session_id, self.call_id = session_id, root_session_id, call_id
         self.stop = threading.Event()
         self.thread = None
 
@@ -84,7 +89,11 @@ class ProcessMetrics:
     def from_env(cls):
         return cls(os.environ.get('POPOT_RESOURCE_METRICS_URL', ''),
                    os.environ.get('POPOT_RESOURCE_METRICS_TASK', ''),
-                   role=os.environ.get('POPOT_RESOURCE_METRICS_ROLE') or 'unassigned')
+                   role=os.environ.get('POPOT_RESOURCE_METRICS_ROLE') or 'unassigned',
+                   agent=os.environ.get('POPOT_RESOURCE_METRICS_AGENT') or 'unassigned',
+                   session_id=os.environ.get('POPOT_RESOURCE_METRICS_SESSION_ID', ''),
+                   root_session_id=os.environ.get('POPOT_RESOURCE_METRICS_ROOT_SESSION_ID', ''),
+                   call_id=os.environ.get('POPOT_RESOURCE_METRICS_CALL_ID', ''))
 
     def __enter__(self):
         if self.endpoint and self.task:
@@ -103,7 +112,9 @@ class ProcessMetrics:
         while not self.stop.is_set():
             try:
                 body = make_payload(sample_processes(), task=self.task,
-                                    role=self.role, timestamp_ns=time.time_ns())
+                                    role=self.role, agent=self.agent, session_id=self.session_id,
+                                    root_session_id=self.root_session_id, call_id=self.call_id,
+                                    timestamp_ns=time.time_ns())
                 request = Request(self.endpoint, data=json.dumps(body).encode(),
                                   headers={'Content-Type': 'application/json'})
                 with client.open(request, timeout=2) as response:

@@ -18,7 +18,8 @@ def load_capabilities() -> None:
         return
     capabilities = json.loads(value)
     if not isinstance(capabilities, dict) or any(
-            not key.startswith(('AX_DELEGATION_', 'AX_HARNESS2_', 'HARNESS2_'))
+            not key.startswith(('AX_DELEGATION_', 'AX_HARNESS2_', 'HARNESS2_',
+                                'POPOT_RESOURCE_METRICS_'))
             or not isinstance(item, str) for key, item in capabilities.items()):
         raise ValueError('Invalid AX capability environment')
     os.environ.update(capabilities)

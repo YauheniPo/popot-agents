@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import subprocess
 import time
 import unittest
 from unittest.mock import patch
@@ -9,6 +10,18 @@ from ax_local.api.server import kind_control_plane_host, make_server
 
 
 class AxServerTests(unittest.TestCase):
+    def test_api_reuses_one_ax_tunnel_for_all_cli_calls(self):
+        from ax_local.api.server import configure_ax_server_tunnel
+        listing = ('CONTEXT LOCAL PORT REMOTE SERVICE PID STATUS CREATED\n'
+                   'kind-popot-ax 34967 ax-system/ax-server 123 Active now\n')
+        with patch.dict(os.environ, {'AX_SERVER': ''}), \
+             patch('ax_local.api.server.subprocess.run', side_effect=[
+                 subprocess.CompletedProcess([], 0, ''),
+                 subprocess.CompletedProcess([], 0, listing)]) as run:
+            configure_ax_server_tunnel('kind-popot-ax', 'ate-demo-counter')
+            self.assertEqual(os.environ['AX_SERVER'], 'http://127.0.0.1:34967')
+        self.assertEqual(run.call_count, 2)
+
     def test_workflow_capacity_reserves_room_for_nested_specialists(self):
         from ax_local.api.server import AX_CONFIG
         with patch.dict(os.environ, {'AX_LOCAL_WORKER_IMAGE': 'test-image'}), \

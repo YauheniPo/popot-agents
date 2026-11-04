@@ -1,4 +1,5 @@
 """Validate final reports and retain bounded receipts when formatting fails."""
+import hashlib
 import json
 import re
 
@@ -81,6 +82,9 @@ def retained_receipts(messages, completed_children):
             continue
         content = m.get('content')
         if isinstance(content, str) and content.strip():
+            preview = ' | '.join(scrub(content).splitlines()[:3])[:min(chars, 240)]
+            artifact = re.search(r'Full output: (\.tool-results/[a-f0-9]{32}\.txt)', content)
             receipts.append(f'Tool receipt {name} ({call_id}); outcome requires interpretation: '
-                            + scrub(content)[:chars])
+                            + preview + f' [sha256={hashlib.sha256(content.encode()).hexdigest()}]'
+                            + (f' Full output: {artifact[1]}' if artifact else ''))
     return list(dict.fromkeys(receipts))[:limit]

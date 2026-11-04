@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import signal
+import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -28,6 +29,26 @@ def kind_control_plane_host(context: str) -> str:
     if not context.startswith("kind-"):
         raise ValueError("AX context must use a local kind cluster")
     return f"{context.removeprefix('kind-')}-control-plane"
+
+
+def configure_ax_server_tunnel(context: str, atespace: str) -> None:
+    """Reuse one AX tunnel instead of starting one for every CLI process."""
+    if os.environ.get('AX_SERVER'):
+        return
+    subprocess.run(['ax', f'--context={context}', f'--atespace={atespace}',
+                    'get', 'tasks'], check=True, capture_output=True, text=True,
+                   timeout=AX_CONFIG['cli_timeout_seconds'])
+    result = subprocess.run(['ax', 'tunnel', 'list'], check=True,
+                            capture_output=True, text=True,
+                            timeout=AX_CONFIG['cli_timeout_seconds'])
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 5 and fields[0] == context and fields[2] == 'ax-system/ax-server' \
+                and fields[4] == 'Active' and fields[1].isdecimal() \
+                and 0 < int(fields[1]) <= 65535:
+            os.environ['AX_SERVER'] = f'http://127.0.0.1:{fields[1]}'
+            return
+    raise RuntimeError('AX CLI did not report an active ax-server tunnel')
 
 
 def configure_harness2(roles, profiles, runners, routes):
@@ -153,6 +174,7 @@ def main() -> None:
     proxy = a2a = worker_pool = None
     try:
         server = make_server()
+        configure_ax_server_tunnel(context, AX_CONFIG['atespace'])
         proxy = start_proxy(server.provider_routes, host=kind_ip)
         # All profiles use the same AX namespace; recover its Tasks once.
         server.worker_managers[0].recover_workers()
