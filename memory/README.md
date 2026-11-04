@@ -230,6 +230,17 @@ operations; standard session listing/detail routes remain upstream. It uses
 Cognee's SQLite cache in the persistent system volume, with the upstream
 seven-day default trace TTL. Session aggregate rows survive trace expiry.
 Journal failures are logged and do not discard a successful task result.
+Session status describes the execution of one turn, not completion of the whole
+workflow or the health of the memory service. A saved checkpoint or child wait
+without task errors closes the turn as `completed`; the lifecycle trace keeps
+`outcome=partial` and its `reason` (for example `child_pending`). Model/execution
+failures remain `failed` and include bounded, redacted `errors`. The same trace
+records `memory_status` (`available`, `degraded`, or `unused`) and `memory_errors`
+separately. Recall and capture failures include their exception type in tool
+metadata; a memory outage does not overwrite a successful task outcome.
+An already recorded tool failure is not counted again by the terminal trace.
+Repeated terminal events leave usage and traces unchanged. Existing history is
+not reclassified: older records may still label checkpoints as failures.
 Tool metadata is written in one ordered `popot.tools` trace containing
 `tool_batches` (up to ten lists of twenty records), followed by the lifecycle
 trace. This fits the pinned SDK's twenty-item container limit and avoids one

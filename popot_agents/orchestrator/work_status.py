@@ -23,6 +23,23 @@ def _report(saved):
               'timeSource': 'outcome_recorded' if recorded_at else 'session_updated',
               'coordinatorTurns': (child.get('workflow') or workflow).get('turns'),
               'outcome': None, 'references': [], 'commits': [], 'truncated': False}
+    observations = config.get('_work_evidence', [])
+    run_id = child.get('run_id') or workflow.get('run_id')
+    if run_id:
+        observations = [r for r in observations if r.get('runId') == run_id]
+    report['runId'] = run_id
+    report['milestones'] = [{key: value for key, value in receipt.items() if key not in {'command'}}
+                             for receipt in observations[-4:]]
+    report['truncated'] |= len(observations) > 4
+    report['lastObservedAt'] = observations[-1].get('observedAt') if observations else None
+    for receipt in report['milestones']:
+        if receipt.get('revision') and receipt['revision'] not in report['commits']:
+            report['commits'].append(receipt['revision'])
+        for url in receipt.get('references', []):
+            if len(report['references']) < 6:
+                report['references'].append({'type':'tool_reference','url':url})
+            else:
+                report['truncated'] = True
     if not isinstance(outcome, dict):
         return report
     labels = {key: redact_text(str(outcome[key])) for key in ('status', 'reason') if key in outcome}
@@ -39,8 +56,8 @@ def _report(saved):
     sources = list(outcome.get('evidence') or [])[:16]
     if isinstance(outcome.get('last_partial_answer'), str):
         sources.append(outcome['last_partial_answer'])
-    seen = set()
-    commits = set()
+    seen = {ref['url'] for ref in report['references']}
+    commits = set(report['commits'])
     for text in sources:
         if not isinstance(text, str):
             continue
@@ -83,6 +100,9 @@ def build_work_status(saved, chats):
     for item in ordered[:8]:
         report = _report(item)
         result['tasks'].append(report)
+        while report['milestones'] and len(json.dumps(result, ensure_ascii=False).encode()) > _MAX_BYTES:
+            report['milestones'].pop(0)
+            report['truncated'] = True
         if len(json.dumps(result, ensure_ascii=False).encode()) > _MAX_BYTES:
             result['tasks'].pop()
             result['truncated'] = True

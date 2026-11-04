@@ -119,7 +119,7 @@ class WorkflowTests(unittest.TestCase):
         replies=[result('partial', evidence=(f'receipt-{i}',), remaining=('more',)) for i in range(4)]
         calls,data,_=self.run_workflow(replies)
         self.assertEqual(len(calls),4)
-        self.assertEqual(data['outcome']['reason'],'workflow_budget_exhausted')
+        self.assertEqual(data['outcome']['reason'],'workflow_turn_limit')
 
     def test_second_autonomous_root_is_rejected_without_starting_another_worker(self):
         def while_running():
@@ -165,7 +165,7 @@ class WorkflowTests(unittest.TestCase):
             workflow.begin()
         with patch('popot_agents.orchestrator.workflow.time.monotonic', return_value=3701):
             outcome = workflow.record(result('partial', remaining=('verify',)), {'messages': []})
-        self.assertEqual(outcome['outcome']['reason'], 'workflow_budget_exhausted')
+        self.assertEqual(outcome['outcome']['reason'], 'workflow_deadline_exhausted')
 
     def test_new_tool_observation_prevents_false_no_progress_stop(self):
         from popot_agents.orchestrator.workflow import WorkflowRun

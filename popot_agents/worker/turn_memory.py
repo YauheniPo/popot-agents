@@ -89,6 +89,7 @@ class TurnMemory:
         self.saved_count = 0
         self.session_started = False
         self.run_complete = True
+        self.outcome = None
         self.warnings = []
         if self.enabled:
             self.client = client or CogneeMemory(
@@ -127,10 +128,17 @@ class TurnMemory:
         if not self.session_started:
             return
         try:
+            outcome = self.outcome or {}
+            errors = [scrub(value)[:500] for value in outcome.get('errors', [])[:8]]
+            failed = (outcome.get('status') == 'failed' or bool(errors)
+                      or not success and not outcome)
             self.client.timeout = RUNTIME["timeouts"]["memory_session_finish_seconds"]
             self.client.session_event({'session_id': self.session_id,
                 'dataset_name': self.dataset, 'role': self.role,
-                'status': 'completed' if success else 'failed', 'tools': self.tools,
+                'status': 'failed' if failed else 'completed', 'tools': self.tools,
+                'outcome': outcome.get('status', 'completed' if success else 'failed'),
+                'reason': outcome.get('reason', 'answer_returned' if success else 'execution_error'),
+                'errors': errors,
                 'model': os.getenv('HARNESS_MODEL', '')[:200],
                 'tokens_in': self.tokens_in, 'tokens_out': self.tokens_out,
                 'cost_usd': self.cost_usd, 'cost_reported': self.cost_reported,
@@ -138,6 +146,12 @@ class TurnMemory:
             trace('memory_session_recorded', session_id=self.session_id)
         except Exception as exc:
             trace('memory_session_failed', phase='finish', error_type=type(exc).__name__, error=scrub(str(exc)))
+
+    def capture_failed(self, exc):
+        self.warnings.append('Memory capture failed; main task result is unchanged.')
+        if len(self.tools) < RUNTIME['memory']['trace_tool_limit']:
+            self.tools.append({'name': 'memory.capture', 'status': 'error', 'output_chars': 0,
+                               'error_type': type(exc).__name__})
 
     def context(self, seconds: float) -> str:
         if not self.enabled or seconds < RUNTIME["timeouts"]["memory_recall_min_seconds"]:
@@ -180,7 +194,8 @@ class TurnMemory:
         except Exception as exc:
             self.enabled = False
             self.warnings.append('Project memory recall failed; using current sources and tools.')
-            self.tools.append({'name': 'cognee.recall', 'status': 'error', 'output_chars': 0})
+            self.tools.append({'name': 'cognee.recall', 'status': 'error', 'output_chars': 0,
+                               'error_type': type(exc).__name__})
             trace('memory_recall_failed', dataset=self.dataset, error_type=type(exc).__name__,
                   error=scrub(str(exc))[:500])
         return ''

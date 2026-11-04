@@ -49,7 +49,7 @@ class AgentReliabilityTests(unittest.TestCase):
                 if role == 'code_reviewer':
                     self.assertIn('You own the review', prompt)
 
-    def run_sequence(self, replies, *, delegate=None, clock=None, timeout=900, role=None, state=None, env=None):
+    def run_sequence(self, replies, *, delegate=None, clock=None, timeout=900, role=None, state=None, env=None, run_context=None):
         from ax_local.worker.delegation import make_tools
         bodies = []
         tools = make_tools({'AX_DELEGATION_URL': 'http://fake', 'AX_DELEGATION_TOKEN': 'test',
@@ -69,7 +69,7 @@ class AgentReliabilityTests(unittest.TestCase):
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=response), \
              redirect_stderr(io.StringIO()):
             answer = run_http('Verify the requested work', role or {'tools': ['calculate']},
-                              extra_tools=tools, state=state)
+                              extra_tools=tools, state=state, run_context=run_context)
         return answer, state, bodies
 
     @staticmethod
@@ -82,16 +82,49 @@ class AgentReliabilityTests(unittest.TestCase):
         return {'tool_calls': [{'id': 'qa', 'function': {'name': 'delegate_task',
             'arguments': json.dumps({'role': 'qa_engineer', 'task': 'Run the required tests'})}}]}
 
-    def test_durable_pending_child_yields_without_another_model_round(self):
+    def test_explicit_child_wait_yields_without_polling_the_model(self):
         from unittest.mock import Mock
         delegate=Mock(return_value=json.dumps({'sessionId':'a'*16,'role':'qa_engineer',
             'state':'TASK_STATE_WORKING','pending':True,'resumable':False,
             'outcome':{'status':'partial','reason':'child_running','evidence':[],
                        'errors':[],'remaining_work':['await child']}}))
-        _,state,bodies=self.run_sequence([self.delegate_call()],delegate=delegate)
-        self.assertEqual(len(bodies),1)
+        _,state,bodies=self.run_sequence([self.delegate_call(), {'tool_calls':[{'id':'wait','function':{'name':'await_tasks','arguments':json.dumps({'session_ids':['a'*16]})}}]}],delegate=delegate)
+        self.assertEqual(len(bodies),2)
         self.assertEqual(state['outcome']['reason'],'child_pending')
         self.assertTrue(state['failed_delegations'][0][1]['pending'])
+
+    def test_pending_child_does_not_start_memory_summary(self):
+        from unittest.mock import Mock
+        memory = Mock(enabled=True, dataset='test', warnings=[])
+        memory.context.return_value = ''
+        delegate = Mock(return_value=json.dumps({'sessionId':'a'*16,'role':'qa_engineer',
+            'state':'TASK_STATE_WORKING','pending':True,'outcome':{'status':'partial'}}))
+        with patch('popot_agents.worker.http_harness.TurnMemory', return_value=memory):
+            self.run_sequence([self.delegate_call(),self.result()], delegate=delegate)
+        memory.summary_messages.assert_not_called()
+
+    def test_verification_handoff_shares_only_checks_for_requested_revision(self):
+        from unittest.mock import Mock
+        from popot_agents.work_evidence import observe_tool_result
+        check = observe_tool_result('bash', {'command':'git rev-parse HEAD; python3 -m unittest'},
+            'exit_code=0\n'+'a'*40+'\nRan 7 tests in 1s\nOK', 'good-check')
+        other = {**check, 'revision':'b'*40, 'command':'WRONG_REV_CHECK'}
+        state = {'messages':[{'role':'user','content':'Verify same revision'}],
+            'outcome':{'status':'partial'}, 'completed_delegations':{
+                'd'*16:{'sessionId':'d'*16,'role':'qa_engineer','outcome':{'checks':[check,other]}}}}
+        delegate = Mock(return_value=json.dumps({'sessionId':'c'*16,'role':'qa_engineer',
+            'state':'TASK_STATE_COMPLETED','answer':'Verified', 'outcome':{
+                'status':'completed','evidence':['checked'],'errors':[],'remaining_work':[]}}))
+        call = self.delegate_call()
+        args = json.loads(call['tool_calls'][0]['function']['arguments'])
+        args['revision'] = 'a'*40
+        call['tool_calls'][0]['function']['arguments'] = json.dumps(args)
+        self.run_sequence([call,self.result()], delegate=delegate, state=state)
+        handed = delegate.call_args.args[0]
+        self.assertNotIn('revision', handed)
+        self.assertIn('Target revision: '+'a'*40, handed['task'])
+        self.assertIn('good-check', handed['task'])
+        self.assertNotIn('WRONG_REV_CHECK', handed['task'])
 
     def test_partial_parent_result_finishes_without_forcing_another_child_run(self):
         from unittest.mock import Mock

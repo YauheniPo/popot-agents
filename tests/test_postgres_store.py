@@ -33,6 +33,20 @@ class PostgresSessionStoreTests(unittest.TestCase):
         self.assertEqual(restored["roleConfig"], role)
         self.assertEqual(restored["createdAt"], created_at)
 
+    def test_work_evidence_survives_stale_role_config_and_concurrent_updates(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from popot_agents.work_evidence import observe_tool_result
+        self.store.save(self.session_id, 'test', [], 'analyst', {'instructions':'original'})
+        def observe(i):
+            receipt = observe_tool_result('bash', {'command':'python3 -m unittest'},
+                'exit_code=0\nRan 7 tests in 1s\nOK', str(i))
+            self.store.record_evidence(self.session_id, receipt)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(observe, range(8)))
+        self.store.save(self.session_id, 'test', [], 'analyst', {'instructions':'new'})
+        evidence = self.store.get(self.session_id)['roleConfig']['_work_evidence']
+        self.assertEqual({r['callId'] for r in evidence}, {str(i) for i in range(8)})
+
     def test_recent_update_does_not_extend_seven_day_retention(self):
         import psycopg
 

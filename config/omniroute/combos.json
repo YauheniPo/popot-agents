@@ -25,14 +25,9 @@
   },
   "ax-ollama": {
     "name": "ax-ollama",
-    "description": "Ollama Cloud: pinned DeepSeek V4 Pro 0813 first, pinned DeepSeek V4.1 Flash 1017 fallback, then GLM 5.3 Flash. No duplicate aliases or retiring MiniMax.",
+    "description": "Ollama Cloud: pinned DeepSeek V4.1 Flash 1017 first, then GLM 5.3 Flash, with pinned DeepSeek V4 Pro 0813 as the final fallback.",
     "strategy": "priority",
     "models": [
-      {
-        "kind": "model",
-        "providerId": "ollama-cloud",
-        "model": "ollama-cloud/deepseek-v4-pro:0813"
-      },
       {
         "kind": "model",
         "providerId": "ollama-cloud",
@@ -42,6 +37,11 @@
         "kind": "model",
         "providerId": "ollama-cloud",
         "model": "ollama-cloud/glm-5.3-flash"
+      },
+      {
+        "kind": "model",
+        "providerId": "ollama-cloud",
+        "model": "ollama-cloud/deepseek-v4-pro:0813"
       }
     ],
     "config": {

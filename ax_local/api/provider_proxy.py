@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import socket
 import sys
 import threading
@@ -42,7 +43,10 @@ def resolve_provider(name: str, model: str, profiles: dict, environ: dict) -> Pr
     return Provider(name, model.strip(), base_url.rstrip("/"), api_key)
 
 
-def make_upstream_request(selected: Provider, body: bytes) -> request.Request:
+CORRELATION_HEADERS = {'X-Popot-Session-Id':16, 'X-Popot-Run-Id':32, 'X-Popot-Root-Session-Id':16}
+
+
+def make_upstream_request(selected: Provider, body: bytes, *, correlation=None) -> request.Request:
     try:
         payload = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -50,6 +54,10 @@ def make_upstream_request(selected: Provider, body: bytes) -> request.Request:
     if not isinstance(payload, dict) or payload.get("model") != selected.model:
         raise ValueError("model request does not match the selected model")
     headers = {"Content-Type": "application/json"}
+    for name, size in CORRELATION_HEADERS.items():
+        value = (correlation or {}).get(name)
+        if isinstance(value,str) and re.fullmatch(r'[a-f0-9]{'+str(size)+'}',value):
+            headers[name] = value
     if selected.api_key:
         headers["Authorization"] = f"Bearer {selected.api_key}"
     return request.Request(f"{selected.base_url}/chat/completions", data=body,
@@ -71,7 +79,7 @@ def authorized_provider(routes: dict[str, Provider], authorization: str) -> Prov
 
 
 def dispatch_request(routes: dict[str, Provider], path: str,
-                     authorization: str, body: bytes) -> tuple[int, bytes]:
+                     authorization: str, body: bytes, *, correlation=None) -> tuple[int, bytes]:
     if path != "/v1/chat/completions":
         return 404, b'{}'
     selected = authorized_provider(routes, authorization)
@@ -80,7 +88,7 @@ def dispatch_request(routes: dict[str, Provider], path: str,
     if len(body) < 1 or len(body) > AX_CONFIG["proxy"]["max_request_bytes"]:
         return 413, b'{}'
     try:
-        upstream = make_upstream_request(selected, body)
+        upstream = make_upstream_request(selected, body, correlation=correlation)
     except ValueError:
         return 400, b'{}'
     # Leave time to deliver an upstream timeout before the worker's socket expires.
@@ -138,7 +146,8 @@ def start_proxy(routes: dict[str, Provider], host: str = "0.0.0.0",
                 return
             body = self.rfile.read(size)
             status, answer = dispatch_request(routes, self.path,
-                                              authorization, body)
+                                              authorization, body, correlation={
+                                                  name:self.headers.get(name) for name in CORRELATION_HEADERS})
             self._reply(status, answer)
 
         def log_message(self, _format: str, *_args) -> None:

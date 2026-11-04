@@ -13,4 +13,5 @@ Object.assign(process.env, loggingEnvironment(
 process.env.POPOT_OMNIROUTE_CONVERSATION_FALLBACK = '1';
 process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS,
   '--import=/app/popot-conversation-fallback.mjs'].filter(Boolean).join(' ');
+process.env.NODE_OPTIONS += ' --import=/app/popot-continuation-status.mjs';
 await import('./dev/run-standalone.mjs');

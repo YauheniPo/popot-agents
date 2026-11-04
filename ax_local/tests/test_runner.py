@@ -13,6 +13,24 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_git_identity_enters_only_pr_publisher_task_environment(self):
+        from pathlib import Path
+        directory = Path(__file__).resolve().parents[2] / 'config/roles'
+        values = {name: 'fixture' for name in RUNTIME['role_env_names']}
+        values.update(GIT_AUTHOR_NAME='Owner', GIT_AUTHOR_EMAIL='owner@example.com')
+        with patch.dict(os.environ, values):
+            for path in directory.glob('*.json'):
+                role = json.loads(path.read_text())
+                env = {item['name']: item['value'] for item in
+                       self.runner.task_manifest('0123456789abcdef', role)['spec']['env']}
+                can_publish = 'create_pull_request' in role.get('mcpServers', {}).get('github', {}).get('tools', [])
+                self.assertEqual('GIT_AUTHOR_NAME' in env, can_publish, path.stem)
+                self.assertEqual('GIT_AUTHOR_EMAIL' in env, can_publish, path.stem)
+                if can_publish:
+                    self.assertEqual(env['GIT_AUTHOR_NAME'], 'Owner')
+                    self.assertEqual(env['GIT_AUTHOR_EMAIL'], 'owner@example.com')
+                self.assertLessEqual(len(env), 32)
+
     def test_server_checkpoints_and_delegation_inputs_do_not_enter_worker_environment(self):
         role = {'_ax_role': 'code_reviewer', '_workflow_coordinator': True,
                 'instructions': 'Review the supplied change', 'tools': ['calculate'],
@@ -303,9 +321,9 @@ class AxRunnerTests(unittest.TestCase):
             "  TYPE STATUS REASON MESSAGE\n  Ready False ImagePullBackOff image unavailable\n", "")
         deleted = subprocess.CompletedProcess([], 0, "", "")
         with patch.object(self.runner, "_run",
-                          side_effect=[missing, applied, applied, described, deleted]) as run, \
+                          side_effect=[missing, applied, applied, described, deleted, missing]) as run, \
              patch("ax_local.api.ax_runner.AxChat.is_alive", return_value=False), \
-             patch("ax_local.api.ax_runner.time.monotonic", side_effect=[0, 301]), \
+             patch("ax_local.api.ax_runner.time.monotonic", side_effect=[0, 301, 301, 301]), \
              patch("ax_local.api.ax_runner.time.sleep"):
             with self.assertRaisesRegex(AgentRunError, "Failed.*ImagePullBackOff"):
                 self.runner.start_chat("0123456789abcdef")

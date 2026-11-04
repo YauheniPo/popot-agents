@@ -21,6 +21,7 @@ from a2a.utils.proto_utils import validate_proto_required_fields
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.progress import forward_progress, is_progress_message
+from popot_agents.tools import ToolInputError
 
 
 def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dict:
@@ -44,6 +45,9 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
             "task": {"type": "string", "description": "Task or corrective instructions with requirements and relevant input data"},
             "session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
                            "description": "Existing unfinished child sessionId; omit only for a new task"},
+            "depends_on": {"type":"array","items":{"type":"string","pattern":"^[0-9a-f]{16}$"},
+                "uniqueItems":True,"maxItems":16,
+                "description":"Direct child sessionIds that must complete successfully before this task starts. Omit for independent work."},
             "replaces_session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
                 "description": "Failed non-resumable child being replaced for the same subtask. "
                                "Runtime carries its prior result and resolves that failure on success. "
@@ -51,13 +55,36 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
             "required": ["role", "task"], "additionalProperties": False}}}
     poll_interval = float(environ.get("AX_DELEGATION_POLL_SECONDS", "0.5"))
 
-    return {"delegate_task": {"schema": schema, "call": partial(
+    tools = {"delegate_task": {"schema": schema, "call": partial(
         delegate, url=url, token=token, allowed=allowed, poll_interval=poll_interval, probe=probe)}}
+    if probe is None:
+        tools['await_tasks'] = {'schema':{'type':'function','function':{
+            'name':'await_tasks','description':'Yield only when child results are needed. The server waits outside the model turn, then resumes with results. Continue independent work before calling this.',
+            'parameters':{'type':'object','properties':{
+                'session_ids':{'type':'array','minItems':1,'maxItems':16,'uniqueItems':True,
+                    'items':{'type':'string','pattern':'^[0-9a-f]{16}$'}},
+                'wait_for':{'type':'string','enum':['all','any'],'default':'all'}},
+                'required':['session_ids'],'additionalProperties':False}}},'call':await_tasks}
+    return tools
+
+
+def await_tasks(arguments, **_options):
+    if not isinstance(arguments,dict) or set(arguments)-{'session_ids','wait_for'}:
+        raise ToolInputError('await_tasks requires session_ids and optional wait_for=all|any')
+    ids=arguments.get('session_ids')
+    if not isinstance(ids,list) or not 1 <= len(ids) <= 16 or any(
+            not isinstance(s,str) or not re.fullmatch(r'[a-f0-9]{16}',s) for s in ids) or len(set(ids))!=len(ids) \
+            or arguments.get('wait_for','all') not in {'all','any'}:
+        raise ToolInputError('await_tasks requires unique child session_ids and wait_for=all|any')
+    return json.dumps({'await_tasks':{'session_ids':ids,'wait_for':arguments.get('wait_for','all')}})
 
 
 def delegate(arguments, *, timeout_seconds, call_id, url, token, allowed, poll_interval, probe):
+    arguments = dict(arguments) if isinstance(arguments, dict) else arguments
+    scope_assignment = arguments.pop('_scope_assignment', None) if isinstance(arguments, dict) else None
+    revision = arguments.pop('_scope_revision', None) if isinstance(arguments, dict) else None
     if not isinstance(arguments, dict) or not {'role', 'task'} <= set(arguments) \
-            or set(arguments) - {'role', 'task', 'session_id'} \
+            or set(arguments) - {'role', 'task', 'session_id', 'depends_on'} \
             or ('session_id' in arguments and (probe is not None or not isinstance(arguments['session_id'], str)
                 or not re.fullmatch(r'[0-9a-f]{16}', arguments['session_id']))) \
             or arguments["role"] not in allowed or not isinstance(arguments["task"], str) \
@@ -66,12 +93,15 @@ def delegate(arguments, *, timeout_seconds, call_id, url, token, allowed, poll_i
         return json.dumps({"isError": True,
                            "error": "delegate_task requires an allowed role and a nonempty task"})
     invocation = DelegationRequest(arguments, url, token, poll_interval, probe, timeout_seconds, call_id)
+    invocation.scope_assignment, invocation.revision = scope_assignment, revision
     return asyncio.run(invocation.execute())
 
 
 def delegated_result(task, role, probe):
     result = {"sessionId": task.id, "role": role, "state": types.TaskState.Name(task.status.state)}
     metadata = MessageToDict(task).get('metadata', {})
+    if isinstance(metadata.get('reportedAt'), str):
+        result['reportedAt'] = metadata['reportedAt']
     if metadata.get('durable') is True and task.status.state in {types.TASK_STATE_SUBMITTED, types.TASK_STATE_WORKING}:
         return {**result, 'pending':True, 'resumable':False,
                 'outcome':{'status':'partial','reason':'child_running','evidence':[],
@@ -115,6 +145,7 @@ class DelegationRequest:
         self.endpoint = url.rstrip("/") + "/a2a/" + arguments["role"]
         self.task_id = None
         self.progress_seq = 0
+        self.scope_assignment = self.revision = None
 
     def forward_task_progress(self, task):
         activity = MessageToDict(task).get('metadata', {}).get('activity', [])
@@ -144,6 +175,12 @@ class DelegationRequest:
                                   role=types.ROLE_USER,
                                   parts=[types.Part(text=self.arguments["task"])]),
             configuration=types.SendMessageConfiguration(return_immediately=True))
+        if self.scope_assignment is not None:
+            params.message.metadata.update({'scope_assignment':self.scope_assignment})
+        if self.revision is not None:
+            params.message.metadata.update({'revision':self.revision})
+        if 'depends_on' in self.arguments:
+            params.message.metadata.update({'depends_on':self.arguments['depends_on']})
         if self.probe is not None:
             params.message.metadata.update({'harness2': self.probe})
         if self.arguments.get('session_id'):

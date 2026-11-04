@@ -329,6 +329,26 @@ automatically replayed. New-stage admission uses recent measured MCP discovery
 times with a safety margin, falling back to cold-start discovery timeouts when
 there are no observations. Cognee is excluded from this required-tool estimate.
 
+`get_chat.work.tasks[].milestones` records bounded observations of tool results
+during a turn, with `lastObservedAt`, source call IDs, observed revisions,
+check results, remote-ref updates and failures. Observations survive subsequent
+checkpoints and API restarts; task acceptance still uses the final outcome.
+Check receipts include the command identity and the revision printed by the
+same tool call. `delegate_task(revision=<full SHA>, ...)` shares matching passing
+receipts with verification specialists. Review focuses on source and findings;
+QA runs missing regression checks and verifies existing results against the
+exact revision, scope and working-tree state.
+
+Before model requests, old large tool results are saved under `.tool-results/`
+and replaced by bounded previews, failure/uncertainty flags and artifact links.
+Use `read_tool_output` for omitted details. `model.context_tool_budget_chars`
+(48000) and `model.context_recent_tool_results` (6) in `config/runtime.json`
+control this reduction; recent results and delegation state can exceed the soft
+budget. User/system instructions and tool-call associations remain intact.
+Waiting for durable children (`child_pending`) does not trigger memory extraction.
+The bash schema advertises the 4000-character command limit; write longer scripts
+with `write_file` and invoke the saved file with a short command.
+
 [config/runtime.json](config/runtime.json) → `workflow` supplies shared defaults: four turns,
 900 seconds per turn, 3600 seconds including startup, two unchanged partial
 outcomes without new tool receipts before stopping, and one concurrent workflow.
@@ -385,6 +405,22 @@ not establish that the error was resolved. Recoverable delegation-input and
 MCP errors include a short redacted message. The top-level `turns` still counts
 saved conversation answers; `workflow.turns` and each task's `coordinatorTurns`
 represent coordinator turns.
+
+Each explicit user run has a stable `workflow.runId`; `get_chat.runs` retains
+up to 20 prior runs. Automatic continuation keeps its ID and receives original
+authorization from server scope, without nesting prior handoff wrappers. The
+last coordinator turn accepts results instead of starting children. Completed
+implementation requires reviewer and QA receipts for the same observed SHA;
+a newer PR-head read-back invalidates verification of an older revision.
+Repeated identical input errors stop with a blocker and failed tool receipts
+do not reset the no-progress guard. `delegate_task` returns immediately for
+durable children; the parent continues its own work until `await_tasks` joins
+selected children (`all` or `any`). Child waits resume the same coordinator turn.
+`depends_on` orders stages using successful direct-child results without creating
+a waiting worker. Independent roles run concurrently, with a path to a leaf
+reserved in the shared pool. One server-designated implementation owner integrates
+and publishes branch changes; other workers return local commits/patches and checks.
+Review and QA still accept the same final integrated SHA.
 
 Requests can select a role, but cannot override its command, credentials or
 permissions. Keep this local endpoint restricted to trusted callers; it has no
@@ -705,8 +741,10 @@ failure; otherwise the result remains partial. It cannot execute tools, repeat
 writes or mark project-memory capture successful. The time reserve may trigger
 this final request earlier, reserving a useful request window (up to 30 seconds,
 capped at half a short turn) before reporting. New or resumed child executions
-require at least 60 seconds of work budget, excluding the parent's final reserve;
-otherwise the tool returns an explicit refusal and the unfinished work remains visible.
+require 10 seconds of submission work budget in a durable AX workflow (two bounded
+RPC attempts), excluding the parent's final reserve. Legacy blocking delegation
+still requires 60 seconds. Child execution uses the separately checked workflow
+and branch deadlines; refusal preserves the unfinished work.
 
 An explicit structured partial result ends the turn without forcing another child
 execution. Invalid final JSON or a premature completion claim gets one correction;

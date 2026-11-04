@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.role_env import validate_role_env_names
+from popot_agents.role_env import validate_role_env_names, selected_role_env
 
 WORKSPACE_ROOT = Path(os.getenv("TOOL_WORKSPACE_ROOT", "/workspace"))
 MAX_TOOL_OUTPUT = RUNTIME["limits"]["tool_output_chars"]
@@ -62,8 +62,9 @@ def _tool(name, description, properties, required):
 
 
 TOOL_SCHEMAS.update({
-    "bash": _tool("bash", "Run a bash command in the writable workspace and return output and exit code.",
-                  {"command": {"type": "string"}}, ["command"]),
+    "bash": _tool("bash", "Run a bash command (at most 4000 characters) in the writable workspace. "
+                  "For larger scripts use write_file, then invoke the saved script with a short command.",
+                  {"command": {"type": "string", "maxLength": 4000}}, ["command"]),
     "read_file": _tool("read_file", "Read a UTF-8 file in pages; offset counts characters from zero.",
                        {"path": {"type": "string"},
                         "offset": {"type": "integer", "minimum": 0},
@@ -103,10 +104,13 @@ _UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 def safe_tool_env() -> dict[str, str]:
     """Forward baseline variables and only role-selected credentials to tools."""
     names = validate_role_env_names(json.loads(os.getenv("HARNESS_TOOL_ENV_NAMES_JSON", "[]")))
+    git_identity = selected_role_env([name for name in names
+                                    if name in {'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL'}])
     return ({key: value for key, value in os.environ.items()
              if key in {"PATH", "LANG", "LC_ALL", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR",
                         "PLAYWRIGHT_BROWSERS_PATH"}
              or key in names}
+            | {name.replace('AUTHOR', 'COMMITTER'): value for name, value in git_identity.items()}
             | {"HOME": str(WORKSPACE_ROOT), "GIT_TERMINAL_PROMPT": "0",
                "NPM_CONFIG_PREFIX": str(WORKSPACE_ROOT / '.local'),
                "PATH": os.pathsep.join(dict.fromkeys([
@@ -190,10 +194,15 @@ def preserve_tool_output(output: str) -> str:
     """Keep large MCP results in the sandbox instead of losing their tail."""
     if len(output) <= MAX_TOOL_OUTPUT:
         return output
-    path = f".tool-results/{uuid.uuid4().hex}.txt"
-    _file_action('write', {'path': path, 'content': output})
+    path = save_tool_output(output)
     return (output[:MAX_TOOL_OUTPUT] + f"\n[preview truncated; total_chars={len(output)}]"
             f"\nFull output: {path}\nRead with read_tool_output path={path} offset={MAX_TOOL_OUTPUT} limit={MAX_TOOL_OUTPUT}.")
+
+
+def save_tool_output(output: str) -> str:
+    path = f".tool-results/{uuid.uuid4().hex}.txt"
+    _file_action('write', {'path': path, 'content': output})
+    return path
 
 
 def _evaluate(node):

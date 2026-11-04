@@ -24,6 +24,19 @@ def wait_for(predicate):
 
 
 class WorkerQueueTests(unittest.TestCase):
+    def test_reserved_nested_capacity_cannot_be_stolen_and_exhaustion_is_immediate(self):
+        queue=WorkerQueue(10, .1)
+        queue.acquire('root')
+        self.assertEqual(queue.reserve('run',6),6)
+        outsiders=[queue.acquire(str(i)) for i in range(3)]
+        children=[queue.acquire('child'+str(i),reservation='run') for i in range(6)]
+        with self.assertRaises(AgentRunError):
+            queue.acquire('too-deep',reservation='run')
+        for i,lease in enumerate(children):queue.release('child'+str(i),lease)
+        queue.release_reservation('run')
+        queue.acquire('after-run')
+        self.assertEqual(queue.status()['active'],5)
+
     def test_fifo_admission_after_ten_slots_are_occupied(self):
         queue = WorkerQueue(10, 3600)
         leases = [queue.acquire(str(i)) for i in range(10)]
@@ -145,7 +158,7 @@ class AxWorkerCapacityTests(unittest.TestCase):
 
     @staticmethod
     def cli(*args, **_kwargs):
-        if args[0] == 'get':
+        if args[0] in {'get','describe'}:
             return subprocess.CompletedProcess([], 1, '', 'NotFound')
         return subprocess.CompletedProcess([], 0, '', '')
 
@@ -229,6 +242,27 @@ class AxWorkerCapacityTests(unittest.TestCase):
                 self.runner.recover_workers()
         self.assertEqual(run.call_count, 2)
         self.assertEqual(run.call_args.args, ('delete', 'task', 'popot-chat-aaaaaaaaaaaaaaaa'))
+
+    def test_delete_acknowledgement_does_not_release_slot_before_task_absence(self):
+        name='popot-chat-'+'a'*16
+        token=self.runner.worker_queue.acquire(name)
+        accepted=subprocess.CompletedProcess([],0,'','')
+        with patch.object(self.runner,'_run',return_value=accepted), \
+             patch.dict(AX_CONFIG,{'delete_timeout_seconds':.02}):
+            result=self.runner._delete_worker(name,token)
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(self.runner.worker_queue.status()['active'],1)
+        with patch.object(self.runner,'_run',return_value=subprocess.CompletedProcess([],1,'','rpc error: code = NotFound')):
+            self.runner.maintenance()
+        self.assertEqual(self.runner.worker_queue.status()['active'],0)
+
+    def test_status_inspection_failure_is_not_proof_of_deletion(self):
+        name='popot-chat-'+'b'*16
+        token=self.runner.worker_queue.acquire(name)
+        replies=[subprocess.CompletedProcess([],0,'',''),subprocess.CompletedProcess([],1,'','transport unavailable')]
+        with patch.object(self.runner,'_run',side_effect=replies):
+            self.runner._delete_worker(name,token)
+        self.assertEqual(self.runner.worker_queue.status()['active'],1)
 
     def test_unconfirmed_deletion_keeps_slot_until_maintenance_confirms_cleanup(self):
         with patch.object(self.runner, '_run', side_effect=self.cli), \

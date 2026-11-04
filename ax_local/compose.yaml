@@ -31,6 +31,7 @@ services:
       - omniroute-data:/app/data
       - ./omniroute_start.mjs:/app/popot-start.mjs:ro
       - ./omniroute_conversation_fallback.mjs:/app/popot-conversation-fallback.mjs:ro
+      - ./omniroute_continuation_status.mjs:/app/popot-continuation-status.mjs:ro
       - ../config/omniroute/settings.json:/app/popot-omniroute-settings.json:ro
       - ./omniroute_healthcheck.mjs:/app/popot-healthcheck.mjs:ro
       - type: volume

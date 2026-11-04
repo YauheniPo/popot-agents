@@ -26,8 +26,9 @@ from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
 from .session_store import SessionStore
 from .work_status import build_work_status
+from popot_agents.work_evidence import evidence_event
 from popot_agents.workflow_config import role_policy
-from .workflow import POLICY, WorkflowRun, public_workflow, validate_policy, recover_workflows
+from .workflow import POLICY, WorkflowRun, public_workflow, validate_policy, recover_workflows, run_history
 
 
 MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
@@ -426,6 +427,11 @@ def create_server(
         def _progress(self, message: str, *, finished: bool = False) -> None:
             if progress := getattr(self, '_turn_progress', None):
                 progress.update(message, finished=finished)
+            if (sid := getattr(self, '_work_session_id', None)) and (receipt := evidence_event(message)):
+                event = json.loads(message)
+                if (event.get('agent_session_id') == sid
+                        or 'agent_session_id' not in event and 'agent_role' not in event):
+                    self.server.store.record_evidence(sid, receipt)
             if not getattr(self, '_wants_progress', False):
                 return
             if not is_progress_message(message) or getattr(self, '_progress_broken', False):
@@ -501,6 +507,13 @@ def create_server(
                             in {'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'} else 'stopped'),
                         "progress": progress.get(saved["sessionId"]),
                         "workflow": public_workflow(saved),
+                        "parentSessionId": ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('parent_session_id'),
+                        "rootSessionId": ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('root_session_id'),
+                        "runId": ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('run_id'),
+                        "runStates": {r['run_id']:r['state'] for r in (saved.get('roleConfig') or {}).get('_workflow_runs',[])},
+                        "outcomeStatus": (((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('outcome') or {}).get('status'),
+                        "waitingFor": (getattr(getattr(self.server,'delegation',None),'wait_state',lambda _:None)(saved['sessionId'])
+                            or ((saved.get('roleConfig') or {}).get('_workflow') or {}).get('waiting_for')),
                     }
                     for saved in self.server.store.list_chats()
                 ]})
@@ -539,6 +552,10 @@ def create_server(
                     "status": ("running" if busy else getattr(live.worker, "status", "running")) if live else stored_status,
                     "progress": live.progress.snapshot() if live and live.progress else None,
                     "workflow": public_workflow(saved, include_result=True),
+                    "runs": (saved.get('roleConfig') or {}).get('_workflow_runs', []) +
+                            ([{k:v for k,v in (saved.get('roleConfig') or {}).get('_workflow', {}).items()
+                               if k in {'run_id','started_at','finished_at','deadlineAt','state','turns'}}]
+                             if (saved.get('roleConfig') or {}).get('_workflow') else []),
                     "work": build_work_status(saved, self.server.store.list_chats()),
                     "container": live.worker.container_name if live else None,
                     "workspace": self._workspace(saved, live),
@@ -670,6 +687,12 @@ def create_server(
                     self._reply(409, {'error': 'workflow checkpoint is no longer pending'})
                     return
                 self._workflow = WorkflowRun(selected_policy, payload.get('message', ''), previous if recovering else None)
+                self._run_history = run_history(saved, self._workflow)
+                if saved and not recovering:
+                    authority = list(previous.get('authorization', [previous['original_task']] if previous.get('original_task') else []))
+                    if not authority or authority[-1] != payload.get('message',''):
+                        authority.append(payload.get('message',''))
+                    self._workflow.meta['authorization'] = authority
                 if payload.get('requestId'):
                     self._workflow.meta['request_id'] = payload['requestId']
                 if isinstance(previous.get('checkpoint'), dict):
@@ -703,7 +726,10 @@ def create_server(
                 session_id = new_session_id
                 if getattr(agents[agent], "retain_session_history", False):
                     role_config = {**(role_config or {}), "_retain_history": True}
-                worker_config = {k: v for k, v in (role_config or {}).items() if k != '_workflow'}
+                if getattr(self, '_workflow', None):
+                    role_config = {**(role_config or {}), '_workflow':self._workflow.meta,
+                                   '_workflow_runs':self._run_history}
+                worker_config = {k: v for k, v in (role_config or {}).items() if k not in {'_workflow','_workflow_runs'}}
                 if getattr(self, '_workflow', None):
                     worker_config['_workflow_coordinator'] = True
                     worker_config['timeout_seconds'] = self._workflow.policy['turn_seconds']
@@ -737,6 +763,9 @@ def create_server(
                     return
                 role = saved.get("role")
                 role_config = saved.get("roleConfig")
+                if getattr(self, '_workflow', None):
+                    role_config = {**(role_config or {}), '_workflow':self._workflow.meta,
+                                   '_workflow_runs':self._run_history}
                 if getattr(agents[agent], "retain_session_history", False):
                     role_config = {**(role_config or {}), "_retain_history": True}
                 if "role" in payload and payload["role"] != role:
@@ -768,7 +797,7 @@ def create_server(
                         self.server.live.pop(session_id, None)
                     record = None
                 if record is None:
-                    worker_config = {k: v for k, v in (role_config or {}).items() if k != '_workflow'}
+                    worker_config = {k: v for k, v in (role_config or {}).items() if k not in {'_workflow','_workflow_runs'}}
                     if getattr(self, '_workflow', None):
                         worker_config['_workflow_coordinator'] = True
                         worker_config['timeout_seconds'] = self._workflow.policy['turn_seconds']
@@ -790,6 +819,7 @@ def create_server(
             with self.server.live_lock:
                 record.progress = TurnProgress(session_id)
                 self._turn_progress = record.progress
+                self._work_session_id = session_id
             scope = ExitStack()
             delegation = getattr(agents[record.agent], 'delegation', None)
             try:
@@ -800,9 +830,9 @@ def create_server(
                     delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
                 while True:
                     if workflow:
-                        if workflow.remaining() < 1 or workflow.meta['turns'] >= workflow.policy['max_turns']:
+                        if workflow.remaining() < 1 or workflow.meta['turns'] >= workflow.policy['max_turns'] and not workflow.meta.get('awaiting_children'):
                             result = workflow.stop({'answer': 'Autonomous workflow time budget exhausted'},
-                                                   'workflow_budget_exhausted')
+                                                   'workflow_deadline_exhausted' if workflow.remaining() < 1 else 'workflow_turn_limit')
                             role_config = {**(role_config or {}), '_workflow': workflow.meta}
                             self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
                             break
@@ -819,6 +849,7 @@ def create_server(
                         terminal = workflow.record(result, checkpoint)
                         if terminal is not None:
                             result = terminal
+                        workflow.meta['waiting_for'] = 'children' if terminal is None and result.get('outcome',{}).get('reason') == 'child_pending' else None
                     history = record.messages + [
                         {"role": "user", "content": message.strip()},
                         {"role": "assistant", "content": result["answer"]},
@@ -832,10 +863,11 @@ def create_server(
                     emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
                     if delegation:
                         delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
+                        workflow.meta['waiting_for'] = None
                         workflow.meta['checkpoint'] = record.worker.get_checkpoint()
                         self.server.store.save(session_id, record.agent, history, record.role, role_config)
                     try:
-                        message = workflow.continuation()
+                        message = workflow.continuation(compact=bool(getattr(record.worker,'supports_run_context',False)))
                     except ValueError:
                         result = workflow.stop(result, 'workflow_context_limit')
                         self.server.store.save(session_id, record.agent, history, record.role, role_config)

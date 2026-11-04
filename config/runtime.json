@@ -57,6 +57,8 @@
     "mcp_body_max_bytes": 65536
   },
   "model": {
+    "context_tool_budget_chars": 48000,
+    "context_recent_tool_results": 6,
     "default_max_tool_rounds": 40,
     "request_retries": 0,
     "temperature": null,
@@ -66,6 +68,8 @@
     "max_tool_rounds": 80
   },
   "role_env_names": [
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
     "GITHUB_PERSONAL_ACCESS_TOKEN",
     "COGNEE_API_URL",
     "COGNEE_PASSWORD",

@@ -56,6 +56,26 @@ class ProviderProxyTests(unittest.TestCase):
                 failure.exception.close()
             self.assertEqual(len(upstream_calls), 2)
 
+    def test_proxy_forwards_only_valid_correlation_ids(self):
+        from ax_local.api.provider_proxy import Provider
+        selected=Provider('cloud','model','https://gateway.test/v1',None)
+        with patch('ax_local.api.provider_proxy.request.urlopen') as opened:
+            opened.return_value.__enter__.return_value.status=200
+            opened.return_value.__enter__.return_value.read.return_value=b'{}'
+            dispatch_request({'capability':selected},'/v1/chat/completions','Bearer capability',
+                b'{"model":"model"}',correlation={'X-Popot-Session-Id':'a'*16,
+                    'X-Popot-Run-Id':'b'*32,'X-Popot-Root-Session-Id':'c'*16,
+                    'Cookie':'secret','X-Popot-Other':'unsupported'})
+            headers={k.lower():v for k,v in opened.call_args.args[0].header_items()}
+            self.assertEqual(headers['x-popot-session-id'],'a'*16)
+            self.assertEqual(headers['x-popot-run-id'],'b'*32)
+            self.assertEqual(headers['x-popot-root-session-id'],'c'*16)
+            self.assertNotIn('cookie',headers)
+            self.assertNotIn('x-popot-other',headers)
+            dispatch_request({'capability':selected},'/v1/chat/completions','Bearer capability',
+                b'{"model":"model"}',correlation={'X-Popot-Session-Id':'invalid'})
+            self.assertIsNone(opened.call_args.args[0].get_header('X-popot-session-id'))
+
     def test_timeout_is_logged_without_secrets_and_returns_gateway_timeout(self):
         selected = resolve_provider('openrouter', 'example/model', self.profiles,
                                     {'OPENROUTER_API_KEY': 'private-key'})

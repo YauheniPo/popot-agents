@@ -1,6 +1,6 @@
 Start an AX agent or continue its unfinished task with the same role and session_id.
 Continuation restores that session's sandbox and tool context.
-Inspect outcome and evidence.
+Durable tasks return immediately with a sessionId. Continue independent work, then use await_tasks when results are needed. Use depends_on for stages requiring successful direct-child results. Inspect outcome and evidence.
 Give corrective instructions for remaining work; do not repeat uncertain external actions.
 Give it the task and all required context explicitly.
 Its workspace and conversation are separate.

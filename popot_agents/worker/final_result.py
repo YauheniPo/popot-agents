@@ -1,5 +1,6 @@
 """Validate final reports and retain bounded receipts when formatting fails."""
 import json
+import re
 
 from popot_agents.runtime_config import RUNTIME
 from .turn_memory import scrub
@@ -54,6 +55,8 @@ def parse_result(content, finish_reason=None):
         report[key] = [i.strip() for i in report[key] if i.strip()]
     if report['status'] == 'completed' and (report['remaining_work'] or report['errors']):
         report['status'] = 'partial'
+    if 'revision' in report and (not isinstance(report['revision'], str) or not re.fullmatch(r'[a-f0-9]{40}', report['revision'])):
+        raise ValueError('invalid_revision')
     return report
 
 

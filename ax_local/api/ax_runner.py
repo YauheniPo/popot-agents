@@ -91,7 +91,7 @@ class AxAgentRunner:
         # Server bookkeeping can exceed AX's 32 KiB per-env-value limit. The
         # worker receives its task/checkpoint over the control socket instead.
         worker_role = {key: value for key, value in role_config.items()
-                       if key not in {'_ax_delegation', '_workflow'}}
+                       if key not in {'_ax_delegation', '_workflow', '_work_evidence', '_workflow_runs'}}
         env = {
             "HARNESS_BASE_URL": self.base_url,
             "HARNESS_MODEL": self.model,
@@ -291,7 +291,9 @@ class AxAgentRunner:
             raise AgentRunError('Delegated sessions must continue through delegate_task with role and session_id')
         task_name = f"popot-chat-{chat_id}"
         emit_progress('waiting_for_worker')
-        lease = self.worker_queue.acquire(task_name, deadline=deadline, cancel_event=cancel_event)
+        reservation = (role_config or {}).get('_ax_delegation', {}).get('pool_reservation')
+        lease = self.worker_queue.acquire(task_name, deadline=deadline, cancel_event=cancel_event,
+            **({'reservation':reservation} if reservation else {}))
         try:
             emit_progress('preparing_workspace')
             return self._start_reserved_chat(chat_id, role_config, lease,
@@ -427,8 +429,22 @@ class AxAgentRunner:
         # entry must never issue a late delete against a replacement worker.
         with self._cleanup_lock:
             try:
+                deadline = time.monotonic() + AX_CONFIG['delete_timeout_seconds']
                 result = self._run('delete', 'task', task_name,
                                    timeout=AX_CONFIG['delete_timeout_seconds'], allow_failure=True)
+                if result.returncode == 0:
+                    # Delete acknowledges an asynchronous controller request.
+                    # Keep the lease until the controller confirms absence.
+                    while True:
+                        remaining = deadline-time.monotonic()
+                        if remaining <= 0:
+                            result = subprocess.CompletedProcess([],1,'','AX deletion not confirmed')
+                            break
+                        state = self._run('describe','task',task_name,timeout=remaining,allow_failure=True)
+                        if state.returncode:
+                            result = state
+                            break
+                        time.sleep(min(.1,max(0,deadline-time.monotonic())))
             except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError):
                 self._defer_cleanup(task_name, lease)
                 raise
@@ -467,6 +483,7 @@ class AxAgentRunner:
 
 @dataclass
 class AxChat:
+    supports_run_context = True
     runner: AxAgentRunner
     container_name: str
     timeout_seconds: int
@@ -645,6 +662,10 @@ class AxChat:
             payload = {"action": "message", "message": message, 'result_details': True,
                        "timeout_seconds": min(timeout, max(RUNTIME['timeouts']['min_turn_seconds'],
                            timeout - RUNTIME['timeouts']['turn_response_margin_seconds']))}
+            if service:
+                context = service.turn_context(self.container_name.removeprefix('popot-chat-'))
+                if context:
+                    payload['run_context'] = context
             if callback:
                 payload['progress'] = True
             result = self.runner.remote(self.container_name,
