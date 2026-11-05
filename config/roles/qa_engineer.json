@@ -19,7 +19,8 @@
   "allowed_roles": [
     "analyst",
     "code_reviewer",
-    "project_operator"
+    "project_operator",
+    "security_engineer"
   ],
   "env_names": [
     "GITHUB_PERSONAL_ACCESS_TOKEN",

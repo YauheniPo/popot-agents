@@ -57,6 +57,8 @@ def delegation_instructions(role_config: dict, extra_tools: dict) -> str:
         review_routing = render_prompt('delegation/reviewer')
     elif role == 'qa_engineer':
         review_routing = render_prompt('delegation/qa')
+    elif role == 'security_engineer':
+        review_routing = render_prompt('delegation/security')
     elif 'code_reviewer' in roles:
         review_routing = render_prompt('delegation/review_routing')
     return render_prompt('delegation/instructions', role=role,

@@ -474,14 +474,25 @@ The feature team roles are:
 | `backend_engineer` | Clone repositories, edit backend code, run commands and inspect Git | `bash`, `read_file`, `write_file`, `git_clone`, `download_file`, `calculate`; Fetch, Git and GitHub MCP |
 | `frontend_engineer` | UI components, state, API integration and accessibility | Workspace, bash/file tools, Fetch/Git and read-only GitHub MCP; Node.js/npm and Python Playwright/Chromium |
 | `code_reviewer` | Independent review of correctness, regressions, security and requirements | GitHub MCP reads and inline PR review comments |
+| `security_engineer` | Threat modeling, evidence-backed vulnerability assessment and verification of security fixes | Workspace, bash/file tools, Fetch/Git, read-only GitHub MCP, Cognee memory and existing Sonar/GitGuardian credentials |
 | `qa_engineer` | Test scenarios, executable checks and regression risks | Workspace, bash/file tools, Fetch/Git and read-only GitHub MCP; Node.js/npm and Python Playwright/Chromium |
 | `project_operator` | Analyze local services, model routing, metrics, memory and pods; prepare and apply reviewed local changes | Real Holmes jobs, project inspection/change tools, PromQL and Cognee memory; no shell or worker admin credentials |
 
 The `chat` and `analyst` roles also remain available. `analyst` uses the
-`omniroute_free` profile; planner, backend, frontend, code review and QA use `omniroute_cloud`. Change a role's `agent` field to another configured
+`omniroute_free` profile; planner, backend, frontend, code review, security and QA use `omniroute_cloud`. Change a role's `agent` field to another configured
 profile if needed, and set that profile's model and credentials in `.env`.
 
 Select any configured role explicitly; its coordination settings determine whether it owns an autonomous workflow.
+
+Use `run_task(role="security_engineer", task=...)` for a security assessment or
+verification of a fix. The role owns the assessment and can delegate authorized
+remediation to backend, regression checks to QA, runtime evidence to the project
+operator and independent review or authorized PR comments to the code reviewer.
+Planner, tech lead, backend, frontend, reviewer, QA and the project operator can
+call it. It does not create commits/PRs or publish findings itself. Scanner
+executables are discovered at runtime; having a token does not imply an installed
+scanner or permission to upload source code. Security review is selected by task
+scope, not imposed as an extra mandatory stage on every task.
 
 Harness² uses isolated AX trial executions for analyst and frontend roles
 before the main task. Backend, reviewer and QA roles start directly by default;

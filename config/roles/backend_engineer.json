@@ -32,7 +32,8 @@
   "allowed_roles": [
     "qa_engineer",
     "analyst",
-    "code_reviewer"
+    "code_reviewer",
+    "security_engineer"
   ],
   "mcpServers": {
     "fetch": {

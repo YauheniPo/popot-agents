@@ -32,7 +32,10 @@ class SkillImportTests(unittest.TestCase):
                          manifest['license_sha256'])
         skill_directories = {path.parent.relative_to(root).as_posix()
                              for path in root.rglob('SKILL.md')}
-        self.assertEqual(skill_directories, set(manifest['skills']))
+        # Project-authored skills are not part of the third-party provenance manifest.
+        local_skills = {'engineering/security-review'}
+        self.assertTrue(local_skills.isdisjoint(manifest['skills']))
+        self.assertEqual(skill_directories, set(manifest['skills']) | local_skills)
 
     def test_planner_discussion_loads_domain_and_tracker_references_within_budget(self):
         planner = json.loads((ROOT / 'config/roles/planner.json').read_text())

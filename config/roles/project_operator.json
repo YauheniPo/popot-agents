@@ -13,7 +13,8 @@
   ],
   "allowed_roles": [
     "analyst",
-    "qa_engineer"
+    "qa_engineer",
+    "security_engineer"
   ],
   "env_names": [
     "COGNEE_API_URL",
