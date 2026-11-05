@@ -70,7 +70,7 @@ jobs:
             exit 1
           fi
       - name: Scan pushed commits for secrets
-        uses: GitGuardian/ggshield/actions/secret@9124e4c246c16c7e58398ad4aa23dae5a90a9aae # v1.56.0
+        uses: GitGuardian/ggshield/actions/secret@4cccd600fd3890a7aba07fd0a45e483f3099fe70 # v1.56.1
         with:
           args: --format sarif --output gitguardian.sarif
         env:
