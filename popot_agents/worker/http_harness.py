@@ -22,10 +22,35 @@ from .context import compact_tool_results
 from . import mcp_client
 from .delegation_policy import (available_roles, completed_answer, delegation_instructions,
                                 handoff_task, publication_policy, check_publication_owner)
-from .verification import observed_revision, acceptance_revision, verified_roles
+from .verification import (observed_revision, acceptance_revision, requested_pull_request,
+                          verified_roles)
 from .turn_memory import TurnMemory, parse_summary
 from .final_result import evidence_transcript, parse_result, retained_receipts
 from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA as REVIEW_SCHEMA
+
+
+_GITHUB_HOSTS = {'github.com', 'www.github.com'}
+# The guard trusts TLS links only, matching the previous https-only predicate.
+_URL_SCHEMES = ('https://',)
+_URL_TRAILING = '>)]}*`,;!.\'"}<>'
+
+
+def _mentions_github_url(messages) -> bool:
+    """Report whether a user message links a URL served by github.com itself."""
+    for message in messages or ():
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        for token in str(message.get('content') or '').split():
+            start = min((token.find(scheme) for scheme in _URL_SCHEMES if scheme in token), default=-1)
+            if start < 0:
+                continue
+            try:
+                host = urlsplit(token[start:].rstrip(_URL_TRAILING)).hostname
+            except ValueError:
+                continue
+            if host in _GITHUB_HOSTS:
+                return True
+    return False
 
 
 def _trace(event: str, **fields) -> None:
@@ -373,7 +398,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     def save_result(answer, status, reason, report=None):
         revision = observed_revision(report, tool_evidence,
             (run_context or {}).get('target_revision') if role_config.get('name',role_config.get('_ax_role')) in {'code_reviewer','qa_engineer'} else None)
-        target = acceptance_revision(list(completed_delegations.values()), tool_evidence)
+        target = acceptance_revision(list(completed_delegations.values()), tool_evidence,
+                                     requested_pull_request(user_context))
         if status == 'completed' and target and (report or {}).get('revision') not in (None,target):
             status, reason = 'partial','acceptance_revision_mismatch'
             report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
@@ -397,7 +423,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                               'errors': (report or {}).get('errors', []),
                               'remaining_work': (report or {}).get('remaining_work', []) +
                                   ['Obtain independent verification receipts for the current revision from ' + ', '.join(missing)]}
-                if not target and any('https://github.com/' in m.get('content','') for m in user_context if m.get('role')=='user'):
+                if not target and _mentions_github_url(user_context):
                     status, reason = 'partial','verification_revision_missing'
                     report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
                         ['Read back the implementation revision before accepting verification']}
