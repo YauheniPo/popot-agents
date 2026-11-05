@@ -1132,6 +1132,23 @@ class DelegationTests(unittest.TestCase):
         with self.service.turn(parent, 5), self.assertRaisesRegex(A2AError, "not allowed"):
             self.send(token=env["AX_DELEGATION_TOKEN"], role="qa_engineer")
 
+    def test_disabled_delegation_hides_tool_and_rejects_existing_token(self):
+        from ax_local.worker.delegation import make_tools
+        from unittest.mock import Mock
+
+        config = {**self.roles["tech_lead"], "_disable_delegation": True}
+        env = self.service.worker_environment("2222222222222222", config)
+        self.assertNotIn("AX_DELEGATION_ROLES", env)
+        self.assertNotIn("delegate_task", make_tools(env))
+        self.runner.worker_queue = pool = Mock()
+        with self.service.workflow("2222222222222222", time.monotonic() + 5,
+                max_turns=2, metadata={'run_id': 'solo'}):
+            self.assertFalse(self.service.turn_context("2222222222222222")['can_delegate'])
+        pool.reserve_full.assert_not_called()
+        with self.service.turn("2222222222222222", 5), self.assertRaisesRegex(
+                A2AError, "delegation is disabled"):
+            self.send(token=env["AX_DELEGATION_TOKEN"])
+
     def test_actual_worker_tool_waits_for_a2a_child_result(self):
         from ax_local.worker.delegation import make_tools
         server = start_a2a_server(self.service, "127.0.0.1", 0)

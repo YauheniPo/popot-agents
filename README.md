@@ -302,6 +302,14 @@ TASK='в MR не должно быть issues в sonarqube и все комме�
 `TASK` is the request. Empty `ROLE` uses `config/runtime.json → mcp.default_role`;
 set a role such as `backend_engineer` to select it explicitly. Empty `SESSION_ID`
 starts a new session; set it to a returned ID to continue an existing session.
+Set `DISABLE_DELEGATION=true` to make the selected agent work alone with its own
+tools. This is fixed for the session; omit it when continuing that session.
+For example:
+
+```bash
+TASK='Проверь PR #92 самостоятельно' ROLE='backend_engineer' SESSION_ID='' DISABLE_DELEGATION=true bash ax_local/run-mcp-task.sh
+```
+
 The script generates `CALL_ID` and `PROGRESS_TOKEN` for each new request. After
 an uncertain response, reuse the printed `curl` command with the same IDs and
 payload; generating a new `CALL_ID` would start another request. You may also
@@ -325,8 +333,9 @@ its next model request, the comment remains queued for a later turn.
 
 MCP accepts any configured `role` (or explicit agent profile). When omitted,
 `config/runtime.json → mcp.default_role` selects the role (`planner` by default).
-Every role coordinates its task automatically, including delegated child roles.
-Each agent may select other roles from `allowed_roles`, collect their results,
+By default, every role coordinates its task automatically, including delegated child roles.
+Unless `disableDelegation=true`, each agent may select other roles from
+`allowed_roles`, collect their results,
 continue recoverable partial work, and return its accepted result to its parent.
 Each configured role has a team-specific delegation list; cycles are rejected and
 the A2A depth limit still applies. Tools and external-system permissions remain

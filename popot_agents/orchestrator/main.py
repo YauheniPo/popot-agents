@@ -615,6 +615,8 @@ def create_server(
                 return
             if hasattr(agents[agent], "start_chat"):
                 self._message({"agent": agent, "role": role, "message": task.strip(),
+                               **({'disableDelegation': payload['disableDelegation']}
+                                  if 'disableDelegation' in payload else {}),
                                **({'requestId': payload['requestId']} if 'requestId' in payload else {})})
                 return
             result = agents[agent](task.strip(), role_config) if role_config else agents[agent](task.strip())
@@ -623,6 +625,9 @@ def create_server(
             self._reply(200, result)
 
         def _message(self, payload: dict) -> None:
+            if 'disableDelegation' in payload and type(payload['disableDelegation']) is not bool:
+                self._reply(400, {'error': 'disableDelegation must be a boolean'})
+                return
             session_id = payload.get("sessionId")
             if session_id is None:
                 if (isinstance(payload.get('role'), str)
@@ -634,6 +639,10 @@ def create_server(
                     self._coordinated_message(payload, new_session_id)
             elif isinstance(session_id, str):
                 saved = self.server.store.get(session_id)
+                if saved and 'disableDelegation' in payload and payload['disableDelegation'] != bool(
+                        (saved.get('roleConfig') or {}).get('_disable_delegation')):
+                    self._reply(409, {'error': 'disableDelegation cannot change for an existing session'})
+                    return
                 meta = (saved.get('roleConfig') or {}).get('_workflow') if saved else None
                 child = (saved.get('roleConfig') or {}).get('_ax_delegation', {}) if saved else {}
                 recovering = secrets.compare_digest(self.headers.get('X-Popot-Workflow-Recovery', ''), workflow_token)
@@ -694,7 +703,10 @@ def create_server(
                 meta = (item.get('roleConfig') or {}).get('_workflow', {})
                 if meta.get('request_id') != request_id:
                     continue
-                if meta.get('original_task') != message or (payload.get('role') is not None
+                if ('disableDelegation' in payload and payload['disableDelegation'] != bool(
+                        (item.get('roleConfig') or {}).get('_disable_delegation'))):
+                    self._reply(409, {'error': 'requestId belongs to another delegation setting'})
+                elif meta.get('original_task') != message or (payload.get('role') is not None
                         and payload['role'] != item.get('role')):
                     self._reply(409, {'error': 'requestId belongs to another task or role'})
                 elif meta.get('state') == 'running':
@@ -763,6 +775,11 @@ def create_server(
                     self._reply(404, {"error": "unknown agent"})
                     return
                 session_id = new_session_id
+                if payload.get('disableDelegation'):
+                    role_config = {**(role_config or {}), '_disable_delegation': True,
+                                   'allowed_roles': [],
+                                   'instructions': (role_config or {}).get('instructions', '') +
+                                   '\n\nDelegation is disabled for this session. Complete the task with your own tools and skills.'}
                 if getattr(agents[agent], "retain_session_history", False):
                     role_config = {**(role_config or {}), "_retain_history": True}
                 if getattr(self, '_workflow', None):

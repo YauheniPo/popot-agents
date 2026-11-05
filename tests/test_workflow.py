@@ -29,7 +29,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertLessEqual(len(reason),240)
 
     def run_workflow(self, results, *, allow_error=False, after=None, request_id=None, role="planner", coordination=None,
-                     checkpoint=None, delegation=None, started_configs=None):
+                     checkpoint=None, delegation=None, started_configs=None, disable_delegation=None):
         class Chat:
             container_name='test-coordinator'
             def __init__(self):self.calls=[]
@@ -55,6 +55,7 @@ class WorkflowTests(unittest.TestCase):
             try:
                 payload={'role':role,'task':'implement'}
                 if request_id:payload['requestId']=request_id
+                if disable_delegation is not None:payload['disableDelegation']=disable_delegation
                 call=request.Request(f'http://127.0.0.1:{server.server_port}/tasks',
                     data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
                 try:
@@ -113,6 +114,22 @@ class WorkflowTests(unittest.TestCase):
         configs=[]
         self.run_workflow([result('completed')],request_id='call-root',started_configs=configs)
         self.assertEqual(configs[0]['_ax_metrics_call_id'],'call-root')
+
+    def test_request_id_cannot_reuse_a_task_with_different_delegation_setting(self):
+        configs = []
+        def retry(_first):
+            call = request.Request(f'http://127.0.0.1:{self.server.server_port}/tasks',
+                data=json.dumps({'role': 'planner', 'task': 'implement', 'requestId': 'call-solo',
+                                 'disableDelegation': False}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with self.assertRaises(error.HTTPError) as caught:
+                request.urlopen(call, timeout=3)
+            self.assertEqual(caught.exception.code, 409)
+        _, _, saved = self.run_workflow([result('completed')], request_id='call-solo',
+            disable_delegation=True, started_configs=configs, after=retry)
+        self.assertTrue(configs[0]['_disable_delegation'])
+        self.assertEqual(configs[0]['allowed_roles'], [])
+        self.assertTrue(saved['roleConfig']['_disable_delegation'])
 
     def test_role_without_coordination_settings_uses_shared_defaults(self):
         calls, data, saved = self.run_workflow([result('partial', remaining=('review',)), result('completed')],

@@ -234,7 +234,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         extra_tools['delegate_task'] = delegation
     instructions = role_config.get("instructions", "")
     if role_config.get('_workflow_coordinator'):
-        instructions += '\n\n' + render_prompt('workflow/coordinator')
+        instructions += ('\n\nDelegation is disabled for this session. Complete the task yourself '
+                         'with your available tools and skills. Continue unfinished work across turns; '
+                         'return verified results or a genuine blocker.' if role_config.get('_disable_delegation')
+                         else '\n\n' + render_prompt('workflow/coordinator'))
     allowed = role_config.get("tools", [])
     if 'bash' in allowed:
         instructions += '\n\n' + render_prompt('tools/inspection')

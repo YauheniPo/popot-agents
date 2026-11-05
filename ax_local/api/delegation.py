@@ -214,7 +214,7 @@ class DelegationService:
                     yield_run.reservation = metadata.get('run_id') or secrets.token_hex(16)
                 grant.run = yield_run
         try:
-            if yield_run and yield_run.pool is not None:
+            if yield_run and yield_run.pool is not None and not grant.config.get('_disable_delegation'):
                 yield_run.reserved_slots = yield_run.pool.reserve_full(
                     yield_run.reservation, self.policy['max_depth'], deadline=deadline)
             yield yield_run
@@ -242,7 +242,8 @@ class DelegationService:
                 'publication_owner':run.metadata.get('publication_owner'),
                 'authorization':run.metadata.get('authorization', [run.metadata.get('original_task','')]),
                 'assignments':meta.get('scope_assignments', []),
-                'target_revision':meta.get('revision'), 'can_delegate':turns < limit,
+                'target_revision':meta.get('revision'),
+                'can_delegate':not grant.config.get('_disable_delegation') and turns < limit,
                 'dependency_results':meta.get('dependency_results',[])}
 
     def wait_state(self, session_id):
@@ -418,7 +419,8 @@ class DelegationService:
             role = saved.get("role") if saved else None
         if role in self.roles:
             config["_ax_role"] = role
-            if self.roles[role].get("allowed_roles") and not config.get("_workflow_coordinator"):
+            if self.roles[role].get("allowed_roles") and not config.get("_workflow_coordinator") \
+                    and not config.get('_disable_delegation'):
                 config["timeout_seconds"] = max(config.get("timeout_seconds", 60),
                                                 self.policy["turn_timeout_seconds"])
         return config
@@ -445,14 +447,14 @@ class DelegationService:
                 environment = {'AX_DELEGATION_URL': self.base_url, 'AX_DELEGATION_TOKEN': grant.token,
                                'AX_DELEGATION_OPERATOR': '1'}
             settings = self.roles[role].get('harness2', {})
-            if settings.get('enabled') and settings.get('mode') == 'execution' \
+            if not config.get('_disable_delegation') and settings.get('enabled') and settings.get('mode') == 'execution' \
                     and config.get('harness2', {}).get('enabled') \
                     and config.get('harness2', {}).get('mode') == 'execution':
                 environment = {'AX_HARNESS2_URL': self.base_url, 'AX_HARNESS2_TOKEN': grant.probe_token,
                                'AX_HARNESS2_ROLE': role}
             allowed = [target for target in self.roles[role].get("allowed_roles", [])
                        if target not in grant.lineage]
-            if len(grant.lineage) > self.policy["max_depth"]:
+            if config.get('_disable_delegation') or len(grant.lineage) > self.policy["max_depth"]:
                 allowed = []
             if not allowed:
                 return {**environment, 'AX_DELEGATION_URL': self.base_url,
@@ -565,6 +567,8 @@ class DelegationService:
             if self.closed or not grant or not grant.active or not grant.run \
                     or grant.run.canceled.is_set() or time.monotonic() >= grant.deadline:
                 raise A2AError("delegation capability is expired or invalid")
+            if grant.config.get('_disable_delegation'):
+                raise A2AError('delegation is disabled for this session')
             if secrets.compare_digest(token, grant.probe_token):
                 settings = self.roles[grant.role].get('harness2', {})
                 if role != grant.role or not settings.get('enabled') or settings.get('mode') != 'execution':
