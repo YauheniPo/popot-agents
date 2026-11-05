@@ -1,6 +1,7 @@
 // Continuation states for pinned OmniRoute 3.8.51; gateway observations and AX
 // workflow status are separate inputs. No conversation contents are rewritten.
-import {readFileSync, readdirSync, realpathSync, writeFileSync, existsSync, statSync} from 'node:fs';
+import {closeSync, fstatSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync} from 'node:fs';
+import {request as httpRequest} from 'node:http';
 import {resolve, sep} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {registerHooks} from 'node:module';
@@ -78,18 +79,56 @@ function compactArtifact(artifact) {
     ['x-popot-session-id','x-popot-run-id','x-popot-root-session-id'].map(k=>[k,header(headers,k)]))}}};
 }
 
+// Read one bounded snapshot through a single descriptor so the freshness stamp
+// and the contents describe the same file even while a writer replaces it.
+export function readSnapshot(path) {
+  const descriptor=openSync(path,'r');
+  try {
+    const stat=fstatSync(descriptor);
+    return {stamp:stat.mtimeMs+':'+stat.size,text:readFileSync(descriptor,'utf8')};
+  } finally {closeSync(descriptor);}
+}
+
+// The gateway is only reachable inside the compose network, which speaks plain
+// HTTP. Naming host and port builds that request without a clear-text URL.
+export function requestAxStatus({host='api',port=8002,path='/chats',timeoutMs=2000}={}) {
+  return new Promise((succeed,fail)=>{
+    let settled=false, deadline;
+    // One settlement point: socket errors, truncated bodies and the deadline all
+    // resolve the promise exactly once, so a hung refresh cannot stay pending.
+    const finish=(settle,value)=>{if(settled)return;settled=true;clearTimeout(deadline);settle(value);};
+    const request=httpRequest({host,port,path,method:'GET'},response=>{
+      const chunks=[];
+      response.on('data',chunk=>chunks.push(chunk));
+      response.on('error',error=>finish(fail,error));
+      response.on('close',()=>{if(!response.complete)finish(fail,new Error('AX status response closed before completion'));});
+      response.on('end',()=>{
+        if(response.statusCode<200||response.statusCode>299){finish(fail,new Error('AX status HTTP '+response.statusCode));return;}
+        try {finish(succeed,JSON.parse(Buffer.concat(chunks).toString('utf8')));} catch(error) {finish(fail,error);}
+      });
+    });
+    deadline=setTimeout(()=>{const error=new Error('AX status timeout');finish(fail,error);request.destroy(error);},timeoutMs);
+    request.on('error',error=>finish(fail,error));
+    request.end();
+  });
+}
+
+// AX gateway rows collapse into the session and run keys the browser looks up.
+export function axIndexFrom(body) {
+  const next=new Map();
+  for(const row of body.chats??[]) {
+    next.set(row.sessionId,{status:row.workflow?.state??(row.status==='running'?'running':row.outcomeStatus??row.status),waitingFor:row.waitingFor??row.workflow?.waitingFor,runId:row.workflow?.runId??row.runId});
+    for(const [id,state]of Object.entries(row.runStates??{}))next.set(row.sessionId+':'+id,{status:state,runId:id});
+  }
+  return next;
+}
+
 export function installConversationStatus(root='/app/.build/next') {
   const ax=new Map();let fetchedAt=0, refreshing=false, unavailable=false;
   async function refresh() {
     if(refreshing)return;refreshing=true;
     try {
-      const r=await fetch('http://api:8002/chats',{signal:AbortSignal.timeout(2000)});
-      if(!r.ok)throw new Error('AX status HTTP '+r.status);
-      const body=await r.json(), next=new Map();
-      for(const row of body.chats??[]) {
-        next.set(row.sessionId,{status:row.workflow?.state??(row.status==='running'?'running':row.outcomeStatus??row.status),waitingFor:row.waitingFor??row.workflow?.waitingFor,runId:row.workflow?.runId??row.runId});
-        for(const [id,state]of Object.entries(row.runStates??{}))next.set(row.sessionId+':'+id,{status:state,runId:id});
-      }
+      const next=axIndexFrom(await requestAxStatus());
       ax.clear();for(const [k,v]of next)ax.set(k,v);fetchedAt=Date.now();
       unavailable=false;
     } catch(error) {
@@ -104,9 +143,9 @@ export function installConversationStatus(root='/app/.build/next') {
     const path=typeof args.artifactRelPath==='string'?resolve(dataRoot,args.artifactRelPath):'';
     if(path.startsWith(dataRoot+sep)) {
       try {
-        const stat=statSync(path),stamp=stat.mtimeMs+':'+stat.size,cached=artifacts.get(path);
-        artifact=cached?.stamp===stamp?cached.artifact:compactArtifact(JSON.parse(readFileSync(path,'utf8')));
-        artifacts.set(path,{stamp,artifact});
+        const snapshot=readSnapshot(path),cached=artifacts.get(path);
+        artifact=cached?.stamp===snapshot.stamp?cached.artifact:compactArtifact(JSON.parse(snapshot.text));
+        artifacts.set(path,{stamp:snapshot.stamp,artifact});
         if(artifacts.size>100)artifacts.delete(artifacts.keys().next().value);
       } catch {artifact=null;}
     }
@@ -131,8 +170,8 @@ export function installConversationStatus(root='/app/.build/next') {
     if(source!==patched)writeFileSync(p,patched);
     const name=p.split('/').at(-1);
     for(const manifest of [root+'/app-build-manifest.json',root+'/server/app/(dashboard)/dashboard/conversations/page_client-reference-manifest.js']) {
-      if(!existsSync(manifest))continue;
-      const text=readFileSync(manifest,'utf8');
+      let text;
+      try {text=readFileSync(manifest,'utf8');} catch {continue;}
       const changed=text.replaceAll(name+'"',name+'?popot-status=1"').replaceAll(name+"'",name+"?popot-status=1'");
       if(text!==changed)writeFileSync(manifest,changed);
     }
