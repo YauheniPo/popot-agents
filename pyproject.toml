@@ -5,7 +5,7 @@ requires-python = ">=3.10"
 [dependency-groups]
 build = ["pip==26.2.2"]
 mcp = ["mcp==2.3.0"]
-browser = ["playwright==1.64.0"]
+browser = ["playwright==1.64.1"]
 harness2 = [
     "harness2 @ git+https://github.com/google-research/harness2@1cfe254e8d25b15f37048c3730134686abe60335",
 ]
