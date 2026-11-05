@@ -11,7 +11,7 @@ harness2 = [
 ]
 worker = [
     {include-group = "mcp"},
-    "mcp-server-fetch==2026.10.19",
+    "mcp-server-fetch==2026.10.28",
     "mcp-server-git==2026.10.19",
 ]
 orchestrator = ["psycopg[binary]==3.3.6"]
