@@ -145,7 +145,7 @@ class Run:
     reservation: str | None = None
     reserved_slots: int = 0
     admitted: dict = field(default_factory=dict, repr=False)
-    lane_condition: object = field(default_factory=threading.Condition, repr=False)
+    lane_condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
 
 
 @dataclass

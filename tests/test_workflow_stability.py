@@ -107,3 +107,38 @@ class WorkflowStabilityTests(unittest.TestCase):
         self.assertIn('Coordinator turn is a literal user phrase',task)
         self.assertIn('Review the existing change only',task)
         self.assertNotIn('old handoff wrapper',task)
+
+    def test_acceptance_uses_the_newest_pr_head_for_the_requested_pull_request(self):
+        from popot_agents.worker.verification import acceptance_revision, requested_pull_request
+        children=[{'role':'backend_engineer','reportedAt':'2026-11-01T09:00:00Z','outcome':{
+            'status':'completed','revision':'2'*40,'evidence':['verified']}}]
+        target=requested_pull_request([{'role':'user','content':
+            'Review https://github.com/YauheniPo/popot-agents/pull/37 and fix it'}])
+        self.assertEqual(target,{'repository':'yauhenipo/popot-agents','pullRequest':37})
+        own={'revision':'3'*40,'revisionSource':'pr_head','status':'observed',
+             'observedAt':'2026-11-01T10:00:00Z','repository':'yauhenipo/popot-agents','pullRequest':37}
+        newer={'revision':'4'*40,'revisionSource':'pr_head','status':'observed',
+               'observedAt':'2026-11-01T11:00:00Z','repository':'yauhenipo/popot-agents','pullRequest':37}
+        other={'revision':'5'*40,'revisionSource':'pr_head','status':'observed',
+               'observedAt':'2026-11-01T12:00:00Z','repository':'yauhenipo/popot-agents','pullRequest':38}
+        unbound={'revision':'6'*40,'revisionSource':'pr_head','status':'observed',
+                 'observedAt':'2026-11-01T13:00:00Z'}
+        self.assertEqual(acceptance_revision(children,[newer,own],target),'4'*40)
+        self.assertEqual(acceptance_revision(children,[own,newer],target),'4'*40)
+        self.assertEqual(acceptance_revision(children,[own,other,unbound],target),'3'*40)
+        self.assertEqual(acceptance_revision(children,[own],None),'3'*40)
+
+    def test_ambiguous_pull_request_links_never_bind_acceptance(self):
+        from popot_agents.worker.verification import AMBIGUOUS, acceptance_revision, requested_pull_request
+        children=[{'role':'backend_engineer','reportedAt':'2026-11-01T09:00:00Z','outcome':{
+            'status':'completed','revision':'2'*40,'evidence':['verified']}}]
+        target=requested_pull_request([{'role':'user','content':
+            'Compare https://github.com/YauheniPo/popot-agents/pull/37 with '
+            'https://github.com/YauheniPo/popot-agents/pull/38'}])
+        self.assertIs(target,AMBIGUOUS)
+        foreign={'revision':'5'*40,'revisionSource':'pr_head','status':'observed',
+                 'observedAt':'2026-11-01T12:00:00Z','repository':'other/repo','pullRequest':9}
+        unbound={'revision':'6'*40,'revisionSource':'pr_head','status':'observed',
+                 'observedAt':'2026-11-01T13:00:00Z'}
+        self.assertEqual(acceptance_revision(children,[foreign,unbound],target),'2'*40)
+        self.assertEqual(acceptance_revision(children,[unbound]),'6'*40)
