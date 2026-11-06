@@ -18,6 +18,39 @@ def result(status, evidence=('receipt',), remaining=(), errors=()):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_get_chat_reads_durable_artifact_after_worker_finished(self):
+        artifact = {'name': 'fix.patch', 'content': 'patch bytes', 'sha256': 'a' * 64}
+        report = result('completed')
+        report['outcome']['artifacts'] = [artifact]
+        def after(data):
+            fresh = create_server({'test': object()}, roles={},
+                session_dir=self.server.store.directory, host='127.0.0.1', port=0, workflow_policy=POLICY)
+            thread = threading.Thread(target=fresh.serve_forever)
+            thread.start()
+            try:
+                url = f'http://127.0.0.1:{fresh.server_port}/chats/{data["sessionId"]}'
+                with request.urlopen(url) as response:
+                    self.assertEqual(json.load(response)['artifacts'], [artifact])
+            finally:
+                fresh.shutdown(); thread.join(); fresh.server_close()
+        self.run_workflow([report], after=after)
+
+    def test_consumed_comment_becomes_authoritative_scope_before_continuation(self):
+        message = 'Require 100% coverage and zero issues'
+        def first():
+            sid = self.server.store.list_chats()[0]['sessionId']
+            included = self.server.store.enqueue_intervention(sid, message)
+            self.server.store.enqueue_intervention(sid, 'Still queued')
+            return {**result('partial', remaining=('verify',)),
+                    'interventionIds': [included['id'], 'unknown-id']}
+        def second():
+            sid = self.server.store.list_chats()[0]['sessionId']
+            self.assertEqual(self.server.store.get(sid)['roleConfig']['_workflow']['authorization'],
+                             ['implement', message])
+            return result('completed')
+        _, _, saved = self.run_workflow([first, second])
+        self.assertEqual(saved['roleConfig']['_workflow']['authorization'], ['implement', message])
+
     def test_list_summary_exposes_bounded_redacted_terminal_reason(self):
         from unittest.mock import patch
         saved={'roleConfig':{'_workflow':{'state':'blocked','phase':'finished','turns':4,

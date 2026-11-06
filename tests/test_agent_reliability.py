@@ -14,6 +14,38 @@ from popot_agents.worker.delegation_policy import delegation_instructions
 
 
 class AgentReliabilityTests(unittest.TestCase):
+    def test_actual_artifacts_survive_completed_report_and_are_not_model_claims(self):
+        import hashlib
+        artifact = {'name': 'fix.patch', 'content': 'actual patch',
+                    'sha256': hashlib.sha256(b'actual patch').hexdigest()}
+        report = self.result()
+        data = json.loads(report['content'])
+        data['artifacts'] = [{'name': 'invented.patch', 'content': 'model claim'}]
+        report['content'] = json.dumps(data)
+        with patch('popot_agents.worker.http_harness.export_artifacts', return_value=[artifact]):
+            _, state, _ = self.run_sequence([report])
+        self.assertEqual(state['outcome']['artifacts'], [artifact])
+
+    def test_artifacts_survive_a_later_continuation_with_an_empty_output_directory(self):
+        import hashlib
+        artifact = {'name': 'fix.patch', 'content': 'actual patch',
+                    'sha256': hashlib.sha256(b'actual patch').hexdigest()}
+        with patch('popot_agents.worker.http_harness.export_artifacts', return_value=[artifact]):
+            _, state, _ = self.run_sequence([self.result('partial', remaining=['review'])])
+        with patch('popot_agents.worker.http_harness.export_artifacts', return_value=[]):
+            _, state, _ = self.run_sequence([self.result()], state=state)
+        self.assertEqual(state['outcome']['artifacts'], [artifact])
+
+    def test_artifact_export_failure_keeps_a_resumable_checkpoint(self):
+        from popot_agents.tools import ToolExecutionError
+        with patch('popot_agents.worker.http_harness.export_artifacts',
+                   side_effect=ToolExecutionError('export failed')):
+            _, state, _ = self.run_sequence([self.result()])
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertEqual(state['outcome']['reason'], 'artifact_export_failed')
+        self.assertTrue(state['messages'])
+        self.assertTrue(state['outcome']['remaining_work'])
+
     def test_new_run_does_not_reuse_previous_run_child_failure(self):
         old_run, new_run = 'a' * 32, 'b' * 32
         old_error = 'old sandbox failed before PR head changed'
@@ -207,6 +239,23 @@ class AgentReliabilityTests(unittest.TestCase):
         self.assertEqual(state['intervention_ids'], [comment['id']])
         self.assertTrue(any(item['role'] == 'user' and item['content'] == comment['message']
                             for item in bodies[1]['messages']))
+
+    def test_delivered_comment_survives_resume_and_native_child_scope(self):
+        from unittest.mock import Mock
+        comment = {'id': 'c' * 32, 'message': 'Require 100% coverage and zero issues'}
+        context = {'run_id': 'r', 'authorization': ['Verify the pull request']}
+        with patch('popot_agents.worker.http_harness._pending_interventions', return_value=[comment]):
+            _, state, _ = self.run_sequence([self.result('partial', remaining=['verify'])],
+                                           run_context=context)
+        delegate = Mock(return_value=json.dumps({'sessionId': 'a' * 16, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_COMPLETED', 'answer': 'verified', 'outcome': {
+                'status': 'completed', 'evidence': ['checked'], 'errors': [], 'remaining_work': []}}))
+        with patch('popot_agents.worker.http_harness._pending_interventions', return_value=[]):
+            self.run_sequence([self.delegate_call(), self.result()], state=state,
+                              delegate=delegate, run_context=context)
+        assignment = delegate.call_args.args[0]
+        self.assertEqual(assignment['task'].count(comment['message']), 1)
+        self.assertEqual(assignment['_scope_assignment'].count(comment['message']), 1)
 
     def test_verification_handoff_shares_only_checks_for_requested_revision(self):
         from unittest.mock import Mock

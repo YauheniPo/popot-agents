@@ -28,7 +28,7 @@ from .session_store import SessionStore
 from .work_status import build_work_status
 from popot_agents.work_evidence import evidence_event
 from popot_agents.workflow_config import role_policy
-from .workflow import POLICY, WorkflowRun, public_workflow, public_outcome_reason, validate_policy, recover_workflows, run_history
+from .workflow import POLICY, WorkflowRun, public_workflow, public_outcome_reason, validate_policy, recover_workflows, run_history, include_interventions
 
 
 MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
@@ -559,6 +559,9 @@ def create_server(
                                if k in {'run_id','started_at','finished_at','deadlineAt','state','turns'}}]
                              if (saved.get('roleConfig') or {}).get('_workflow') else []),
                     "work": build_work_status(saved, self.server.store.list_chats()),
+                    "artifacts": ((saved.get('roleConfig') or {}).get('_ax_delegation', {}).get('outcome')
+                                  or (saved.get('roleConfig') or {}).get('_workflow', {}).get('outcome')
+                                  or {}).get('artifacts', []),
                     "interventions": self.server.store.recent_interventions(session_id),
                     "container": live.worker.container_name if live else None,
                     "workspace": self._workspace(saved, live),
@@ -939,6 +942,8 @@ def create_server(
                     intervention_ids = result.get('interventionIds', [])
                     terminal = result
                     if workflow:
+                        workflow.meta['authorization'] = include_interventions(workflow.meta['authorization'],
+                            self.server.store.recent_interventions(session_id), intervention_ids)
                         stage = 'record_result'
                         checkpoint = record.worker.get_checkpoint() if hasattr(record.worker, 'get_checkpoint') else None
                         terminal = workflow.record(result, checkpoint)

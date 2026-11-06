@@ -171,7 +171,8 @@ class RoleApiTests(unittest.TestCase):
         self.assertEqual(result["answer"], "2+3")
         self.assertEqual(result["sessionId"], self.runner.chats[0][0])
         self.assertEqual(self.runner.chats[0][1], {**self.roles["analyst"],
-            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"]})
+            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"],
+            "_ax_metrics_call_id": ""})
         self.assertEqual(self.runner.tasks, [])
         self.assertEqual(self.request("POST", "/tasks", {"role": "missing", "task": "x"})[0], 404)
         self.assertEqual(self.request("POST", "/tasks", {"role": "analyst", "agent": "other", "task": "x"})[0], 409)
@@ -182,7 +183,8 @@ class RoleApiTests(unittest.TestCase):
         self.assertEqual(first["role"], "analyst")
         session_id = first["sessionId"]
         self.assertEqual(self.runner.chats[0][1], {**self.roles["analyst"],
-            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"]})
+            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"],
+            "_ax_metrics_call_id": ""})
         self.assertEqual(self.request("POST", "/messages", {
             "sessionId": session_id, "role": "chat", "message": "wrong role"})[0], 409)
         self.server.shutdown()
@@ -200,7 +202,8 @@ class RoleApiTests(unittest.TestCase):
         self.assertEqual(reply["role"], "analyst")
         self.assertEqual(self.runner.chats[1][1], {
             "agent": "nous", "instructions": "Use precise arithmetic.", "tools": ["calculate"],
-            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"]})
+            "_workflow_coordinator": True, "timeout_seconds": RUNTIME["timeouts"]["turn_seconds"],
+            "_ax_metrics_call_id": ""})
         self.assertEqual(self.runner.chats[1][2].restored, [
             {"role": "user", "content": "start"}, {"role": "assistant", "content": "start"}])
         self.assertEqual(self.request("GET", f"/chats/{session_id}")[1]["role"], "analyst")

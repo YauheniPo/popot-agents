@@ -23,7 +23,7 @@ class ReviewerRoleTests(unittest.TestCase):
         self.assertIn('engineering/code-review', reviewer['skills'])
         self.assertIn('engineering/diagnosing-bugs', reviewer['skills'])
         self.assertTrue({'bash', 'read_file', 'write_file', 'git_clone'} <= set(reviewer['tools']))
-        self.assertEqual(reviewer['allowed_roles'], ['qa_engineer', 'analyst', 'security_engineer'])
+        self.assertEqual(reviewer['allowed_roles'], ['backend_engineer', 'qa_engineer', 'analyst', 'security_engineer'])
         self.assertEqual(set(reviewer['mcpServers']['github']['tools']),
                          {'get_file_contents', 'get_commit', 'pull_request_read', 'search_repositories',
                           'pull_request_review_write', 'add_comment_to_pending_review'})

@@ -56,6 +56,7 @@ def observed_revision(report, receipts, target=None):
 
 
 def acceptance_revision(children, receipts, target=None):
+    children = list(children)
     implementations = [c for c in children if c.get('role') in {'backend_engineer','frontend_engineer'}]
     implementations.sort(key=lambda c:c.get('reportedAt',''))
     latest = implementations[-1] if implementations else {}
@@ -63,10 +64,14 @@ def acceptance_revision(children, receipts, target=None):
     reported = _moment(latest.get('reportedAt'))
     if target is AMBIGUOUS:
         return revision
-    # A newer parent read-back can establish that the PR head changed again, but only
-    # for the pull request the user asked about and only at its latest observed head.
-    fresh = [r for r in receipts
-             if r.get('revision') and r.get('revisionSource') == 'pr_head'
+    # The server forwards actual child tool observations with session attribution;
+    # a child's prose or declared revision alone cannot establish a PR head.
+    child_receipts = [r for child in children
+                      if (child.get('outcome') or {}).get('status') == 'completed'
+                      for r in child.get('observations', [])
+                      if child.get('sessionId') and r.get('sourceSessionId') == child['sessionId']]
+    fresh = [r for r in [*receipts, *child_receipts]
+             if re.fullmatch(r'[a-f0-9]{40}', r.get('revision', '')) and r.get('revisionSource') == 'pr_head'
              and r.get('status') not in {'failed','unknown'}
              and _fresh(r, reported)
              and (target is None or (str(r.get('repository','')).lower() == target['repository']

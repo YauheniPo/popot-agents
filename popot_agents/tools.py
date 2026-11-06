@@ -193,6 +193,15 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
     return completed.stdout.decode('utf-8')
 
 
+def export_artifacts(timeout_seconds=None):
+    if not os.path.lexists(WORKSPACE_ROOT / 'artifacts'):
+        return []
+    try:
+        return json.loads(_file_action('export_artifacts', {}, timeout_seconds))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        raise ToolExecutionError('Artifact export did not complete; keep the sandbox for retry') from None
+
+
 def preserve_tool_output(output: str) -> str:
     """Keep large MCP results in the sandbox instead of losing their tail."""
     if len(output) <= MAX_TOOL_OUTPUT:

@@ -100,6 +100,8 @@ def delegate(arguments, *, timeout_seconds, call_id, url, token, allowed, poll_i
 def delegated_result(task, role, probe):
     result = {"sessionId": task.id, "role": role, "state": types.TaskState.Name(task.status.state)}
     metadata = MessageToDict(task).get('metadata', {})
+    if isinstance(metadata.get('observations'), list):
+        result['observations'] = metadata['observations']
     if isinstance(metadata.get('reportedAt'), str):
         result['reportedAt'] = metadata['reportedAt']
     if metadata.get('durable') is True and task.status.state in {types.TASK_STATE_SUBMITTED, types.TASK_STATE_WORKING}:

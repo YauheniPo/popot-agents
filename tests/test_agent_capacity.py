@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AgentCapacityTests(unittest.TestCase):
-    def test_model_timeout_does_not_repeat_the_gateway_fallback_chain(self):
+    def test_disabled_model_retries_do_not_repeat_the_gateway_fallback_chain(self):
         for remaining, expected in ((500, 500), (1500, 900)):
             with self.subTest(remaining=remaining):
                 timeouts = []
@@ -32,7 +32,8 @@ class AgentCapacityTests(unittest.TestCase):
                     if len(timeouts) == 1:
                         raise TimeoutError()
                     return io.BytesIO(b'{"choices": []}')
-                with patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
+                with patch.dict(RUNTIME['model'], {'request_retries': 0}), \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
                     with self.assertRaisesRegex(RuntimeError, 'model request timed out'):
                         _model_request(object(), round_number=1, messages=[], schemas=[],
                                        remaining_seconds=lambda: remaining)

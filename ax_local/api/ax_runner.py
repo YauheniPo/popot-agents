@@ -22,9 +22,20 @@ from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunErro
 from popot_agents.role_env import selected_role_env
 from ax_local.config import AX_CONFIG
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
-from popot_agents.progress import is_progress_message, emit_progress, progress_observer
+from popot_agents.progress import is_progress_message, emit_progress, progress_observer, redact_text
 from ..worker.remote_client import RESPONSE_PREFIX, PROGRESS_PREFIX
 from .worker_queue import WorkerQueue
+
+
+class AxCommandError(AgentRunError):
+    def __init__(self, command, result, secrets=()):
+        stderr = redact_text(result.stderr or '')
+        for secret in secrets:
+            if isinstance(secret, str) and len(secret) >= 4:
+                stderr = stderr.replace(secret, '[REDACTED]')
+        stderr = stderr[-2000:]
+        self.diagnostic = {'command': command, 'exit_code': result.returncode, 'stderr': stderr}
+        super().__init__(stderr.splitlines()[-1] if stderr.strip() else 'AX command failed: ' + command)
 
 
 class AxAgentRunner:
@@ -60,6 +71,13 @@ class AxAgentRunner:
         self._cleanup_pending = {}
         self._cleanup_lock = threading.RLock()
 
+    def _command_error(self, command, result):
+        secrets = [self.proxy_token, *self.harness2_environment.values()]
+        if self.delegation:
+            for grant in self.delegation.tokens.copy().values():
+                secrets.extend((grant.token, grant.probe_token))
+        return AxCommandError(command, result, secrets)
+
     def _run(self, *args: str, input: str | None = None,
              timeout: int = AX_CONFIG["cli_timeout_seconds"],
              allow_failure: bool = False) -> subprocess.CompletedProcess:
@@ -72,8 +90,7 @@ class AxAgentRunner:
         except FileNotFoundError as exc:
             raise AgentConfigurationError("AX CLI is not installed") from exc
         if result.returncode and not allow_failure:
-            detail = result.stderr.strip().splitlines()
-            raise AgentRunError(detail[-1] if detail else f"AX command failed: {args[0]}")
+            raise self._command_error(args[0], result)
         return result
 
     @staticmethod
@@ -320,8 +337,10 @@ class AxAgentRunner:
             emit_progress('preparing_workspace')
             return self._start_reserved_chat(chat_id, role_config, lease,
                                              deadline=deadline, cancel_event=cancel_event)
-        except Exception:
+        except Exception as exc:
             # If cleanup was not confirmed, maintenance still owns this lease.
+            if isinstance(exc, AgentRunError):
+                exc.diagnostic = {**getattr(exc, 'diagnostic', {}), 'task': task_name}
             with self._cleanup_lock:
                 pending = task_name in self._cleanup_pending
             if not pending:
@@ -348,7 +367,9 @@ class AxAgentRunner:
         existing = self._run("get", "task", task_name, allow_failure=True,
                              timeout=remaining(AX_CONFIG["cli_timeout_seconds"]))
         if existing.returncode and "NotFound" not in existing.stderr:
-            raise AgentRunError("AX task lookup failed")
+            failure = AgentRunError("AX task lookup failed")
+            failure.diagnostic = self._command_error('get', existing).diagnostic
+            raise failure
         if not existing.returncode:
             # A previous API process may have left a task with an expired proxy token.
             try:
@@ -410,7 +431,10 @@ class AxAgentRunner:
                 detail = f"AX task entered {phase} before chat worker became ready"
                 if reason:
                     detail += f" (reason: {reason})"
-                raise AgentRunError(detail)
+                failure = AgentRunError(detail)
+                failure.diagnostic = {'task': task_name, 'phase': phase, 'reason': reason,
+                                      'probe': chat.probe_issue}
+                raise failure
             if resuming and self.snapshot_mode == 'full' and phase == "Running" \
                     and chat.probe_issue == "AX chat socket unavailable":
                 # A full checkpoint already contains the listening socket. If

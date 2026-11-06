@@ -8,6 +8,39 @@ from tests import test_agent_reliability as reliability
 
 
 class WorkflowStabilityTests(unittest.TestCase):
+    def test_planner_accepts_attributed_child_pr_readback_without_own_git_tools(self):
+        helper = reliability.AgentReliabilityTests()
+        revision = 'e' * 40
+        children = {'a' * 16: {'sessionId': 'a' * 16, 'role': 'backend_engineer',
+            'reportedAt': '2026-11-05T22:11:00Z',
+            'outcome': {'status': 'completed', 'evidence': ['PR body updated']}}}
+        for sid, role in [('b' * 16, 'code_reviewer'), ('c' * 16, 'qa_engineer')]:
+            children[sid] = {'sessionId': sid, 'role': role, 'outcome': {
+                'status': 'completed', 'revision': revision, 'evidence': ['verified']},
+                'observations': [{'kind': 'revision', 'revision': revision, 'status': 'observed',
+                    'sourceSessionId': sid, 'revisionSource': 'pr_head',
+                    'repository': 'yauhenipo/popot-agents', 'pullRequest': 46,
+                    'observedAt': '2026-11-05T22:19:00Z'}]}
+        for invalid in (None, 'wrong_pr', 'wrong_repository', 'stale', 'wrong_session', 'failed_child', 'unobserved'):
+            with self.subTest(invalid=invalid):
+                data = json.loads(json.dumps(children))
+                for child in list(data.values())[1:]:
+                    observation = child['observations'][0]
+                    if invalid == 'wrong_pr': observation['pullRequest'] = 47
+                    if invalid == 'wrong_repository': observation['repository'] = 'other/repo'
+                    if invalid == 'stale': observation['observedAt'] = '2026-11-05T22:10:00Z'
+                    if invalid == 'wrong_session': observation['sourceSessionId'] = 'd' * 16
+                    if invalid == 'failed_child': child['outcome']['status'] = 'failed'
+                    if invalid == 'unobserved': child.pop('observations')
+                state = {'messages': [{'role': 'user', 'content':
+                    'Review https://github.com/YauheniPo/popot-agents/pull/46'}],
+                    'outcome': {'status': 'partial'}, 'completed_delegations': data}
+                _, state, _ = helper.run_sequence([helper.result()], state=state,
+                    run_context={'authorization': [state['messages'][0]['content']]},
+                    role={'name': 'planner', '_workflow_coordinator': True, 'tools': []})
+                self.assertEqual(state['outcome']['status'], 'partial' if invalid else 'completed')
+                if not invalid: self.assertEqual(state['outcome']['revision'], revision)
+
     def test_continuation_reports_remaining_workflow_budget(self):
         run = WorkflowRun(POLICY, 'finish the task')
         run.begin()

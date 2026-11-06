@@ -17,6 +17,12 @@ def public_outcome_reason(outcome):
     return redact_text(reason)[:240] if isinstance(reason, str) and reason.strip() else None
 
 
+def include_interventions(authority, interventions, ids):
+    """Retain only user comments whose server IDs the worker actually included."""
+    return list(dict.fromkeys([*authority, *[item['message'] for item in interventions
+                                            if item['id'] in ids]]))
+
+
 def public_workflow(saved, *, include_result=False):
     meta = (saved.get('roleConfig') or {}).get('_workflow')
     if not meta:
