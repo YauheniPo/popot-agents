@@ -330,6 +330,8 @@ shows `interventions` with `queued` or `delivered` status. `delivered` means the
 worker included the comment in a model request and the resulting turn was saved;
 it does not mean the requested change was completed. If the task finishes before
 its next model request, the comment remains queued for a later turn.
+Active cron sessions reject messages with HTTP 409; continue their conversation
+after the scheduled task finishes.
 
 MCP accepts any configured `role` (or explicit agent profile). When omitted,
 `config/runtime.json → mcp.default_role` selects the role (`planner` by default).

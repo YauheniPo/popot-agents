@@ -31,16 +31,31 @@ def _atomic_write(path, chunks) -> None:
 
 
 def repository_context() -> dict:
-    root = WORKSPACE_ROOT.resolve()
-    if not root.is_dir():
-        return {}
-    repositories = ([root] if (root / '.git').exists() else
-                    sorted(path for path in root.iterdir()
-                           if path.is_dir() and not path.is_symlink() and (path / '.git').exists()))
+    errors = {}
+    errors_truncated = False
+    try:
+        root = WORKSPACE_ROOT.resolve()
+        if not root.is_dir():
+            return {}
+        repositories = [root] if (root / '.git').exists() else []
+        if not repositories:
+            for path in root.iterdir():
+                try:
+                    if not path.is_symlink() and path.is_dir() and (path / '.git').exists():
+                        repositories.append(path)
+                except (OSError, RuntimeError) as exc:
+                    if len(errors) < 32:
+                        errors[str(path.relative_to(root))] = type(exc).__name__
+                    else:
+                        errors_truncated = True
+            repositories.sort()
+    except (OSError, RuntimeError) as exc:
+        return {'discovery_errors': {'.': type(exc).__name__}}
+    discovery = {'discovery_errors': errors, 'discovery_errors_truncated': errors_truncated} if errors else {}
     if not repositories:
-        return {}
+        return discovery
     if len(repositories) != 1:
-        return {'repositories': [str(path.relative_to(root)) for path in repositories[:32]],
+        return {**discovery, 'repositories': [str(path.relative_to(root)) for path in repositories[:32]],
                 'selection_required': True, 'truncated': len(repositories) > 32}
     repository = repositories[0]
     names = ('AGENTS.md', 'CLAUDE.md', 'GLOSSARY.md', 'GLOSSARY-MAP.md', 'docs/agents/domain.md')
@@ -68,8 +83,8 @@ def repository_context() -> dict:
     except (OSError, RuntimeError) as exc:
         documents[str(directory.relative_to(root))] = {'error': type(exc).__name__}
     if not documents and not adrs:
-        return {}
-    return {'repository': str(repository.relative_to(root)), 'documents': documents,
+        return discovery
+    return {**discovery, 'repository': str(repository.relative_to(root)), 'documents': documents,
             'adrs': adrs[:32], 'adrs_truncated': len(adrs) > 32}
 
 

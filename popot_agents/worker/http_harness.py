@@ -194,11 +194,20 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     if turn_timeout < RUNTIME['timeouts']['min_turn_seconds']:
         raise ValueError('Insufficient turn budget; no model or memory session started')
     messages = [{'role': 'user', 'content': task}] if isinstance(task, str) else list(task)
+    memory_context = messages
+    if run_context is not None:
+        if not isinstance(run_context, dict) or any(not isinstance(run_context.get(k,[]),list)
+                or any(not isinstance(s,str) for s in run_context.get(k,[])) for k in ('authorization','assignments')):
+            raise ValueError('invalid server run context')
+        # Continuations and delegated assignments contain reported evidence;
+        # only the server's user-authored scope may select a project brain.
+        memory_context = [{'role': 'user', 'content': text}
+                          for text in run_context.get('authorization', [])]
     role_config = prepare_role_config(role_config)
     deadline = None
     if timeout_seconds is not None or role_config.get('harness2', {}).get('enabled'):
         deadline = time.monotonic() + turn_timeout
-    memory = TurnMemory(role_config, messages)
+    memory = TurnMemory(role_config, memory_context)
     memory.start_session()
     success = False
     try:
@@ -243,9 +252,6 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     messages = [{"role": "user", "content": task}] if isinstance(task, str) else list(task)
     user_context = list(messages)
     if run_context is not None:
-        if not isinstance(run_context, dict) or any(not isinstance(run_context.get(k,[]),list)
-                or any(not isinstance(s,str) for s in run_context.get(k,[])) for k in ('authorization','assignments')):
-            raise ValueError('invalid server run context')
         user_context = [{'role':'user','content':text} for text in
             run_context.get('authorization',[]) + run_context.get('assignments',[])]
         previous_answer = next((m for m in reversed(messages) if m.get('role')=='assistant'),None)

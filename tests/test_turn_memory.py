@@ -17,6 +17,58 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_automatic_continuation_keeps_authorized_memory_project(self):
+        from popot_agents.orchestrator.workflow import WorkflowRun
+        workflow = WorkflowRun(RUNTIME['workflow'], TASK)
+        workflow.begin()
+        workflow.record({'answer': 'continue', 'outcome': {
+            'status': 'partial', 'reason': 'agent_reported',
+            'evidence': ['Dependency: https://github.com/Vendor/Library/pull/9'],
+            'remaining_work': ['Finish the review'], 'errors': []}}, {'messages': []})
+        messages = [{'role': 'user', 'content': TASK},
+                    {'role': 'assistant', 'content': 'Dependency identified'},
+                    {'role': 'user', 'content': workflow.continuation(compact=True)}]
+        client = Mock()
+        client.recall.return_value = []
+        replies = ['done', json.dumps({'memories': [{
+            'kind': 'constraint', 'text': 'Review the requested PR',
+            'source': 'user', 'quote': 'Review'}]})]
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=lambda *a, **kw:
+                 io.BytesIO(json.dumps({'choices': [{'message': {'content': replies.pop(0)}}]}).encode())):
+            self.assertEqual(run_http(messages, ROLE, run_context={
+                'authorization': workflow.meta['authorization'],
+                'assignments': ['Check https://github.com/Vendor/Library/pull/9 for the cause']}), 'done')
+        dataset = project_dataset([{'role': 'user', 'content': TASK}])
+        self.assertEqual(client.recall.call_args.args[1], dataset)
+        self.assertEqual(client.remember.call_args.args[1], dataset)
+        self.assertEqual(json.loads(client.remember.call_args.args[0])['references'],
+                         ['https://github.com/Owner/Repo/pull/68'])
+
+    def test_authorized_followups_and_ambiguity_control_continuation_memory(self):
+        followup = 'Review https://github.com/Else/Other/pull/8'
+        for authorization, expected in (
+                ([TASK, 'Run checks too'], project_dataset([{'role': 'user', 'content': TASK}])),
+                ([TASK, followup], project_dataset([{'role': 'user', 'content': followup}])),
+                ([TASK + ' and ' + followup], None)):
+            with self.subTest(authorization=authorization):
+                client = Mock()
+                client.recall.return_value = []
+                replies = ['done', '{"memories": []}']
+                with patch.dict(os.environ, ENV, clear=True), \
+                     patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client) as constructor, \
+                     patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=lambda *a, **kw:
+                         io.BytesIO(json.dumps({'choices': [{'message': {'content': replies.pop(0)}}]}).encode())):
+                    self.assertEqual(run_http('Continue; evidence https://github.com/Vendor/Library/pull/9',
+                        ROLE, run_context={'authorization': authorization}), 'done')
+                if expected is None:
+                    constructor.assert_not_called()
+                else:
+                    self.assertEqual(client.recall.call_args.args[1], expected)
+
     def test_await_tasks_checkpoint_closes_memory_turn_without_error(self):
         from tests.test_agent_reliability import AgentReliabilityTests
         from tests.test_async_delegation import call, pending

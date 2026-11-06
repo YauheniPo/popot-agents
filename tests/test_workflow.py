@@ -442,3 +442,55 @@ class RecoveryTests(unittest.TestCase):
                     'error_type':'ProcessRestart', 'childSessionIds':[]})
                 runner.start_chat.assert_not_called()
             finally:server.server_close()
+
+    def test_recovery_honors_role_limit_and_resumes_last_turn_waiting_for_children(self):
+        from popot_agents.orchestrator.session_store import SessionStore
+        from popot_agents.orchestrator.workflow import WorkflowRun
+        for turn_limit, waiting, expected_turns in ((8, False, 5), (4, True, 4)):
+            with self.subTest(turn_limit=turn_limit, waiting=waiting), tempfile.TemporaryDirectory() as directory:
+                finished = threading.Event()
+                calls = []
+
+                class Chat:
+                    container_name = 'recovered-coordinator'
+                    def restore(self, messages, **kwargs): pass
+                    def send(self, message, **kwargs):
+                        calls.append(message)
+                        finished.set()
+                        return result('completed')
+                    def is_alive(self): return True
+                    def close(self): pass
+
+                class Runner:
+                    def start_chat(self, *args, **kwargs): return Chat()
+
+                workflow = WorkflowRun({**POLICY, 'max_turns': turn_limit}, 'authorized task')
+                workflow.meta['turns'] = 3
+                workflow.begin()
+                partial = result('partial', remaining=('verify',))
+                checkpoint = {'messages': []}
+                if waiting:
+                    partial['outcome']['reason'] = 'child_pending'
+                    checkpoint['failed_delegations'] = [[['qa_engineer', 'verify'],
+                        {'session_id': 'b' * 16, 'pending': True}]]
+                self.assertIsNone(workflow.record(partial, checkpoint))
+                store = SessionStore(directory)
+                sid = 'a' * 16
+                store.save(sid, 'test', [], 'planner', {'agent': 'test',
+                    'coordination': {'max_turns': turn_limit}, '_workflow': workflow.meta})
+                server = create_server({'test': Runner()}, roles={'planner': {'agent': 'test'}},
+                    store=store, host='127.0.0.1', port=0, workflow_policy=POLICY)
+                thread = threading.Thread(target=server.serve_forever)
+                thread.start()
+                try:
+                    server.workflow_recovery()
+                    self.assertTrue(finished.wait(3), 'valid checkpoint was not recovered')
+                    with server.session_lock(sid):
+                        saved = store.get(sid)['roleConfig']['_workflow']
+                    self.assertEqual(saved['state'], 'completed')
+                    self.assertEqual(saved['turns'], expected_turns)
+                    self.assertEqual(len(calls), 1)
+                finally:
+                    server.shutdown()
+                    thread.join()
+                    server.server_close()

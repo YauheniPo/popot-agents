@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from popot_agents import tools
+from popot_agents.worker import file_worker
 from popot_agents.worker.http_harness import run_http
 
 
@@ -116,6 +117,42 @@ class RepositoryContextTests(unittest.TestCase):
             self.assertIn(name, context)
         self.assertNotIn('ALPHA_ONLY_RULES', context)
         self.assertNotIn('BETA_ONLY_RULES', context)
+
+    def test_inaccessible_sibling_does_not_hide_readable_repository(self):
+        self.repository(**{'AGENTS.md': 'READABLE_REPOSITORY_RULES'})
+        inaccessible = self.workspace / 'private-output'
+        inaccessible.mkdir(mode=0o700)
+        inaccessible.chmod(0)
+        try:
+            self.assertEqual(self.run_turn(), 'done')
+        finally:
+            inaccessible.chmod(0o700)
+        context = self.context(self.requests[0])
+        self.assertIn('READABLE_REPOSITORY_RULES', context)
+        self.assertIn('private-output', context)
+        self.assertIn('PermissionError', context)
+
+    def test_unreadable_workspace_returns_a_discovery_error(self):
+        with patch.object(file_worker, 'WORKSPACE_ROOT', self.workspace), \
+             patch.object(Path, 'iterdir', side_effect=PermissionError):
+            context = file_worker.repository_context()
+        self.assertEqual(context['discovery_errors'], {'.': 'PermissionError'})
+
+    def test_discovery_errors_are_bounded(self):
+        for index in range(33):
+            (self.workspace / f'private-{index}').mkdir()
+        exists = Path.exists
+
+        def inspect(path):
+            if path.name == '.git' and path.parent.name.startswith('private-'):
+                raise PermissionError
+            return exists(path)
+
+        with patch.object(file_worker, 'WORKSPACE_ROOT', self.workspace), \
+             patch.object(Path, 'exists', inspect):
+            context = file_worker.repository_context()
+        self.assertEqual(len(context['discovery_errors']), 32)
+        self.assertTrue(context['discovery_errors_truncated'])
 
     def test_root_checkout_is_not_confused_with_a_nested_checkout(self):
         self.repository('.', **{'AGENTS.md': 'WORKSPACE_ROOT_RULES'})

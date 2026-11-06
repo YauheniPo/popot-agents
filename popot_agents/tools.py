@@ -5,6 +5,7 @@ import json
 import operator
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -143,15 +144,24 @@ def _run_command(command: list[str],
                  *, save_output: bool = False) -> str:
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace", newline="") as output:
         timed_out = False
-        try:
-            options = {"cwd": WORKSPACE_ROOT, "env": safe_tool_env(),
-                       "stdout": output, "stderr": subprocess.STDOUT,
-                       "timeout": timeout, "check": False}
-            if os.geteuid() == 0:
-                options.update(user=10001, group=10001)
-            completed = subprocess.run(command, **options)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        options = {"cwd": WORKSPACE_ROOT, "env": safe_tool_env(),
+                   "stdout": output, "stderr": subprocess.STDOUT,
+                   "start_new_session": True}
+        if os.geteuid() == 0:
+            options.update(user=10001, group=10001)
+        with subprocess.Popen(command, **options) as process:
+            try:
+                process.wait(timeout=timeout)
+            except BaseException as exc:
+                timed_out = isinstance(exc, subprocess.TimeoutExpired)
+                # Stop the shell and its commands before reading final evidence
+                # or allowing the next tool call to change the same workspace.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # The process group already exited at the deadline.
+                if not timed_out:
+                    raise
         output.seek(0)
         snippet = output.read(MAX_TOOL_OUTPUT + 1)
         truncated = len(snippet) > MAX_TOOL_OUTPUT
@@ -165,7 +175,7 @@ def _run_command(command: list[str],
                         f"offset={MAX_TOOL_OUTPUT if truncated else 0} limit={MAX_TOOL_OUTPUT}.")
     if timed_out:
         raise ToolExecutionError(f"command timed out; partial output:\n{snippet}")
-    return f"exit_code={completed.returncode}\n{snippet}"
+    return f"exit_code={process.returncode}\n{snippet}"
 
 
 def _file_action(action: str, arguments: dict, timeout_seconds: float | None = None,

@@ -408,6 +408,8 @@ def create_server(
     workflow_policy = validate_policy(workflow_policy or POLICY)
     workflow_slots = threading.BoundedSemaphore(workflow_policy['max_concurrent'])
     workflow_token = secrets.token_urlsafe(32)
+    starting_requests = {}
+    starting_requests_lock = threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def _log_request(self, body) -> None:
             self._request_id = uuid.uuid4().hex[:12]
@@ -633,14 +635,38 @@ def create_server(
                 return
             session_id = payload.get("sessionId")
             if session_id is None:
-                if (isinstance(payload.get('role'), str)
-                        and role_policy(roles.get(payload['role']), workflow_policy)) and not self._workflow_request(
-                        payload, payload.get('message', '').strip() if isinstance(payload.get('message'), str) else None):
-                    return
                 new_session_id = uuid.uuid4().hex[:16]
-                with self.server.session_lock(new_session_id):
-                    self._coordinated_message(payload, new_session_id)
+                request_id = payload.get('requestId')
+                coordinated = (isinstance(payload.get('role'), str)
+                               and role_policy(roles.get(payload['role']), workflow_policy))
+                claimed = coordinated and request_id is not None
+                if claimed:
+                    # Reserve the ID before startup, when no durable session exists yet.
+                    # Keep the guard out of worker startup/execution so other IDs proceed.
+                    with starting_requests_lock:
+                        if not self._workflow_request(payload, payload.get('message')):
+                            return
+                        pending = starting_requests.get(request_id)
+                        if pending and not self._workflow_request(payload, payload.get('message'), pending):
+                            return
+                        starting_requests[request_id] = {'sessionId': new_session_id,
+                            'role': payload['role'], 'roleConfig': {
+                                '_disable_delegation': payload.get('disableDelegation', False),
+                                '_workflow': {'request_id': request_id, 'state': 'running',
+                                              'original_task': payload.get('message')}}}
+                try:
+                    with self.server.session_lock(new_session_id):
+                        self._coordinated_message(payload, new_session_id)
+                finally:
+                    if claimed:
+                        with starting_requests_lock:
+                            starting_requests.pop(request_id, None)
             elif isinstance(session_id, str):
+                cron = getattr(self.server, 'cron', None)
+                if cron is not None and cron.is_active(session_id):
+                    self._reply(409, {'error': 'cron task is still active; retry after it finishes',
+                                      'sessionId': session_id})
+                    return
                 saved = self.server.store.get(session_id)
                 if saved and 'disableDelegation' in payload and payload['disableDelegation'] != bool(
                         (saved.get('roleConfig') or {}).get('_disable_delegation')):
@@ -690,6 +716,11 @@ def create_server(
                                           'sessionId': session_id})
                         return
                 with self.server.session_lock(session_id):
+                    # Another request may have completed while this one waited for startup.
+                    saved = self.server.store.get(session_id)
+                    if (saved and (saved.get('roleConfig') or {}).get('_workflow') and not recovering
+                            and not self._workflow_request(payload, payload.get('message'), saved)):
+                        return
                     self._coordinated_message(payload)
             else:
                 self._message_locked(payload)

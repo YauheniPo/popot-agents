@@ -242,7 +242,8 @@ def recover_workflows(server, policy, token):
                               'workflow_interrupted_execution')
                 server.store.save(sid, saved['agent'], saved['messages'], saved['role'],
                                   {**saved['roleConfig'], '_workflow': workflow.meta})
-            elif workflow.remaining() < 1 or meta['turns'] >= policy['max_turns']:
+            elif workflow.remaining() < RUNTIME['timeouts']['min_turn_seconds'] or (
+                    meta['turns'] >= selected_policy['max_turns'] and not meta.get('awaiting_children')):
                 workflow.stop({'answer':''}, 'workflow_budget_exhausted')
                 server.store.save(sid, saved['agent'], saved['messages'], saved['role'],
                                   {**saved['roleConfig'], '_workflow': workflow.meta})
