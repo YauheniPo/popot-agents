@@ -20,7 +20,7 @@
     "memory_recall_seconds": 20,
     "memory_session_start_seconds": 3,
     "memory_session_finish_seconds": 5,
-    "memory_summary_seconds": 300,
+    "memory_summary_seconds": 30,
     "memory_capture_min_seconds": 8,
     "memory_capture_margin_seconds": 5,
     "memory_recall_min_seconds": 1,
@@ -28,7 +28,7 @@
     "memory_skill_import_seconds": 600,
     "turn_seconds": 900,
     "max_turn_seconds": 1800,
-    "min_turn_seconds": 0.1,
+    "min_turn_seconds": 2,
     "turn_response_margin_seconds": 15
   },
   "mcp": {

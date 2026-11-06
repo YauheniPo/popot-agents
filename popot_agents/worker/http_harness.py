@@ -5,6 +5,7 @@ import json
 import math
 import os
 import sys
+import shutil
 import time
 import uuid
 from copy import deepcopy
@@ -15,7 +16,7 @@ from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.progress import trace_event, trace_output, redact_text
 from popot_agents.skills import prepare_role_config
-from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output
+from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env
 from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks
 from .context import compact_tool_results
 from . import mcp_client
@@ -95,6 +96,8 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
     attempts = 1 if final else 1 + RUNTIME["model"]["request_retries"]
     for attempt in range(1, attempts + 1):
         request_timeout = min(RUNTIME["timeouts"]["model_request_seconds"], remaining_seconds())
+        if request_timeout < RUNTIME['timeouts']['min_turn_seconds']:
+            raise _ModelRequestError('Insufficient model request budget', retryable=True)
         started_at = time.monotonic()
         _trace("model_request", round=round_number, attempt=attempt, message_count=len(messages),
                timeout_seconds=round(request_timeout, 3),
@@ -144,6 +147,8 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if type(timeout_seconds) not in {int, float} or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError('timeout_seconds must be positive and finite')
         turn_timeout = min(turn_timeout, timeout_seconds)
+    if turn_timeout < RUNTIME['timeouts']['min_turn_seconds']:
+        raise ValueError('Insufficient turn budget; no model or memory session started')
     messages = [{'role': 'user', 'content': task}] if isinstance(task, str) else list(task)
     role_config = prepare_role_config(role_config)
     deadline = None
@@ -224,6 +229,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     allowed = role_config.get("tools", [])
     if 'bash' in allowed:
         instructions += '\n\n' + render_prompt('tools/inspection')
+        tool_path = safe_tool_env()['PATH']
+        instructions += '\nRuntime command availability (not authorization): ' + json.dumps({
+            name: shutil.which(name, path=tool_path) is not None for name in (
+                'git', 'gh', 'node', 'npm', 'go', 'postgres', 'pytest', 'coverage', 'ggshield', 'sonar-scanner')})
     mcp_servers = role_config.get("mcpServers", {})
     mcp_tools = (mcp_client.discover_tools(mcp_servers, timeout_seconds=remaining_seconds(),
                     **({"cache":discovery_cache} if discovery_cache is not None else {}))
@@ -321,6 +330,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
     def capture_memory(answer, status):
         if memory.enabled and status in {'completed', 'partial', 'blocked'}:
+            phase = 'summary'
             try:
                 summary_messages = memory.summary_messages(answer.strip(), task_status=status)
                 for attempt in range(RUNTIME["memory"]["summary_attempts"]):
@@ -376,11 +386,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                reason=retry_reason)
                         summary_messages.append({'role': 'system', 'content':
                             render_prompt('memory/retry')})
+                phase = 'save'
                 memory.client.timeout = min(RUNTIME["timeouts"]["memory_request_seconds"], remaining_seconds() / 2)
                 memory.save(summary, task_status=status)
             except Exception as exc:
-                memory.capture_failed(exc)
-                _trace('memory_capture_failed', dataset=memory.dataset, error_type=type(exc).__name__)
+                memory.capture_failed(exc, phase=phase)
+                _trace('memory_capture_failed', dataset=memory.dataset, phase=phase, error_type=type(exc).__name__)
 
     def save_result(answer, status, reason, report=None):
         revision = observed_revision(report, tool_evidence,

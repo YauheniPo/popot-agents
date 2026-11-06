@@ -287,8 +287,8 @@ class HttpHarnessTests(unittest.TestCase):
                 "name": "calculate", "arguments": '{"expression":"1+1"}'}}]}}]}
 
         def reply(_request, timeout):
-            self.assertLessEqual(timeout, 1.0 - clock[0])
-            clock[0] += 0.6
+            self.assertLessEqual(timeout, 10.0 - clock[0])
+            clock[0] += 6.0
             return io.BytesIO(json.dumps(tool_reply).encode())
 
         urlopen.side_effect = reply
@@ -300,7 +300,7 @@ class HttpHarnessTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"HARNESS_BASE_URL": "https://example.test/v1",
                                   "HARNESS_MODEL": "example-model",
-                                  "HARNESS_TURN_TIMEOUT_SECONDS": "1"}), \
+                                  "HARNESS_TURN_TIMEOUT_SECONDS": "10"}), \
                 patch("popot_agents.worker.http_harness.time.monotonic",
                       side_effect=lambda: clock[0]), \
                 patch("popot_agents.worker.http_harness.execute_tool", side_effect=execute), \
@@ -311,7 +311,7 @@ class HttpHarnessTests(unittest.TestCase):
         self.assertEqual(len(tool_timeouts), 1)
         final = json.loads(urlopen.call_args.args[0].data)
         self.assertEqual(final['tool_choice'], 'none')
-        self.assertTrue(all(0 < value <= 0.4 for value in tool_timeouts))
+        self.assertTrue(all(0 < value <= 4 for value in tool_timeouts))
 
     @patch("popot_agents.worker.http_harness.request.urlopen")
     def test_logs_visible_model_steps_and_tool_calls(self, urlopen):

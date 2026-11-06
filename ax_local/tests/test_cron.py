@@ -71,6 +71,8 @@ class CronTests(unittest.TestCase):
             store = SessionStore(directory)
             runner = AxAgentRunner('localhost:5001/popot-agent-ax@sha256:' + 'a' * 64,
                                    'unused', 'http://localhost:1/v1')
+            from ax_local.api.worker_queue import WorkerQueue
+            runner.worker_queue = WorkerQueue(10, 5)
             leases = [runner.worker_queue.acquire(f'occupied-{index}') for index in range(10)]
             roles = {'analyst': {'agent': 'openrouter', 'instructions': 'Analyze', 'tools': [],
                                 'cron': [{'schedule': '* * * * *', 'task': f'report {index}'}

@@ -23,6 +23,7 @@ bash "$ROOT/ax_local/cluster/controller_tools.sh"
 docker build --platform "linux/$(go env GOARCH)" \
   --build-context "python-base=docker-image://$PYTHON_IMAGE" \
   --build-context "go-base=docker-image://$GO_IMAGE" \
+  --build-context "node-worker=docker-image://$WORKER_NODE_IMAGE" \
   -f "$ROOT/ax_local/docker/worker.Dockerfile" -t "$IMAGE" "$ROOT"
 docker push "$IMAGE"
 IMAGE_DIGEST="$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')"

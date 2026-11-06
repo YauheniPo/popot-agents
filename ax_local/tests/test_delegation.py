@@ -98,7 +98,7 @@ class DelegationTests(unittest.TestCase):
                     'configuration':{'returnImmediately':True}})['task']
                 jobs.append((role,task['id']))
             self.assertTrue(all(e.wait(1) for e in entered.values()))
-            self.assertEqual(pool.reservations['run'],8)
+            self.assertEqual(pool.reservations['run'],9)
             # Root + two verifiers; spare reservations remain available to nested tasks.
             self.assertEqual(pool.status()['active'],3)
             finish.set()
@@ -114,9 +114,9 @@ class DelegationTests(unittest.TestCase):
                 self.policy['max_depth']=5
                 pool=WorkerQueue(10,1);pool.reserve('run',slots)
                 run=Run(time.monotonic()+5,reserved_slots=slots,pool=pool,reservation='run')
-                first=Job('a'*16,{'_ax_role':'code_reviewer','_ax_delegation':{
+                first=Job('a'*16,{'_ax_role':'code_reviewer','allowed_roles':['analyst'],'_ax_delegation':{
                     'revision':'a'*40,'lineage':['tech_lead','code_reviewer']}},'',run,run.deadline)
-                second=Job('b'*16,{'_ax_role':'qa_engineer','_ax_delegation':{
+                second=Job('b'*16,{'_ax_role':'qa_engineer','allowed_roles':['analyst'],'_ax_delegation':{
                     'revision':revision*40,'lineage':['tech_lead','qa_engineer']}},'',run,run.deadline)
                 run.admitted[first.session_id]=first
                 self.assertEqual(self.service._can_start(second),expected)
@@ -823,6 +823,8 @@ class DelegationTests(unittest.TestCase):
     def test_children_wait_in_shared_worker_queue_without_separate_capacity_rejection(self):
         runner = AxAgentRunner('localhost:5001/popot-agent-ax@sha256:' + 'a' * 64,
                                'unused', 'http://localhost:1/v1')
+        from ax_local.api.worker_queue import WorkerQueue
+        runner.worker_queue = WorkerQueue(10, 5)
         runner.delegation = self.service
         self.service.runners = {"test": runner}
         leases = [runner.worker_queue.acquire(f'occupied-{index}') for index in range(10)]

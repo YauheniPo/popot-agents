@@ -248,3 +248,8 @@ SDK cache/metrics update per tool while preserving status and recall metadata.
 The SDK dashboard counts failed traces, including a failed tool batch, rather
 than individual failed tools; individual outcomes remain in `tool_batches`.
 Lifecycle failures include a redacted error message and the start/finish phase.
+
+Optional memory summary requests are capped by `timeouts.memory_summary_seconds`
+(default 30 seconds). Capture failures record `phase=summary` or `phase=save` and
+the exception type in `memory.capture`, so model extraction timeouts are distinguishable
+from writes to Cognee. They remain separate from the main task outcome.

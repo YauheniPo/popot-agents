@@ -147,11 +147,11 @@ class TurnMemory:
         except Exception as exc:
             trace('memory_session_failed', phase='finish', error_type=type(exc).__name__, error=scrub(str(exc)))
 
-    def capture_failed(self, exc):
+    def capture_failed(self, exc, *, phase='summary'):
         self.warnings.append('Memory capture failed; main task result is unchanged.')
         if len(self.tools) < RUNTIME['memory']['trace_tool_limit']:
             self.tools.append({'name': 'memory.capture', 'status': 'error', 'output_chars': 0,
-                               'error_type': type(exc).__name__})
+                               'error_type': type(exc).__name__, 'phase': phase})
 
     def context(self, seconds: float) -> str:
         if not self.enabled or seconds < RUNTIME["timeouts"]["memory_recall_min_seconds"]:

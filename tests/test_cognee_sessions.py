@@ -11,6 +11,24 @@ from popot_agents.worker.cognee_memory import CogneeMemory
 
 @unittest.skipUnless(os.getenv('COGNEE_SESSION_TEST_URL'), 'local Cognee integration opt-in')
 class SessionContractTests(unittest.TestCase):
+    def test_capture_timeout_phase_is_preserved_without_failing_main_work(self):
+        client = CogneeMemory(os.environ['COGNEE_SESSION_TEST_URL'],
+                              os.environ['DEFAULT_USER_PASSWORD'], timeout=10)
+        for phase in ('summary', 'save'):
+            with self.subTest(phase=phase):
+                event = {'session_id': 'popot-phase-' + uuid.uuid4().hex,
+                         'dataset_name': 'popot-diagnostics', 'role': 'integration_test', 'status': 'running'}
+                client.session_event(event)
+                client.session_event({**event, 'status': 'completed', 'outcome': 'completed',
+                    'tools': [{'name': 'memory.capture', 'status': 'error', 'output_chars': 0,
+                               'error_type': 'TimeoutError', 'phase': phase}]})
+                detail = client._request('/api/v1/sessions/' + event['session_id'])
+                self.assertEqual(detail['status'], 'completed')
+                trace = next(t for t in detail['traces'] if t['origin_function'] == 'popot.tools')
+                step = trace['method_return_value']['tool_batches'][0][0]
+                self.assertEqual(step['phase'], phase)
+                self.assertEqual(detail['traces'][-1]['method_return_value']['memory_status'], 'degraded')
+
     def test_worker_checkpoint_records_zero_errors_in_real_cognee(self):
         from popot_agents.worker.turn_memory import TurnMemory
         client = CogneeMemory(os.environ['COGNEE_SESSION_TEST_URL'],

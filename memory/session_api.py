@@ -26,6 +26,7 @@ class ToolStep(BaseModel):
     recall_outcome: Literal['useful', 'empty', 'warming_up'] | None = None
     chunks: int | None = Field(default=None, ge=0, le=20)
     error_type: str | None = Field(default=None, max_length=200, pattern=r'^[a-zA-Z0-9_.]+$')
+    phase: Literal['summary', 'save'] | None = None
 
 
 class SessionEvent(BaseModel):
@@ -70,7 +71,8 @@ async def session_event(payload: SessionEvent, user: User = Depends(get_authenti
             {'name': tool.name, 'status': tool.status, 'output_chars': tool.output_chars,
              **({'recall_outcome': tool.recall_outcome, 'chunks': tool.chunks}
                 if tool.recall_outcome is not None else {}),
-             **({'error_type': tool.error_type} if tool.error_type is not None else {})}
+             **({'error_type': tool.error_type} if tool.error_type is not None else {}),
+             **({'phase': tool.phase} if tool.phase is not None else {})}
             for tool in payload.tools]
         await sm.add_agent_trace_step(user_id=str(user.id), session_id=payload.session_id,
             origin_function='popot.tools',

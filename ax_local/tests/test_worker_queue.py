@@ -155,6 +155,8 @@ class AxWorkerCapacityTests(unittest.TestCase):
     def setUp(self):
         self.runner = AxAgentRunner(image='localhost:5001/popot-agent-ax@sha256:' + 'a' * 64,
                                     model='unused', base_url='http://localhost:1/v1')
+        # Generic queue tests use an explicit capacity, independent of local deployment defaults.
+        self.runner.worker_queue = WorkerQueue(10, AX_CONFIG['worker_queue_timeout_seconds'])
 
     @staticmethod
     def cli(*args, **_kwargs):
@@ -199,7 +201,7 @@ class AxWorkerCapacityTests(unittest.TestCase):
         from http.client import HTTPConnection
         with tempfile.TemporaryDirectory() as directory:
             server = create_server({'test': self.runner}, port=0, session_dir=directory)
-            for index in range(10):
+            for index in range(self.runner.worker_queue.max_workers):
                 self.runner.worker_queue.acquire(f'occupied-{index}')
             serving = threading.Thread(target=server.serve_forever)
             serving.start()
@@ -348,8 +350,8 @@ class AxWorkerCapacityTests(unittest.TestCase):
             finally:
                 server.server_close()
 
-    def test_queue_defaults_are_ten_workers_and_one_hour(self):
-        self.assertEqual(AX_CONFIG['max_workers'], 10)
+    def test_queue_defaults_match_three_physical_workers_and_one_hour(self):
+        self.assertEqual(AX_CONFIG['max_workers'], 3)
         self.assertEqual(AX_CONFIG['worker_queue_timeout_seconds'], 3600)
 
 

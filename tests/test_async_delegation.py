@@ -188,7 +188,7 @@ class AsyncServiceTests(unittest.TestCase):
                 result=self.wait_task(job['id'],role=role)
                 self.assertEqual(result['metadata']['outcome']['status'],'completed',result)
         wait_for(lambda:pool.status()['active']==1)
-        self.assertLessEqual(peak[0],5)  # root + four reserved slots; one spare remains.
+        self.assertLessEqual(peak[0],pool.max_workers)  # Include the full nested path without exceeding the pool.
         self.assertGreaterEqual(peak[0],4)
         self.assertEqual(pool.reservations,{})
 

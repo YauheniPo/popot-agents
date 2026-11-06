@@ -94,7 +94,7 @@ class WorkflowRun:
         self.meta['fingerprint'] = fingerprint
         if self.meta['no_progress'] >= self.policy['max_no_progress']:
             return self.stop(result, 'workflow_no_progress')
-        if self.remaining() < 1:
+        if self.remaining() < RUNTIME['timeouts']['min_turn_seconds']:
             return self.stop(result, 'workflow_deadline_exhausted')
         if self.meta['turns'] >= self.policy['max_turns']:
             return self.stop(result, 'workflow_turn_limit')
