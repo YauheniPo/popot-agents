@@ -17,7 +17,7 @@ from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.progress import trace_event, trace_output, redact_text
 from popot_agents.skills import prepare_role_config
-from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env, export_artifacts
+from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env, export_artifacts, read_repository_context
 from popot_agents.artifacts import ArtifactError, validate_artifacts
 from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks, child_resolution
 from .context import compact_tool_results
@@ -684,6 +684,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 render_prompt('reporting/final', result_contract=result_contract if state is not None else "")},
                 {'role': 'user', 'content': json.dumps(
                     evidence_transcript(messages, context=user_context), ensure_ascii=False)}]
+        if {'read_file', 'bash'} & set(allowed):
+            context = read_repository_context(timeout_seconds=remaining_seconds())
+            if context:
+                request_messages = [*request_messages, {'role': 'system', 'content':
+                    render_prompt('tools/repository_context', context=context)}]
         body = {"model": model, "messages": request_messages, **model_parameters}
         selected_schemas = [] if final else schemas
         if checkpoint_only and not final:

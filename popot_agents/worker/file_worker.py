@@ -30,6 +30,49 @@ def _atomic_write(path, chunks) -> None:
             os.unlink(temporary)
 
 
+def repository_context() -> dict:
+    root = WORKSPACE_ROOT.resolve()
+    if not root.is_dir():
+        return {}
+    repositories = ([root] if (root / '.git').exists() else
+                    sorted(path for path in root.iterdir()
+                           if path.is_dir() and not path.is_symlink() and (path / '.git').exists()))
+    if not repositories:
+        return {}
+    if len(repositories) != 1:
+        return {'repositories': [str(path.relative_to(root)) for path in repositories[:32]],
+                'selection_required': True, 'truncated': len(repositories) > 32}
+    repository = repositories[0]
+    names = ('AGENTS.md', 'CLAUDE.md', 'GLOSSARY.md', 'GLOSSARY-MAP.md', 'docs/agents/domain.md')
+    limit = MAX_TOOL_OUTPUT // len(names)
+    documents = {}
+    for name in names:
+        path = repository / name
+        key = str(path.relative_to(root))
+        try:
+            if not path.resolve().is_relative_to(repository):
+                documents[key] = {'error': 'document points outside the repository'}
+            elif path.is_file():
+                with path.open(encoding='utf-8', newline='') as source:
+                    content = source.read(limit + 1)
+                documents[key] = {'content': content[:limit], 'truncated': len(content) > limit,
+                                  'next_offset': limit if len(content) > limit else None}
+        except (OSError, UnicodeError, RuntimeError) as exc:
+            documents[key] = {'error': type(exc).__name__}
+    directory = repository / 'docs/adr'
+    adrs = []
+    try:
+        if directory.resolve().is_relative_to(repository) and directory.is_dir():
+            adrs = sorted(str(path.relative_to(root)) for path in directory.glob('*.md')
+                          if path.is_file() and path.resolve().is_relative_to(repository))
+    except (OSError, RuntimeError) as exc:
+        documents[str(directory.relative_to(root))] = {'error': type(exc).__name__}
+    if not documents and not adrs:
+        return {}
+    return {'repository': str(repository.relative_to(root)), 'documents': documents,
+            'adrs': adrs[:32], 'adrs_truncated': len(adrs) > 32}
+
+
 def main() -> None:
     action = sys.argv[1]
     if action == 'save_output':
@@ -41,6 +84,9 @@ def main() -> None:
         sys.stdout.write(str(path.relative_to(WORKSPACE_ROOT.resolve())))
         return
     arguments = json.load(sys.stdin)
+    if action == 'repository_context':
+        sys.stdout.write(json.dumps(repository_context(), ensure_ascii=False))
+        return
     if action == 'export_artifacts':
         from popot_agents.artifacts import collect_artifacts
         sys.stdout.write(json.dumps(collect_artifacts(WORKSPACE_ROOT), ensure_ascii=False))

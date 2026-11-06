@@ -44,7 +44,7 @@ RUN . /build-versions.env \
     && rm /tmp/kubectl.sha256
 WORKDIR /app
 COPY pyproject.toml ./
-RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
+RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.3 \
     && python -m pip install --no-cache-dir --only-binary=:all: --group build --group orchestrator --group ax
 COPY --from=ax-cli /ax /usr/local/bin/ax
 COPY --from=substrate-cli /kubectl-ate /usr/local/bin/kubectl-ate

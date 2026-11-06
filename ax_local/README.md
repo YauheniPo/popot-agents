@@ -1452,8 +1452,8 @@ nginx и базовых образов Python/Go/Node задаются в одн
 При обновлении AX меняйте `AX_VERSION` и
 `AX_COMMIT` вместе и проверяйте совместимость Substrate и наших патчей.
 
-Нужны работающий Docker Desktop с BuildKit и Compose 2.17+, `git`, Go 1.27.1+,
-`kubectl` и Python 3.11+.
+Нужны работающий Docker Desktop с BuildKit и Compose 2.17+, `git`, Go 1.27.3+,
+`kubectl` 1.37.2 и Python 3.11+.
 Команда `python3` в текущем окружении должна запускать Python 3.11 или новее:
 AX-скрипты используют встроенный `tomllib`. `up.sh` проверяет версию Python и
 настройки сборки до запуска контейнеров. В Docker версии читает отдельный

@@ -12,6 +12,7 @@ JSON-экранирования и дополнительных библиоте
 | `memory/` | Использование исторической памяти и извлечение новых записей | [lifecycle.md](memory/lifecycle.md), [extract.md](memory/extract.md) |
 | `harness2/` | Планирование, улучшение инструкций и выбор результата | [planning.md](harness2/planning.md), [improver.md](harness2/improver.md), [selection.md](harness2/selection.md) |
 | `skills/` | Общие правила использования подключённых skills | [references.md](skills/references.md) |
+| `tools/` | Осмотр исходников и контекст рабочего репозитория | [inspection.md](tools/inspection.md), [repository_context.md](tools/repository_context.md) |
 | `holmes/` | Диагностика AX и финальный отчёт Holmes | [diagnosis.md](holmes/diagnosis.md), [final_report.md](holmes/final_report.md) |
 
 Инструкции конкретной роли по-прежнему находятся в `config/roles/<role>.json`.
@@ -46,6 +47,7 @@ Available delegation capability:
 | `memory/extract` | `max_memories` |
 | `harness2/improver` | `comparison` |
 | `harness2/selection` | `subject` |
+| `tools/repository_context` | `context` |
 
 Остальные файлы не содержат параметров. Отсутствующий или пустой файл, пропущенный
 параметр и лишний аргумент вызывают явную ошибку; встроенной запасной копии текста нет.
