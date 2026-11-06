@@ -103,8 +103,13 @@ def main() -> None:
         sys.stdout.write(json.dumps(repository_context(), ensure_ascii=False))
         return
     if action == 'export_artifacts':
-        from popot_agents.artifacts import collect_artifacts
-        sys.stdout.write(json.dumps(collect_artifacts(WORKSPACE_ROOT), ensure_ascii=False))
+        from popot_agents.artifacts import ArtifactError, collect_artifacts
+        try:
+            artifacts = collect_artifacts(WORKSPACE_ROOT)
+        except ArtifactError as exc:
+            sys.stdout.write(json.dumps({'artifact_error': exc.code, 'minimum': exc.minimum}))
+            raise SystemExit(2) from None
+        sys.stdout.write(json.dumps(artifacts, ensure_ascii=False))
         return
     path = workspace_path(arguments["path"])
     if action == 'read_tool_output' and ((WORKSPACE_ROOT / '.tool-results').is_symlink()

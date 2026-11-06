@@ -305,6 +305,11 @@ class FeatureTeamConfigTests(unittest.TestCase):
             self.assertNotIn(removed, roles)
         for name in expected:
             self.assertGreater(len(roles[name]["instructions"]), 80, name)
+            self.assertEqual(roles[name]["agent"], "omniroute_cloud", name)
+        self.assertEqual(roles["tech_lead"]["tools"], ["calculate"])
+        self.assertEqual(roles["tech_lead"]["permissions"], {"internet": True})
+        self.assertEqual(set(roles["tech_lead"]["mcpServers"]), {"cognee"})
+        self.assertIn("backend_engineer", roles["tech_lead"]["allowed_roles"])
         self.assertIn("calculate", roles["analyst"]["tools"])
         self.assertEqual(roles["backend_engineer"]["env_names"],
                          ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GITHUB_PERSONAL_ACCESS_TOKEN", "COGNEE_API_URL", "COGNEE_PASSWORD",

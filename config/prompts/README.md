@@ -42,6 +42,7 @@ Available delegation capability:
 | --- | --- |
 | `delegation/instructions` | `role`, `review_routing`, `description` |
 | `delegation/handoff` | `handoff`, `context` |
+| `reporting/result_contract` | `artifact_count_limit`, `artifact_byte_limit` |
 | `reporting/final` | `result_contract` |
 | `reporting/repair` | `reason`, `result_contract` |
 | `memory/extract` | `max_memories` |

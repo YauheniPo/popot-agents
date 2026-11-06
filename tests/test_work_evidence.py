@@ -119,6 +119,23 @@ class WorkEvidenceTests(unittest.TestCase):
             self.assertEqual(receipt['revision'], sha, command)
             self.assertEqual(receipt['kind'], 'revision')
 
+    def test_clone_revision_requires_the_native_success_receipt_for_the_requested_commit(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd' * 40
+        arguments = {'url': 'https://example.com/repo.git', 'directory': 'checkout', 'commit_sha': sha}
+        output = f'cloned to /workspace/checkout\nverified_commit={sha}\nexit_code=0\n{sha}\n'
+        for name, args, result in (
+                ('git_clone', {k: v for k, v in arguments.items() if k != 'commit_sha'}, output),
+                ('git_clone', {**arguments, 'commit_sha': 'e' * 40}, output),
+                ('git_clone', arguments, output.replace('exit_code=0', 'exit_code=1')),
+                ('git_clone', arguments, output.replace(f'\n{sha}\n', '\n' + 'e' * 40 + '\n')),
+                ('git_clone', arguments, 'git_clone failed: ' + output),
+                ('git_clone', arguments, f'verified_commit={sha}'),
+                ('read_file', {'path': 'old-output.txt'}, output)):
+            with self.subTest(name=name, args=args, result=result):
+                receipt = observe_tool_result(name, args, result, 'clone')
+                self.assertNotIn('revision', receipt or {})
+
     def test_pr_head_receipt_binds_the_observed_pull_request(self):
         from popot_agents.work_evidence import observe_tool_result, evidence_event
         sha = 'e' * 40

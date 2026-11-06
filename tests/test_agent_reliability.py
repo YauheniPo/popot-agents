@@ -36,6 +36,20 @@ class AgentReliabilityTests(unittest.TestCase):
             _, state, _ = self.run_sequence([self.result()], state=state)
         self.assertEqual(state['outcome']['artifacts'], [artifact])
 
+    def test_current_artifact_snapshot_replaces_files_moved_out_during_recovery(self):
+        import hashlib
+        old_content, final_content = 'x' * 16000, 'y' * 16000
+        old = {'name': 'research.log', 'content': old_content,
+               'sha256': hashlib.sha256(old_content.encode()).hexdigest()}
+        final = {'name': 'final.patch', 'content': final_content,
+                 'sha256': hashlib.sha256(final_content.encode()).hexdigest()}
+        with patch('popot_agents.worker.http_harness.export_artifacts', return_value=[old]):
+            _, state, _ = self.run_sequence([self.result('partial', remaining=['finish patch'])])
+        with patch('popot_agents.worker.http_harness.export_artifacts', return_value=[final]):
+            _, state, _ = self.run_sequence([self.result()], state=state)
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual(state['outcome']['artifacts'], [final])
+
     def test_artifact_export_failure_keeps_a_resumable_checkpoint(self):
         from popot_agents.tools import ToolExecutionError
         with patch('popot_agents.worker.http_harness.export_artifacts',
@@ -45,6 +59,46 @@ class AgentReliabilityTests(unittest.TestCase):
         self.assertEqual(state['outcome']['reason'], 'artifact_export_failed')
         self.assertTrue(state['messages'])
         self.assertTrue(state['outcome']['remaining_work'])
+
+    def test_result_contract_supplies_actual_artifact_budget_and_skip_evidence(self):
+        from popot_agents.runtime_config import RUNTIME
+        for budget in (12345, 23456):
+            with self.subTest(budget=budget), patch.dict(RUNTIME['limits'], tool_output_chars=budget):
+                _, _, bodies = self.run_sequence([self.result()])
+            contract = next(message['content'] for message in bodies[0]['messages']
+                            if message['role'] == 'system' and 'remaining_work' in message['content'])
+            self.assertIn(f'{budget} bytes', contract)
+            self.assertIn('16 files', contract)
+            self.assertIn('/workspace/research', contract)
+            self.assertIn('skip reasons', contract)
+            self.assertIn('count differences', contract)
+
+    def test_artifact_recovery_reports_budget_and_preserves_specific_error(self):
+        from popot_agents.runtime_config import RUNTIME
+        from popot_agents.tools import ToolExecutionError
+        error = 'Text artifacts exceed the handoff byte limit'
+        with patch.dict(RUNTIME['limits'], tool_output_chars=12345), \
+             patch('popot_agents.worker.http_harness.export_artifacts',
+                   side_effect=ToolExecutionError(error)):
+            _, state, _ = self.run_sequence([self.result()])
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertIn(error, state['outcome']['errors'])
+        recovery = ' '.join(state['outcome']['remaining_work'])
+        self.assertIn('12345 bytes', recovery)
+        self.assertIn('/workspace/research', recovery)
+
+    def test_fileless_coordinator_delegates_artifact_handling(self):
+        _, _, bodies = self.run_sequence([self.result()],
+            role={'name': 'tech_lead', '_workflow_coordinator': True, 'tools': []})
+        instructions = '\n'.join(message['content'] for message in bodies[0]['messages']
+                                 if message['role'] == 'system')
+        self.assertIn('A role without file tools', instructions)
+        self.assertIn('source session ID', instructions)
+        self.assertIn('delegate file-based verification', instructions)
+        self.assertIn('delegate_task/await_tasks', instructions)
+        self.assertNotIn('get_chat(', instructions)
+        tool_names = {item['function']['name'] for item in bodies[0].get('tools', [])}
+        self.assertFalse({'bash', 'read_file', 'write_file'} & tool_names)
 
     def test_new_run_does_not_reuse_previous_run_child_failure(self):
         old_run, new_run = 'a' * 32, 'b' * 32

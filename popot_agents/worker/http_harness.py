@@ -18,11 +18,12 @@ from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.progress import trace_event, trace_output, redact_text
 from popot_agents.skills import prepare_role_config
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env, export_artifacts, read_repository_context
-from popot_agents.artifacts import ArtifactError, validate_artifacts
-from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks, child_resolution
+from popot_agents.artifacts import ArtifactError, MAX_ARTIFACTS, validate_artifacts
+from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks
+from popot_agents.child_results import ChildResults
 from .context import compact_tool_results
 from . import mcp_client
-from .delegation_policy import (available_roles, completed_answer, delegation_instructions,
+from .delegation_policy import (available_roles, delegation_instructions,
                                 handoff_task, publication_policy, check_publication_owner)
 from .verification import (observed_revision, acceptance_revision, requested_pull_request,
                           verified_roles)
@@ -312,10 +313,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         allowed = [*allowed, 'read_tool_output']
         schemas.append(TOOL_SCHEMAS['read_tool_output'])
     turn_id = uuid.uuid4().hex
-    failed_delegations = {tuple(key): value for key, value in state.get('failed_delegations', [])} if resuming else {}
-    completed_delegations = dict(state.get('completed_delegations', {})) if resuming else {}
+    child_results = ChildResults(state if resuming else None)
+    failed_delegations = child_results.failed
+    completed_delegations = child_results.completed
     child_recoveries = dict(state.get('child_recoveries', {})) if resuming else {}
-    resolved_delegations = list(state.get('resolved_delegations', [])) if resuming else []
+    resolved_delegations = child_results.resolved
     tool_evidence = list(state.get('tool_evidence', [])) if resuming else []
     saved_artifacts = {a['name']: a for a in state.get('outcome', {}).get('artifacts', [])} if resuming else {}
     delegated_work_finished = False
@@ -345,7 +347,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
              'Return your implementation, artifact/ref/diff, revision and actual checks to that owner. '
              'The owner arranges independent code review and QA; do not start duplicate verification children. '
              'Your completed subtask does not imply acceptance of the whole workflow.')})
-    result_contract = render_prompt('reporting/result_contract')
+    result_contract = render_prompt('reporting/result_contract', artifact_count_limit=MAX_ARTIFACTS,
+                                   artifact_byte_limit=RUNTIME['limits']['tool_output_chars'])
     if state is not None:
         messages.append({'role': 'system', 'content': result_contract})
     if delegation_prompt:
@@ -535,15 +538,19 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if resolved_delegations:
             outcome['resolved_delegations'] = resolved_delegations
         try:
-            artifacts = {**saved_artifacts, **{a['name']: a for a in export_artifacts(
-                timeout_seconds=max(.1, deadline - time.monotonic()))}}
+            artifacts = {a['name']: a for a in export_artifacts(
+                timeout_seconds=max(.1, deadline - time.monotonic()))} or dict(saved_artifacts)
             validate_artifacts(list(artifacts.values()))
+            saved_artifacts.clear()
             saved_artifacts.update(artifacts)
         except (ArtifactError, ToolExecutionError) as exc:
             outcome.update(status='partial', reason='artifact_export_failed')
             outcome['errors'].append(str(exc))
-            outcome['remaining_work'].append('Save complete UTF-8 deliverables as plain files in /workspace/artifacts '
-                'within the handoff limits before completing; the sandbox must remain resumable')
+            outcome['remaining_work'].append(
+                f'Fix the artifact export error before completing: keep at most {MAX_ARTIFACTS} plain UTF-8 '
+                f'files and {RUNTIME["limits"]["tool_output_chars"]} bytes in total in /workspace/artifacts. '
+                'Move research inputs, raw logs and duplicate outputs to /workspace/research; '
+                'preserve the complete final deliverables.')
             status = 'partial'
         if saved_artifacts:
             outcome['artifacts'] = list(saved_artifacts.values())
@@ -551,15 +558,15 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             outcome['remaining_work'] = ['Task completeness is unverified']
         if state is not None:
             checkpoint = {'messages': [*messages, {'role': 'assistant', 'content': answer}],
-                          'failed_delegations': [[list(key), value] for key, value in failed_delegations.items()],
-                          'completed_delegations': completed_delegations if status != 'completed' else {},
+                          **child_results.snapshot(),
                           'child_recoveries': child_recoveries,
-                          'resolved_delegations': resolved_delegations,
                           'tool_evidence': tool_evidence,
                           'included_intervention_ids': sorted(included_intervention_ids),
                           'intervention_ids': sorted(delivered_intervention_ids),
                           'user_updates': user_updates,
                           'outcome': outcome}
+            if status == 'completed':
+                checkpoint['completed_delegations'] = {}
             if run_id:
                 checkpoint['run_id'] = run_id
             if requested_wait:
@@ -999,64 +1006,14 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                            error_type=type(exc).__name__)
                     raise
                 if delegation_key is not None:
-                    old_failure = failed_delegations.get(delegation_key) or next((v for v in failed_delegations.values()
-                        if arguments.get('session_id') and v.get('session_id') == arguments['session_id']
-                        and v.get('role') == delegation_key[0]), None)
                     expected_revision = revision or (run_context or {}).get('target_revision') or acceptance_revision(
                         list(completed_delegations.values()), tool_evidence, requested_pull_request(user_context))
-                    try:
-                        completed_answer(output, delegation_key[0], session_id=arguments.get('session_id'))
-                        if old_failure:
-                            resolution = child_resolution(old_failure.get('previous_failure', old_failure),
-                                json.loads(output), expected_revision, require_evidence=state is not None)
-                    except RuntimeError as exc:
-                        try:
-                            child = json.loads(output)
-                        except (TypeError, ValueError):
-                            child = {}
-                        child_session = arguments.get('session_id') or (
-                            child.get('sessionId') if isinstance(child, dict) else None)
-                        previous = {}
-                        if arguments.get('session_id'):
-                            for key, value in list(failed_delegations.items()):
-                                if key[0] == delegation_key[0] and value.get('session_id') == child_session:
-                                    previous = failed_delegations.pop(key)
-                        pending = isinstance(child, dict) and child.get('pending') is True
-                        failure = {**previous, 'pending':pending, 'error': str(exc),
-                            'role': delegation_key[0],
-                            'session_id': child_session,
-                            'status': child.get('outcome', {}).get('status') if isinstance(child, dict)
-                                and isinstance(child.get('outcome'), dict) else None,
-                            'resumable': isinstance(child, dict) and child.get('resumable') is True}
-                        if old_failure and (not old_failure.get('pending') or old_failure.get('previous_failure')):
-                            failure['previous_failure'] = old_failure.get('previous_failure') or {
-                                key: old_failure.get(key) for key in ('role', 'session_id', 'outcome')}
-                        if expected_revision:
-                            failure['target_revision'] = expected_revision
-                        if isinstance(child, dict) and child.get('role') == delegation_key[0] \
-                                and child.get('sessionId') == child_session and isinstance(child.get('answer'), str) \
-                                and child['answer'].strip():
-                            failure['answer'] = child['answer']
-                            failure['outcome'] = child['outcome'] if isinstance(child.get('outcome'), dict) else {}
-                        if old_failure and failure.get('outcome', {}).get('status') == 'completed':
-                            failure.update(status='failed', resumable=False)
-                            failure['outcome'] = {**failure['outcome'], 'status': 'failed',
-                                'reason': 'child_reconciliation_invalid', 'errors': [str(exc)],
-                                'remaining_work': ['Verify the required revision and remaining deliverables']}
-                        failed_delegations[delegation_key] = failure
-                    else:
-                        completed_child = json.loads(output)
-                        if old_failure:
-                            resolved_delegations.append(resolution)
-                            resolved_delegations[:] = resolved_delegations[-16:]
-                            _trace('child_reconciled', session_id=resolution['session_id'], revision=resolution['revision'])
-                        delegation_succeeded = True
-                        completed_delegations[completed_child['sessionId']] = completed_child
-                        failed_delegations.pop(delegation_key, None)
-                        session_id = arguments.get('session_id')
-                        if session_id:
-                            failed_delegations = {key: value for key, value in failed_delegations.items()
-                                if not (key[0] == delegation_key[0] and value.get('session_id') == session_id)}
+                    completed_child, resolution = child_results.record_response(
+                        delegation_key, output, session_id=arguments.get('session_id'),
+                        revision=expected_revision, require_evidence=state is not None)
+                    delegation_succeeded = completed_child is not None
+                    if resolution:
+                        _trace('child_reconciled', session_id=resolution['session_id'], revision=resolution['revision'])
                 if (name == 'delegate_task' and delegation_scope == 'whole_task' and delegation_succeeded
                         and not failed_delegations
                         and isinstance(completed_child.get('outcome'), dict)

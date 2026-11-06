@@ -195,6 +195,16 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
         [sys.executable, "-I", str(Path(__file__).parent / "worker" / "file_worker.py"),
          action], **options)
     if completed.returncode != 0:
+        if action == 'export_artifacts' and completed.returncode == 2:
+            from popot_agents.artifacts import artifact_error_message
+            try:
+                diagnostic = json.loads(completed.stdout)
+            except ValueError:
+                diagnostic = None
+            if isinstance(diagnostic, dict):
+                message = artifact_error_message(diagnostic.get('artifact_error'), diagnostic.get('minimum'))
+                if message:
+                    raise ToolExecutionError('Artifact export failed: ' + message)
         if action == 'read_tool_output' and b'No such file or directory' in completed.stderr:
             raise ToolExecutionError('saved tool output is unavailable in this workspace; '
                                      'verify the source again without repeating writes')

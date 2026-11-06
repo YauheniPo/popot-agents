@@ -51,7 +51,8 @@ class PromptConfigTests(unittest.TestCase):
     def test_completion_prompts_keep_actionable_findings_in_the_workflow(self):
         from popot_agents.prompts import render_prompt
         coordinator = render_prompt('workflow/coordinator')
-        contract = render_prompt('reporting/result_contract')
+        contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
+                                 artifact_byte_limit=24000)
         final = render_prompt('reporting/final', result_contract=contract)
         for prompt in (coordinator, contract, final):
             self.assertIn('remaining_work', prompt)

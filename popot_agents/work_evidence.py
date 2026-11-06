@@ -549,6 +549,14 @@ def observe_tool_result(name, arguments, output, call_id):
     error = bool(data.get('isError') or data.get('error') or exit_code not in (None, 0))
     status, kind, summary = 'observed', None, ''
     revision = None
+    if name == 'git_clone':
+        # Native git_clone verifies HEAD before emitting this receipt. Do not
+        # infer a revision from requested arguments or arbitrary clone logs.
+        clone = re.fullmatch(r'cloned to [^\n]+\nverified_commit=('+_SHA+r')\nexit_code=0\n\1\n?', text)
+        requested = arguments.get('commit_sha')
+        if clone and isinstance(requested, str) and clone[1].lower() == requested.lower():
+            revision = clone[1].lower()
+            exit_code, kind, summary = 0, 'revision', 'Git clone HEAD verified against the requested commit.'
     if name == 'bash':
         checks = re.search(r'Ran \d+ tests?(?: in [\d.]+s)?|\d+ passed(?:, \d+ failed)?|FAILED \([^\n)]{0,80}\)|# pass \d+', text)
         if checks and re.search(r'\b(?:pytest|unittest)\b|\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b|\bnode\b[^\n]*--test', command):

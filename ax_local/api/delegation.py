@@ -23,9 +23,11 @@ from dataclasses import dataclass, field
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.artifacts import validate_artifacts
-from popot_agents.work_evidence import evidence_event, child_resolution, MAX_RECEIPTS
+from popot_agents.child_results import ChildResults
+from popot_agents.work_evidence import evidence_event, MAX_RECEIPTS
 from ax_local.config import AX_CONFIG
-from popot_agents.orchestrator.workflow import WorkflowRun, include_interventions
+from popot_agents.orchestrator.workflow import WorkflowRun
+from popot_agents.orchestrator.workflow_execution import run_child
 from popot_agents.workflow_config import role_policy
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
 from popot_agents.progress import emit_progress, observe_progress, scoped_progress, forward_progress
@@ -357,35 +359,12 @@ class DelegationService:
             receipts[sid] = receipt
         updated = json.loads(json.dumps(checkpoint))
         updated.pop('await_tasks',None)
-        failed = []
-        for key, value in updated.get('failed_delegations', []):
-            receipt = receipts.get(value.get('session_id'))
-            if receipt is None:
-                failed.append([key,value]);continue
-            if key[0] != receipt['role']:
-                raise AgentRunError('Pending child role mismatch')
-            if receipt['outcome'].get('status') == 'completed' and value.get('previous_failure'):
-                try:
-                    resolution = child_resolution(value['previous_failure'], receipt, value.get('target_revision'))
-                except RuntimeError as exc:
-                    receipt.update(resumable=False, error=str(exc))
-                    receipt['outcome'] = {**receipt['outcome'], 'status': 'failed',
-                        'reason': 'child_reconciliation_invalid', 'errors': [str(exc)],
-                        'remaining_work': ['Verify the required revision and remaining deliverables']}
-                else:
-                    resolutions = updated.setdefault('resolved_delegations', [])
-                    resolutions.append(resolution)
-                    resolutions[:] = resolutions[-16:]
-            if receipt['outcome'].get('status') != 'completed':
-                failed.append([key,{**value,'pending':False, 'answer':receipt['answer'],
-                    'status':receipt['outcome'].get('status'),
-                    'outcome':receipt['outcome'],'resumable':receipt['resumable'],
-                    'error':receipt.get('error','Child returned incomplete work')}])
-        updated['failed_delegations'] = failed
-        completed = updated.setdefault('completed_delegations', {})
-        for sid, receipt in receipts.items():
-            if receipt['outcome'].get('status') == 'completed':
-                completed[sid] = receipt
+        children = ChildResults(checkpoint)
+        try:
+            receipts = children.deliver_reports(receipts)
+        except ValueError as exc:
+            raise AgentRunError(str(exc)) from exc
+        updated.update(children.snapshot())
         replaced = set()
         for message in updated.get('messages', []):
             if message.get('role') != 'tool':continue
@@ -1035,52 +1014,7 @@ class DelegationService:
             # Adapters without checkpoint support retain their one-turn contract.
             if not hasattr(job.chat, 'get_checkpoint'):
                 workflow = None
-            message = job.task
-            while True:
-                if workflow:
-                    if workflow.remaining() < RUNTIME['timeouts']['min_turn_seconds']:
-                        result = workflow.stop({'answer': 'No budget remains for another worker turn',
-                                                'outcome': workflow.meta.get('outcome')},
-                                               'workflow_deadline_exhausted')
-                        break
-                    workflow.begin()
-                    job.config['_ax_delegation']['workflow'] = {
-                        'state': 'running', 'turns': workflow.meta['turns']}
-                    self._save(job, 'TASK_STATE_WORKING')
-                emit_progress('turn_started')
-                result = job.chat.send(message, timeout_seconds=min(
-                    self._remaining(job), policy['turn_seconds']) if workflow else self._remaining(job))
-                intervention_ids = list(dict.fromkeys([*intervention_ids, *result.get('interventionIds', [])]))
-                meta = job.config['_ax_delegation']
-                meta['scope_assignments'] = include_interventions(meta.get('scope_assignments', []),
-                    self.store.recent_interventions(job.session_id), intervention_ids)
-                if workflow:
-                    terminal = workflow.record(result, job.chat.get_checkpoint())
-                    job.config['_ax_delegation']['outcome'] = workflow.meta['outcome']
-                    job.config['_ax_delegation']['outcomeRecordedAt'] = workflow.meta['outcomeRecordedAt']
-                    job.config['_ax_delegation']['workflow'] = {
-                        key: workflow.meta[key] for key in ('state', 'turns')}
-                    if terminal is None:
-                        servers = job.config.get('mcpServers', {})
-                        setup_budget = self.setup_estimate(job.config) + RUNTIME['model']['final_answer_reserve_seconds']
-                        if not job.run.persistent and servers and workflow.remaining() <= setup_budget:
-                            result = {**result, 'outcome': {**result['outcome'],
-                                'reason': 'parent_budget_checkpoint',
-                                'remaining_work': [*result['outcome']['remaining_work'],
-                                    'Resume this session on a fresh parent turn; budget cannot cover MCP rediscovery']}}
-                            job.config['_ax_delegation']['workflow']['state'] = 'checkpoint'
-                            break
-                        job.messages += [{'role': 'user', 'content': message},
-                                         {'role': 'assistant', 'content': result['answer']}]
-                        self._save(job, 'TASK_STATE_WORKING')
-                        if job.run.persistent:
-                            self.await_children(job.session_id, job.chat, job.messages, job.deadline)
-                            workflow.meta['checkpoint'] = job.chat.get_checkpoint()
-                        message = workflow.continuation(compact=bool(getattr(job.chat,'supports_run_context',False)))
-                        emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
-                        continue
-                    result = terminal
-                break
+            result = run_child(self, job, workflow, intervention_ids)
             answer = result['answer']
             outcome = result.get('outcome', {'status': 'completed', 'reason': 'answer_returned'})
             if not isinstance(outcome, dict) or outcome.get('status') not in {'completed', 'partial', 'blocked', 'failed'}:

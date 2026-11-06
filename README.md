@@ -184,7 +184,7 @@ The optional `nous` profile retains its provider-default reasoning setting,
 but Solar Mini 4 is excluded from AX combos after malformed tool arguments in
 the 2026-10-20 experiment.
 Ollama's configured `qwen2.5-coder:14b` does not advertise a separate thinking
-mode. Planner, backend, frontend, code review and QA use `omniroute_cloud` with
+mode. Planner, tech lead, backend, frontend, code review and QA use `omniroute_cloud` with
 `OMNIROUTE_CLOUD_MODEL=ax-ollama`. The AX provider proxy forwards requests to
 OmniRoute, which selects the configured Ollama Cloud targets. Direct profiles
 remain available for explicit assignments.
@@ -268,7 +268,7 @@ Longer snapshot retention also keeps worker slots occupied longer. API restarts
 still do not recover in-flight delegated calls automatically.
 
 Role-specific timeouts are overrides in `config/roles/`, not shared defaults.
-With the current settings, every bundled role gets 900 seconds, the harness gets 885,
+With the current settings, every bundled role gets 900 seconds, the harness gets 865,
 and it reserves up to 120 seconds for its final answer. Changing the shared
 maximum also changes role validation and the AX delegation timeout cap.
 AX route timeout must exceed the shared maximum task timeout plus its response margin.
@@ -526,7 +526,7 @@ The feature team roles are:
 | Role | Responsibility | Built-in tools |
 | --- | --- | --- |
 | `planner` | Discuss requests, draft versioned specs, delegate execution and decide acceptance or rework from specialist evidence | `calculate`, `read_file`, `write_file`; Cognee memory |
-| `tech_lead` | Architecture, contracts, task split and engineering risks | `calculate` |
+| `tech_lead` | Architecture, contracts, task split and acceptance; delegates repository access and execution to specialists | `calculate` |
 | `backend_engineer` | Clone repositories, edit backend code, run commands and inspect Git | `bash`, `read_file`, `write_file`, `git_clone`, `download_file`, `calculate`; Fetch, Git and GitHub MCP |
 | `frontend_engineer` | UI components, state, API integration and accessibility | Workspace, bash/file tools, Fetch/Git and read-only GitHub MCP; Node.js/npm and Python Playwright/Chromium |
 | `code_reviewer` | Independent review of correctness, regressions, security and requirements | GitHub MCP reads and inline PR review comments |
@@ -535,7 +535,7 @@ The feature team roles are:
 | `project_operator` | Analyze local services, model routing, metrics, memory and pods; prepare and apply reviewed local changes | Real Holmes jobs, project inspection/change tools, PromQL and Cognee memory; no shell or worker admin credentials |
 
 The `chat` and `analyst` roles also remain available. `analyst` uses the
-`omniroute_free` profile; planner, backend, frontend, code review, security and QA use `omniroute_cloud`. Change a role's `agent` field to another configured
+`omniroute_free` profile; planner, tech lead, backend, frontend, code review, security and QA use `omniroute_cloud`. Change a role's `agent` field to another configured
 profile if needed, and set that profile's model and credentials in `.env`.
 
 Select any configured role explicitly; its coordination settings determine whether it owns an autonomous workflow.
@@ -959,7 +959,7 @@ Docker profiles `ollama_claude` and `ollama_claude_local` have been removed.
 For routing across free provider models, follow the optional
 [OmniRoute setup for AX](ax_local/README.md#omniroute-для-ax). It uses named
 combos of explicitly selected models, recorded in `config/omniroute/combos.json`.
-Engineers, QA and the reviewer use `ax-ollama`; other configured roles use
+Planner, tech lead, engineers, QA and the reviewer use `ax-ollama`; other configured roles use
 `ax-free`. The launcher provisions the gateway from the repository configuration
 and `.env` secrets before starting AX. Assign those roles to another configured
 profile to run without OmniRoute.

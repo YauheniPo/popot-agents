@@ -11,6 +11,70 @@ from unittest.mock import patch
 
 
 class ArtifactTests(unittest.TestCase):
+    def export_workspace(self, root):
+        from popot_agents import tools
+        if os.geteuid() == 0:
+            os.chown(root, 10001, 10001)
+        with patch.object(tools, 'WORKSPACE_ROOT', root):
+            return tools.export_artifacts(timeout_seconds=3)
+
+    def test_subprocess_export_explains_byte_limit_and_recovers_after_moving_inputs(self):
+        from popot_agents import tools
+        from popot_agents.runtime_config import RUNTIME
+        limit = RUNTIME['limits']['tool_output_chars']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'artifacts'
+            target.mkdir()
+            (target / 'fix.patch').write_text('patch')
+            raw = target / 'research.json'
+            raw.write_bytes(b'x' * (limit + 1))
+            with self.assertRaises(tools.ToolExecutionError) as caught:
+                self.export_workspace(root)
+            message = str(caught.exception)
+            self.assertIn(f'{limit} bytes', message)
+            self.assertIn(f'at least {limit + 1} bytes', message)
+            self.assertIn('outside /workspace/artifacts', message)
+            raw.rename(root / raw.name)
+            self.assertEqual(self.export_workspace(root), [{'name': 'fix.patch', 'content': 'patch',
+                'sha256': hashlib.sha256(b'patch').hexdigest()}])
+
+    def test_subprocess_export_explains_file_count_limit(self):
+        from popot_agents import tools
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'artifacts'
+            target.mkdir()
+            for index in range(17):
+                (target / f'{index}.log').write_text('check')
+            with self.assertRaises(tools.ToolExecutionError) as caught:
+                self.export_workspace(root)
+            self.assertIn('16', str(caught.exception))
+            self.assertIn('at least 17 files', str(caught.exception))
+
+    def test_subprocess_export_explains_utf8_failure_without_file_data(self):
+        from popot_agents import tools
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'artifacts'
+            target.mkdir()
+            (target / 'PRIVATE_FILENAME.log').write_bytes(b'\xffPRIVATE_DATA')
+            with self.assertRaises(tools.ToolExecutionError) as caught:
+                self.export_workspace(root)
+            self.assertIn('UTF-8', str(caught.exception))
+            self.assertNotIn('PRIVATE_DATA', str(caught.exception))
+            self.assertNotIn('PRIVATE_FILENAME', str(caught.exception))
+
+    def test_subprocess_export_does_not_forward_arbitrary_error_output(self):
+        from popot_agents import tools
+        for output in (b'PRIVATE_DATA', b'{"artifact_error":"PRIVATE_DATA"}',
+                       b'{"artifact_error":"byte_limit","minimum":"PRIVATE_DATA"}'):
+            with self.subTest(output=output), patch.object(tools.subprocess, 'run', return_value=
+                    subprocess.CompletedProcess([], 2, stdout=output, stderr=b'PRIVATE_DATA')):
+                with self.assertRaises(tools.ToolExecutionError) as caught:
+                    tools._file_action('export_artifacts', {})
+                self.assertNotIn('PRIVATE_DATA', str(caught.exception))
+
     def test_export_preserves_patch_bytes_and_ignores_other_workspace_files(self):
         from popot_agents.artifacts import collect_artifacts
         with tempfile.TemporaryDirectory() as directory:

@@ -3,6 +3,7 @@
 import json
 import re
 
+from popot_agents.child_results import completed_answer  # Compatibility import for existing callers.
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import ToolInputError
@@ -100,28 +101,3 @@ def handoff_task(task: str, messages: list[dict], role_config: dict) -> str:
                 break
             text = text[:max(0, len(text)-(len(candidate)-limit))]
     return content
-
-
-def completed_answer(output: str, role: str, *, session_id: str | None = None) -> str:
-    try:
-        result = json.loads(output)
-    except (TypeError, ValueError):
-        raise RuntimeError(f'delegation to {role} returned invalid JSON') from None
-    if not isinstance(result, dict):
-        raise RuntimeError(f'delegation to {role} returned an invalid result')
-    session = result.get('sessionId')
-    suffix = f' (sessionId={session})' if isinstance(session, str) and re.fullmatch(r'[0-9a-f]{16}', session) else ''
-    answer = result.get('answer')
-    outcome = result.get('outcome')
-    if (result.get('isError') or result.get('error') or result.get('state') != 'TASK_STATE_COMPLETED'
-            or (session_id is not None and session != session_id)
-            or (outcome is not None and (not isinstance(outcome, dict) or outcome.get('status') != 'completed'
-                                        or outcome.get('errors') or outcome.get('remaining_work')))
-            or result.get('role') != role or result.get('truncated')
-            or not isinstance(answer, str) or not answer.strip() or not suffix):
-        diagnostic = '; '.join(scrub(result[key])[:500] for key in ('state', 'error')
-                               if isinstance(result.get(key), str) and result[key])
-        raise RuntimeError(f'delegation to {role} did not return a complete successful answer{suffix}; '
-                           + (diagnostic + '; ' if diagnostic else '')
-                           + 'inspect the child result before retrying external actions')
-    return f'{role} · sessionId: {session}\n\n{answer.strip()}'

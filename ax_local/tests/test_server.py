@@ -112,9 +112,9 @@ class AxServerTests(unittest.TestCase):
         self.assertEqual(roles['analyst']['agent'], 'omniroute_free')
         runners = create.call_args.args[0]
         self.assertEqual(set(runners), {'omniroute_free', 'omniroute_cloud', 'omniroute_ops'})
-        for name in ('backend_engineer', 'code_reviewer', 'qa_engineer', 'planner'):
+        for name in ('backend_engineer', 'code_reviewer', 'qa_engineer', 'planner', 'tech_lead'):
             self.assertEqual(roles[name]['agent'], 'omniroute_cloud')
-        for name in ('chat', 'tech_lead', 'cron_demo'):
+        for name in ('chat', 'cron_demo'):
             self.assertEqual(roles[name]['agent'], 'omniroute_free')
         self.assertEqual(runners['omniroute_free'].model, 'ax-free')
         self.assertEqual(runners['omniroute_cloud'].model, 'ax-ollama')
