@@ -112,12 +112,19 @@ class AsyncServiceTests(unittest.TestCase):
                     'failed_delegations':[[['backend_engineer',name],{'session_id':sid,'pending':True}]
                         for sid,name in [(first['id'],'first'),(second['id'],'second')]]}
                 def restore(inner,history,**options):inner.checkpoint=options['checkpoint']
+                runner=type('Runner',(),{'worker_pool':object()})()
+                after_turn_calls=0
+                def after_turn(inner):
+                    inner.after_turn_calls=inner.after_turn_calls+1
+                def resume(inner,**options):inner.resume_calls=options['timeout_seconds']
             parent=Parent();started=time.monotonic()
             self.service.await_children(self.parent,parent,[],time.monotonic()+1)
             self.assertLess(time.monotonic()-started,.8)
             self.assertIn(first['id'],parent.checkpoint['completed_delegations'])
             self.assertNotIn(second['id'],parent.checkpoint['completed_delegations'])
             self.assertEqual(parent.checkpoint['failed_delegations'][0][1]['session_id'],second['id'])
+            self.assertEqual(parent.after_turn_calls,1)
+            self.assertGreater(parent.resume_calls,0)
             second_release.set();self.wait_task(second['id'])
 
     def test_backend_and_qa_run_concurrently_in_the_same_workflow(self):

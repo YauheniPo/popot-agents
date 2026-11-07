@@ -112,6 +112,29 @@ class WorkerPoolScalingTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(errors), 2)
 
+    def test_repeated_demand_for_an_admitted_worker_is_idempotent(self):
+        self.acquire('a')
+        self.acquire('a')
+        self.assertEqual(self.pool.status()['active'], 1)
+
+    def test_duplicate_demand_for_a_waiting_worker_is_rejected(self):
+        self.backend.ready = 0
+        with self.pool.condition:
+            self.pool.ready = 0
+        def acquire_same():
+            try:
+                self.pool.acquire('same', deadline=2)
+            except TimeoutError:
+                pass
+        thread = threading.Thread(target=acquire_same)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        wait_for(lambda: self.pool.status()['pending'] == 1)
+        with self.assertRaisesRegex(RuntimeError, 'duplicate AX worker demand'):
+            self.acquire('same')
+        self.now[0] = 3
+        thread.join(2)
+
 
 if __name__ == '__main__':
     unittest.main()
