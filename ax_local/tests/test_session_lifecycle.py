@@ -250,16 +250,18 @@ class AxLifecycleTests(unittest.TestCase):
 
     def test_pool_failure_while_acquiring_releases_the_queue_reservation(self):
         self.runner.worker_pool = RecordingWorkerPool(error=RuntimeError('pool down'))
+        deadline = time.monotonic() + 5
         with self.assertRaisesRegex(RuntimeError, 'pool down'):
-            self.runner.start_chat('0123456789abcdef', deadline=time.monotonic() + 5)
+            self.runner.start_chat('0123456789abcdef', deadline=deadline)
         self.assertEqual(self.runner.worker_queue.status()['active'], 0)
 
     def test_failed_workspace_start_releases_the_pooled_worker(self):
         self.runner.worker_pool = RecordingWorkerPool()
+        deadline = time.monotonic() + 5
         with patch.object(self.runner, '_start_reserved_chat',
                           side_effect=RuntimeError('workspace failed')):
             with self.assertRaisesRegex(RuntimeError, 'workspace failed'):
-                self.runner.start_chat('0123456789abcdef', deadline=time.monotonic() + 5)
+                self.runner.start_chat('0123456789abcdef', deadline=deadline)
         self.assertEqual(self.runner.worker_pool.released,
                          ['popot-chat-0123456789abcdef'])
 

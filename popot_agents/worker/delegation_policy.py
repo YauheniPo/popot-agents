@@ -19,25 +19,37 @@ _GIT_VALUE_OPTIONS = {'-c', '-C', '--git-dir', '--work-tree', '--namespace',
                       '--exec-path', '--config-env'}
 
 
+def _segment_words(segment: str) -> list[str]:
+    """Split one shell segment into words, tolerating unbalanced quotes."""
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    return [word for token in tokens for word in token.split()]
+
+
+def _git_subcommand(words) -> str | None:
+    """Return the first non-option word, skipping options that take a value."""
+    options = iter(words)
+    for word in options:
+        if not word.startswith('-'):
+            return word
+        if word in _GIT_VALUE_OPTIONS:
+            next(options, None)
+    return None
+
+
 def _git_subcommands(command: str) -> set[str]:
     """Return the git subcommands a shell command runs, skipping global options."""
     subcommands = set()
     for segment in re.split(r'\|\||&&|[;|\n]', command):
-        try:
-            tokens = shlex.split(segment)
-        except ValueError:
-            tokens = segment.split()
-        words = [word for token in tokens for word in token.split()]
+        words = _segment_words(segment)
         for index, word in enumerate(words):
             if word.rsplit('/', 1)[-1] != 'git':
                 continue
-            index += 1
-            while index < len(words):
-                option = words[index]
-                if not option.startswith('-'):
-                    subcommands.add(option)
-                    break
-                index += 2 if option in _GIT_VALUE_OPTIONS else 1
+            subcommand = _git_subcommand(words[index + 1:])
+            if subcommand:
+                subcommands.add(subcommand)
     return subcommands
 
 

@@ -405,8 +405,9 @@ class WorkerQueueReservationTests(unittest.TestCase):
         self.addCleanup(queue.close)
         lease = queue.acquire('busy')
         self.addCleanup(queue.release, 'busy', lease)
+        deadline = time.monotonic() - 1
         with self.assertRaises(WorkerCapacityTimeout):
-            queue.reserve_full('wf', 1, deadline=time.monotonic() - 1)
+            queue.reserve_full('wf', 1, deadline=deadline)
 
 
 if __name__ == '__main__':
