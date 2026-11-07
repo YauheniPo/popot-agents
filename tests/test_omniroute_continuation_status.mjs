@@ -54,3 +54,18 @@ test('pinned route and browser transformations are guarded and idempotent',async
   assert.equal(page(patched),patched);
   assert.throws(()=>page('unsupported page'));
 });
+test('AX index derives running, outcome, fallback and workflow states',async()=>{
+  const {axIndexFrom}=await import('../ax_local/omniroute_continuation_status.mjs');
+  const index=axIndexFrom({chats:[
+    {sessionId:'running',status:'running'},
+    {sessionId:'outcome',status:'idle',outcomeStatus:'completed'},
+    {sessionId:'fallback',status:'idle'},
+    {sessionId:'workflow',workflow:{state:'blocked',reason:'limit',runId:'r'},runStates:{'1':'running'}},
+  ]});
+  assert.equal(index.get('running').status,'running');
+  assert.equal(index.get('outcome').status,'completed');
+  assert.equal(index.get('fallback').status,'idle');
+  assert.equal(index.get('workflow').status,'blocked');
+  assert.equal(index.get('workflow').reason,'limit');
+  assert.equal(index.get('workflow:1').status,'running');
+});
