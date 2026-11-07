@@ -66,6 +66,7 @@ class ProjectLayoutTests(unittest.TestCase):
         self.assertEqual(services['api']['build']['additional_contexts'], {
             'python-base': 'docker-image://' + BUILD_VERSIONS['PYTHON_IMAGE'],
             'go-base': 'docker-image://' + BUILD_VERSIONS['GO_IMAGE']})
+        self.assertEqual(services['api']['build']['args']['GO_IMAGE'], BUILD_VERSIONS['GO_IMAGE'])
         self.assertEqual(services['mcp-server']['build']['additional_contexts'], {
             'python-base': 'docker-image://' + BUILD_VERSIONS['PYTHON_IMAGE']})
         self.assertEqual(services['api']['environment']['POPOT_DB_PASSWORD'], 'layout-test')
@@ -144,3 +145,12 @@ class ProjectLayoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApiImagePinTests(unittest.TestCase):
+    def test_api_dockerfile_pins_the_go_image_and_keeps_the_default_in_sync(self):
+        from ax_local.cluster.build_versions import BUILD_VERSIONS
+        dockerfile = (Path(__file__).resolve().parents[1]
+                      / 'ax_local/docker/api.Dockerfile').read_text(encoding='utf-8')
+        self.assertIn(f"ARG GO_IMAGE={BUILD_VERSIONS['GO_IMAGE']}", dockerfile)
+        self.assertIn('FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS substrate-cli', dockerfile)

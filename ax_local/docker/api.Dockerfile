@@ -1,3 +1,6 @@
+# Named build contexts cannot carry a tag, so the pinned Go image is also
+# passed as an argument to keep every FROM reference versioned.
+ARG GO_IMAGE=golang:1.27.1-bookworm
 FROM --platform=$BUILDPLATFORM python-base AS build-versions
 WORKDIR /build
 COPY pyproject.toml ./
@@ -16,7 +19,7 @@ WORKDIR /src/ax
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax ./cmd/ax
 
-FROM --platform=$BUILDPLATFORM go-base AS substrate-cli
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS substrate-cli
 ARG TARGETOS
 ARG TARGETARCH
 COPY --from=build-versions /build-versions.env /build-versions.env

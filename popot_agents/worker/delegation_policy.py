@@ -2,6 +2,7 @@
 
 import json
 import re
+import shlex
 
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME
@@ -14,12 +15,37 @@ class DelegationContextError(ToolInputError):
     retryable = False
 
 
+_GIT_VALUE_OPTIONS = {'-c', '-C', '--git-dir', '--work-tree', '--namespace',
+                      '--exec-path', '--config-env'}
+
+
+def _git_subcommands(command: str) -> set[str]:
+    """Return the git subcommands a shell command runs, skipping global options."""
+    subcommands = set()
+    for segment in re.split(r'\|\||&&|[;|\n]', command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        words = [word for token in tokens for word in token.split()]
+        for index, word in enumerate(words):
+            if word.rsplit('/', 1)[-1] != 'git':
+                continue
+            index += 1
+            while index < len(words):
+                option = words[index]
+                if not option.startswith('-'):
+                    subcommands.add(option)
+                    break
+                index += 2 if option in _GIT_VALUE_OPTIONS else 1
+    return subcommands
+
+
 def check_publication_owner(name, arguments, context):
     """Coordinate branch publication; role credentials remain the security boundary."""
     if context and context.get('role') == 'code_reviewer' and name == 'bash':
         command = arguments.get('command', '')
-        if isinstance(command, str) and re.search(
-                r'\bgit(?:\s+(?:-c|-C)\s+\S+)*\s+commit\b', command):
+        if isinstance(command, str) and 'commit' in _git_subcommands(command):
             raise ToolInputError('The code reviewer cannot create commits; delegate authorized fixes to backend_engineer.')
     if context is None or 'publication_owner' not in context or context.get('publication_owner') == context.get('session_id'):
         return
@@ -28,8 +54,9 @@ def check_publication_owner(name, arguments, context):
         'create_pull_request','merge_pull_request','update_pull_request_branch'}
     if name == 'bash':
         command = arguments.get('command','')
-        branch_write = isinstance(command,str) and bool(re.search(
-            r'\bgit(?:\s+(?:-c|-C)\s+\S+)*\s+push\b|\bgh\s+pr\s+(?:create|merge)\b',command))
+        branch_write = isinstance(command,str) and bool(
+            'push' in _git_subcommands(command)
+            or re.search(r'\bgh\s+pr\s+(?:create|merge)\b',command))
     if branch_write:
         raise ToolInputError('Branch publication belongs to integration owner '+
             str(context.get('publication_owner') or 'not assigned')+
