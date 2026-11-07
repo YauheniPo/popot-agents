@@ -22,6 +22,18 @@ test('AX child, CI and tool waits are distinguished from an unowned stalled requ
   assert.equal(blocked.continuationCode,'workflow_turn_limit');
   assert.match(blocked.continuationReason,/workflow_turn_limit/);
 });
+test('Non-string and malformed AX reasons are not exposed as codes',()=>{
+  const s=conversationStatus({...args,ax:{status:'blocked',reason:42}},artifact({}));
+  assert.equal(s.continuationState,'blocked');
+  assert.equal(s.continuationCode,null);
+  assert.equal(s.continuationReason,'AX workflow blocked.');
+  const bad=conversationStatus({...args,ax:{status:'failed',reason:'Not a code!'}},artifact({}));
+  assert.equal(bad.continuationCode,null);
+  assert.equal(bad.continuationReason,'AX workflow failed: Not a code!');
+  const ok=conversationStatus({...args,ax:{status:'failed',reason:'workflow_turn_limit'}},artifact({}));
+  assert.equal(ok.continuationCode,'workflow_turn_limit');
+});
+
 test('Responses output and unavailable artifacts retain honest states',()=>{
   assert.equal(conversationStatus(args,{pipeline:{clientResponse:{status:'completed',output:[{type:'message'}]}}}).continuationState,'completed');
   assert.equal(conversationStatus(args,null).continuationState,'unknown');
