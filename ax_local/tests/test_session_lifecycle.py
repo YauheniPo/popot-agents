@@ -330,6 +330,16 @@ class AxLifecycleTests(unittest.TestCase):
         remote.assert_not_called()
         self.assertEqual(self.runner.worker_pool.released, [self.chat.container_name])
 
+    def test_suspend_without_a_worker_pool_keeps_the_task_available(self):
+        self.assertIsNone(self.runner.worker_pool)
+        with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'task_status', return_value=('Suspended', None)), \
+             patch.object(self.runner, 'remote') as remote:
+            self.chat.after_turn()
+        self.assertEqual(self.chat.status, 'suspended')
+        self.assertTrue(self.chat.is_alive())
+        remote.assert_not_called()
+
     def test_next_message_resumes_then_waits_for_worker_before_sending(self):
         self.chat.suspended = True
         self.runner.worker_pool = RecordingWorkerPool()

@@ -311,6 +311,11 @@ class PublicationOwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolInputError, 'reviewer'):
             check_publication_owner('bash',{'command':'git -C repo commit -m fix'},context)
 
+    def test_reviewer_can_inspect_history_but_not_commit(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        check_publication_owner('bash',{'command':'git log --grep=commit'},context)
+
     def test_non_owner_cannot_publish_branch_but_can_prepare_and_test(self):
         from popot_agents.worker.delegation_policy import check_publication_owner
         from popot_agents.tools import ToolInputError

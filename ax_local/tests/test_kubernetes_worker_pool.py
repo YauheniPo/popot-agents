@@ -16,7 +16,8 @@ def completed(command, payload):
 
 
 class KubernetesWorkerPoolTests(unittest.TestCase):
-    def backend(self, *, pod_ready=True, worker_ip='10.0.0.1'):
+    def backend(self, *, pod_ready=True, worker_ip='10.0.0.1',
+                actor_pool='counter', actor_namespace=NAMESPACE):
         self.calls = []
 
         def run(command, **kw):
@@ -33,8 +34,8 @@ class KubernetesWorkerPoolTests(unittest.TestCase):
             if '-A' in command:
                 return completed(command, {'actors': [
                     {'metadata': {'name': 'actor-1'},
-                     'status': {'workerAssignment': {'workerNamespace': NAMESPACE,
-                                                     'workerPool': 'counter'}}}]})
+                     'status': {'workerAssignment': {'workerNamespace': actor_namespace,
+                                                     'workerPool': actor_pool}}}]})
             return completed(command, {'workers': [
                 {'workerPodUid': 'u0', 'workerPod': 'popot-workers-0',
                  'workerNamespace': NAMESPACE, 'workerPool': 'counter',
@@ -53,6 +54,11 @@ class KubernetesWorkerPoolTests(unittest.TestCase):
         self.assertEqual(names, ['kubectl', 'kubectl', 'kubectl-ate', 'kubectl-ate'])
         self.assertTrue(all('--kubeconfig=/tmp/kubeconfig' in command for command, _ in self.calls))
         self.assertIn('-A', self.calls[-1][0])
+
+    def test_inspect_ignores_actors_assigned_to_another_pool(self):
+        backend, run = self.backend(actor_pool='other')
+        with mock.patch('subprocess.run', side_effect=run):
+            self.assertEqual(backend.inspect()['busy'], set())
 
     def test_inspect_ignores_unready_pods_and_workers_with_another_ip(self):
         backend, run = self.backend(pod_ready=False)
