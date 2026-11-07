@@ -324,3 +324,9 @@ class PublicationOwnershipTests(unittest.TestCase):
         check_publication_owner('mcp__github__pull_request_review_write',{},context)
         check_publication_owner('bash',{'command':'git push origin feature'},
             {'session_id':'b'*16,'publication_owner':'b'*16})
+
+
+class GitSubcommandQuoteFallbackTests(unittest.TestCase):
+    def test_unbalanced_quotes_fall_back_to_whitespace_splitting(self):
+        from popot_agents.worker.delegation_policy import _git_subcommands
+        self.assertEqual(_git_subcommands('git commit -m "unclosed'), {'commit'})

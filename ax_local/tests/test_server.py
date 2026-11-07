@@ -1,10 +1,14 @@
 import io
 import json
 import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from ax_local.api import server as server_module
 from ax_local.api.server import kind_control_plane_host, make_server
 
 
@@ -243,6 +247,108 @@ class AxServerTests(unittest.TestCase):
                         self.assertEqual(calls[0][key], value)
             finally:
                 runner.shutdown_worker_queue()
+
+
+class FakeCron:
+    def __init__(self):
+        self.closed = 0
+
+    def recover_interrupted(self):
+        pass
+
+    def start(self):
+        pass
+
+    def close(self):
+        self.closed += 1
+
+
+class FakeProxy:
+    def __init__(self):
+        self.shutdowns = 0
+
+    def shutdown(self):
+        self.shutdowns += 1
+
+    def server_close(self):
+        pass
+
+
+class FakeServer:
+    def __init__(self, delegation=None):
+        self.provider_routes = {'a2a': SimpleNamespace(name='a2a')}
+        self.worker_managers = [SimpleNamespace(recover_workers=lambda: None,
+                                                worker_pool=None)]
+        self.delegation = delegation
+        self.cron = FakeCron()
+        self.server_address = ('127.0.0.1', 8080)
+        self.server_port = 8080
+
+    def serve_forever(self):
+        raise KeyboardInterrupt
+
+    def server_close(self):
+        pass
+
+
+class ServerMainTests(unittest.TestCase):
+    def make_root(self, temp):
+        root = Path(temp).resolve()
+        local = root / 'ax_local' / '.local'
+        local.mkdir(parents=True)
+        (local / 'kubeconfig').write_text('', encoding='utf-8')
+        return root
+
+    def make_pool(self):
+        pool = SimpleNamespace(started=0, closed=0)
+        pool.start = lambda: setattr(pool, 'started', pool.started + 1)
+        pool.close = lambda: setattr(pool, 'closed', pool.closed + 1)
+        return pool
+
+    def test_main_wires_the_shared_pool_and_closes_it_after_sigterm(self):
+        with tempfile.TemporaryDirectory() as temp:
+            server, proxy, pool = FakeServer(), FakeProxy(), self.make_pool()
+            a2a = SimpleNamespace(server_close=lambda: None, shutdown=lambda: None)
+            with patch.object(server_module, 'ROOT', self.make_root(temp)), \
+                 patch.object(server_module, 'load_dotenv'), \
+                 patch.object(server_module, 'network_address_toward',
+                              return_value='127.0.0.1'), \
+                 patch.object(server_module, 'make_server', return_value=server), \
+                 patch.object(server_module, 'start_proxy', return_value=proxy), \
+                 patch.object(server_module, 'WorkerPoolController', return_value=pool), \
+                 patch.object(server_module, 'KubernetesWorkerPool'), \
+                 patch.object(server_module, 'start_a2a_server', return_value=a2a), \
+                 patch.object(server_module.signal, 'signal'), \
+                 patch.dict(os.environ,
+                            {'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64}):
+                server_module.main()
+            self.assertEqual(pool.started, 1)
+            self.assertEqual(pool.closed, 1)
+            self.assertEqual(server.worker_managers[0].worker_pool, pool)
+            self.assertEqual(proxy.shutdowns, 1)
+
+    def test_main_closes_the_pool_when_startup_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            delegation = SimpleNamespace(close=lambda: None,
+                                         recover_interrupted=lambda: None)
+            server, proxy, pool = FakeServer(delegation), FakeProxy(), self.make_pool()
+            with patch.object(server_module, 'ROOT', self.make_root(temp)), \
+                 patch.object(server_module, 'load_dotenv'), \
+                 patch.object(server_module, 'network_address_toward',
+                              return_value='127.0.0.1'), \
+                 patch.object(server_module, 'make_server', return_value=server), \
+                 patch.object(server_module, 'start_proxy', return_value=proxy), \
+                 patch.object(server_module, 'WorkerPoolController', return_value=pool), \
+                 patch.object(server_module, 'KubernetesWorkerPool'), \
+                 patch.object(server_module, 'start_a2a_server',
+                              side_effect=RuntimeError('a2a down')), \
+                 patch.object(server_module.signal, 'signal'), \
+                 patch.dict(os.environ,
+                            {'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64}):
+                with self.assertRaisesRegex(RuntimeError, 'a2a down'):
+                    server_module.main()
+            self.assertEqual(pool.closed, 1)
+            self.assertEqual(proxy.shutdowns, 1)
 
 
 if __name__ == "__main__":
