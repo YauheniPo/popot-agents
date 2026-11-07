@@ -18,7 +18,7 @@
     "postgres_connect_seconds": 10,
     "memory_request_seconds": 5,
     "memory_recall_seconds": 20,
-    "memory_session_start_seconds": 3,
+    "memory_session_start_seconds": 15,
     "memory_session_finish_seconds": 5,
     "memory_summary_seconds": 30,
     "memory_capture_min_seconds": 8,
@@ -29,7 +29,7 @@
     "turn_seconds": 900,
     "max_turn_seconds": 1800,
     "min_turn_seconds": 2,
-    "turn_response_margin_seconds": 15
+    "turn_response_margin_seconds": 35
   },
   "mcp": {
     "discovery_attempts": 3,
@@ -41,7 +41,7 @@
     "total_seconds": 3600,
     "turn_seconds": 900,
     "max_no_progress": 2,
-    "max_concurrent": 1
+    "max_concurrent": 10
   },
   "limits": {
     "request_bytes": 262144,

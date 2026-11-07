@@ -6,6 +6,7 @@ import fcntl
 import json
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -175,6 +176,15 @@ def main() -> None:
             stamp.write_text(head + "\n")
         ensure_named_pool(local / 'kubeconfig', cli, config['context'], config['atespace'],
                           config['worker_pool_name'], config['startup_timeout_seconds'])
+        # A previous API may have exited while extra replicas were still pending.
+        # Shrink only after the registry confirms that no actor uses this pool.
+        sys.path.insert(0, str(root.parent))
+        from ax_local.api.worker_pool import KubernetesWorkerPool
+        backend = KubernetesWorkerPool(config['context'], config['atespace'],
+            config['worker_pool_name'], local / 'kubeconfig', cli=str(cli))
+        snapshot = backend.inspect()
+        if snapshot['desired'] > config['warm_workers'] and not snapshot['busy']:
+            backend.scale(config['warm_workers'], snapshot)
         ensure_workers(local / "kubeconfig", cli, config["context"], config["atespace"],
                        config["startup_timeout_seconds"], resources=config['task_resources'])
 

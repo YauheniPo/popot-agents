@@ -19,7 +19,8 @@ def _validate_ax_config(settings: dict, timeouts: dict) -> None:
             "cli_timeout_seconds", "route_timeout_seconds", "startup_timeout_seconds",
             "startup_probe_interval_seconds", "session_backend", "probe_timeout_seconds",
             "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds",
-            "suspend_retention_seconds", "snapshot_mode", "max_workers", "worker_queue_timeout_seconds", "worker_pool_name"}:
+            "suspend_retention_seconds", "snapshot_mode", "max_workers", "warm_workers",
+            "worker_pool_idle_seconds", "worker_queue_timeout_seconds", "worker_pool_name"}:
         raise ValueError("AX config has invalid ax settings")
     if not isinstance(ax["context"], str) or not re.fullmatch(r"kind-[a-z0-9-]+", ax["context"]):
         raise ValueError("AX config context must name a local kind context")
@@ -42,11 +43,14 @@ def _validate_ax_config(settings: dict, timeouts: dict) -> None:
     for key in ("cli_timeout_seconds", "route_timeout_seconds", "startup_timeout_seconds",
                 "startup_probe_interval_seconds", "probe_timeout_seconds",
                 "restore_timeout_seconds", "response_margin_seconds", "delete_timeout_seconds",
-                "suspend_retention_seconds", "max_workers", "worker_queue_timeout_seconds"):
+                "suspend_retention_seconds", "max_workers", "warm_workers",
+                "worker_pool_idle_seconds", "worker_queue_timeout_seconds"):
         if type(ax[key]) is not int or ax[key] <= 0:
             raise ValueError(f"AX config {key} must be positive")
     if ax["route_timeout_seconds"] > 3600:
         raise ValueError("AX config route_timeout_seconds must not exceed 3600")
+    if ax['warm_workers'] > ax['max_workers']:
+        raise ValueError('AX config warm_workers exceeds max_workers')
     if ax['route_timeout_seconds'] <= timeouts['max_turn_seconds'] + ax['response_margin_seconds']:
         raise ValueError('AX config route_timeout_seconds must exceed shared worker max timeout and response margin')
     if ax["session_backend"] not in ("postgres", "file"):

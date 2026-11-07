@@ -411,6 +411,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             children = list(completed_delegations.values())
             if any(child.get('role') in {'backend_engineer', 'frontend_engineer'} for child in children):
                 verified = verified_roles(children, target)
+                if (role_config.get('name', role_config.get('_ax_role')) == 'code_reviewer'
+                        and target and revision == target and (report or {}).get('evidence')):
+                    verified.add('code_reviewer')
                 missing = sorted({'code_reviewer', 'qa_engineer'} - verified)
                 if missing:
                     status, reason = 'partial', 'workflow_validation_missing'

@@ -112,12 +112,19 @@ class AsyncServiceTests(unittest.TestCase):
                     'failed_delegations':[[['backend_engineer',name],{'session_id':sid,'pending':True}]
                         for sid,name in [(first['id'],'first'),(second['id'],'second')]]}
                 def restore(inner,history,**options):inner.checkpoint=options['checkpoint']
+                runner=type('Runner',(),{'worker_pool':object()})()
+                after_turn_calls=0
+                def after_turn(inner):
+                    inner.after_turn_calls=inner.after_turn_calls+1
+                def resume(inner,**options):inner.resume_calls=options['timeout_seconds']
             parent=Parent();started=time.monotonic()
             self.service.await_children(self.parent,parent,[],time.monotonic()+1)
             self.assertLess(time.monotonic()-started,.8)
             self.assertIn(first['id'],parent.checkpoint['completed_delegations'])
             self.assertNotIn(second['id'],parent.checkpoint['completed_delegations'])
             self.assertEqual(parent.checkpoint['failed_delegations'][0][1]['session_id'],second['id'])
+            self.assertEqual(parent.after_turn_calls,1)
+            self.assertGreater(parent.resume_calls,0)
             second_release.set();self.wait_task(second['id'])
 
     def test_backend_and_qa_run_concurrently_in_the_same_workflow(self):
@@ -170,10 +177,8 @@ class AsyncServiceTests(unittest.TestCase):
             with peak_lock:peak[0]=max(peak[0],pool.status()['active'])
             return chat
         self.runner.start_chat=start
-        barrier=threading.Barrier(2)
         def callback(chat,task):
             role=chat.config['_ax_role']
-            if role in {'backend_engineer','qa_engineer'}:barrier.wait(1)
             target={'backend_engineer':'analyst','qa_engineer':'analyst','analyst':'code_reviewer'}.get(role)
             if target:
                 token=self.service.grants[chat.session_id].token
@@ -299,6 +304,18 @@ class AsyncServiceTests(unittest.TestCase):
 
 
 class PublicationOwnershipTests(unittest.TestCase):
+    def test_reviewer_cannot_create_local_commit(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        from popot_agents.tools import ToolInputError
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        with self.assertRaisesRegex(ToolInputError, 'reviewer'):
+            check_publication_owner('bash',{'command':'git -C repo commit -m fix'},context)
+
+    def test_reviewer_can_inspect_history_but_not_commit(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        check_publication_owner('bash',{'command':'git log --grep=commit'},context)
+
     def test_non_owner_cannot_publish_branch_but_can_prepare_and_test(self):
         from popot_agents.worker.delegation_policy import check_publication_owner
         from popot_agents.tools import ToolInputError
@@ -312,3 +329,16 @@ class PublicationOwnershipTests(unittest.TestCase):
         check_publication_owner('mcp__github__pull_request_review_write',{},context)
         check_publication_owner('bash',{'command':'git push origin feature'},
             {'session_id':'b'*16,'publication_owner':'b'*16})
+
+
+class GitSubcommandQuoteFallbackTests(unittest.TestCase):
+    def test_unbalanced_quotes_fall_back_to_whitespace_splitting(self):
+        from popot_agents.worker.delegation_policy import _git_subcommands
+        self.assertEqual(_git_subcommands('git commit -m "unclosed'), {'commit'})
+
+    def test_option_scan_handles_missing_values_and_non_git_segments(self):
+        from popot_agents.worker.delegation_policy import _git_subcommands
+        self.assertEqual(_git_subcommands('git'), set())
+        self.assertEqual(_git_subcommands('git -C'), set())
+        self.assertEqual(_git_subcommands('git --no-pager'), set())
+        self.assertEqual(_git_subcommands('echo hi && git log'), {'log'})

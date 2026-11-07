@@ -47,3 +47,14 @@ class PromptConfigTests(unittest.TestCase):
                 'parameters': {'properties': {'role': {'enum': ['qa_engineer']}}}}}}}
             self.assertEqual(delegation_instructions({'name': 'engineer'}, tools),
                              'Configured engineer; ; QA capability')
+
+    def test_completion_prompts_keep_actionable_findings_in_the_workflow(self):
+        from popot_agents.prompts import render_prompt
+        coordinator = render_prompt('workflow/coordinator')
+        contract = render_prompt('reporting/result_contract')
+        final = render_prompt('reporting/final', result_contract=contract)
+        for prompt in (coordinator, contract, final):
+            self.assertIn('remaining_work', prompt)
+            self.assertIn('in-scope', prompt)
+        self.assertIn('stale published', coordinator)
+        self.assertIn('Do not offer', contract)

@@ -54,6 +54,7 @@ class AxAgentRunner:
             {} if model_parameters is None else model_parameters, 'model_parameters')
         self.harness2_environment = {}
         self.delegation = None
+        self.worker_pool = None
         self.worker_queue = worker_queue if worker_queue is not None else WorkerQueue(
             AX_CONFIG['max_workers'], AX_CONFIG['worker_queue_timeout_seconds'])
         self._cleanup_pending = {}
@@ -295,6 +296,14 @@ class AxAgentRunner:
         lease = self.worker_queue.acquire(task_name, deadline=deadline, cancel_event=cancel_event,
             **({'reservation':reservation} if reservation else {}))
         try:
+            if self.worker_pool is not None:
+                self.worker_pool.acquire(task_name,
+                    deadline=deadline or time.monotonic() + self.worker_queue.timeout_seconds,
+                    cancel_event=cancel_event)
+        except Exception:
+            self.worker_queue.release(task_name, lease)
+            raise
+        try:
             emit_progress('preparing_workspace')
             return self._start_reserved_chat(chat_id, role_config, lease,
                                              deadline=deadline, cancel_event=cancel_event)
@@ -304,6 +313,8 @@ class AxAgentRunner:
                 pending = task_name in self._cleanup_pending
             if not pending:
                 self.worker_queue.release(task_name, lease)
+                if self.worker_pool is not None:
+                    self.worker_pool.release(task_name)
             raise
 
     def _start_reserved_chat(self, chat_id, role_config, lease,
@@ -423,6 +434,8 @@ class AxAgentRunner:
             if lease is None or self._cleanup_pending.get(task_name) is lease:
                 self._cleanup_pending.pop(task_name, None)
         self.worker_queue.release(task_name, lease)
+        if self.worker_pool is not None:
+            self.worker_pool.release(task_name)
 
     def _delete_worker(self, task_name, lease):
         # Serialize retries with explicit close operations. A copied cleanup
@@ -527,6 +540,8 @@ class AxChat:
                         timeout=min(remaining, AX_CONFIG["probe_timeout_seconds"]))
                     if phase == "Suspended":
                         self.suspended = True
+                        if self.runner.worker_pool is not None:
+                            self.runner.worker_pool.release(self.container_name)
                         self._snapshot_issue = None
                         elapsed = round(time.monotonic() - started, 3)
                         emit_progress('snapshot_saved', mode=self.runner.snapshot_mode,
@@ -560,6 +575,8 @@ class AxChat:
             deadline = started + AX_CONFIG["startup_timeout_seconds"]
             if timeout_seconds is not None:
                 deadline = min(deadline, started + timeout_seconds)
+            if self.runner.worker_pool is not None:
+                self.runner.worker_pool.acquire(self.container_name, deadline=deadline)
 
             def remaining(limit):
                 budget = deadline - time.monotonic()

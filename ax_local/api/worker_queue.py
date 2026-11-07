@@ -37,6 +37,23 @@ class WorkerQueue:
             self.reservations[key] = count
             return count
 
+    def reserve_full(self, key, slots, *, deadline):
+        """Admit a workflow only when its whole delegation path can progress."""
+        with self.condition:
+            while True:
+                if self.closed:
+                    raise AgentRunError('AX worker queue is shutting down')
+                if key in self.reservations:
+                    return self.reservations[key]
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    raise WorkerCapacityTimeout('AX workflow capacity deadline exceeded')
+                if self.max_workers - len(self.active) - self._reserved() >= slots:
+                    self.reservations[key] = slots
+                    self.condition.notify_all()
+                    return slots
+                self.condition.wait(min(remaining, .1))
+
     def release_reservation(self, key):
         with self.condition:
             self.reservations.pop(key,None)

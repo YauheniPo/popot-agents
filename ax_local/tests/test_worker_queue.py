@@ -8,7 +8,7 @@ from contextlib import redirect_stderr
 from unittest.mock import patch
 
 from ax_local.api.ax_runner import AxAgentRunner
-from ax_local.api.worker_queue import WorkerQueue
+from ax_local.api.worker_queue import WorkerCapacityTimeout, WorkerQueue
 from ax_local.config import AX_CONFIG
 from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
 from tests.test_chat import FakeRunner
@@ -24,6 +24,36 @@ def wait_for(predicate):
 
 
 class WorkerQueueTests(unittest.TestCase):
+    def test_ten_workflows_each_keep_a_two_level_delegation_path(self):
+        queue = WorkerQueue(30, 1)
+        for index in range(10):
+            key = f'run-{index}'
+            self.assertEqual(queue.reserve_full(key, 2, deadline=time.monotonic()+1), 2)
+            queue.acquire(f'root-{index}')
+        for index in range(10):
+            for depth in range(2):
+                queue.acquire(f'child-{index}-{depth}', reservation=f'run-{index}')
+        self.assertEqual(queue.status(), {'limit': 30, 'active': 30, 'queued': 0})
+
+    def test_full_workflow_reservation_waits_for_both_nested_slots(self):
+        queue = WorkerQueue(4, 1)
+        root = queue.acquire('root')
+        busy = queue.acquire('cron')
+        other = queue.acquire('other')
+        results = []
+        thread = threading.Thread(target=lambda: results.append(
+            queue.reserve_full('workflow', 2, deadline=time.monotonic()+2)))
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        time.sleep(.02)
+        self.assertEqual(results, [])
+        queue.release('other', other)
+        thread.join(2)
+        self.assertEqual(results, [2])
+        queue.release_reservation('workflow')
+        queue.release('cron', busy)
+        queue.release('root', root)
+
     def test_reserved_nested_capacity_cannot_be_stolen_and_exhaustion_is_immediate(self):
         queue=WorkerQueue(10, .1)
         queue.acquire('root')
@@ -350,9 +380,34 @@ class AxWorkerCapacityTests(unittest.TestCase):
             finally:
                 server.server_close()
 
-    def test_queue_defaults_match_three_physical_workers_and_one_hour(self):
-        self.assertEqual(AX_CONFIG['max_workers'], 3)
+    def test_queue_supports_ten_workflows_with_three_warm_workers(self):
+        self.assertEqual(AX_CONFIG['max_workers'], 30)
+        self.assertEqual(AX_CONFIG['warm_workers'], 3)
         self.assertEqual(AX_CONFIG['worker_queue_timeout_seconds'], 3600)
+
+
+class WorkerQueueReservationTests(unittest.TestCase):
+    def test_reserve_full_reuses_a_live_reservation_for_the_same_workflow(self):
+        queue = WorkerQueue(2, 5)
+        self.addCleanup(queue.close)
+        deadline = time.monotonic() + 5
+        self.assertEqual(queue.reserve_full('wf', 2, deadline=deadline), 2)
+        self.assertEqual(queue.reserve_full('wf', 2, deadline=deadline), 2)
+
+    def test_reserve_full_rejects_a_closed_queue(self):
+        queue = WorkerQueue(2, 5)
+        queue.close()
+        with self.assertRaisesRegex(AgentRunError, 'shutting down'):
+            queue.reserve_full('wf', 1, deadline=0)
+
+    def test_reserve_full_times_out_when_capacity_never_frees(self):
+        queue = WorkerQueue(1, 5)
+        self.addCleanup(queue.close)
+        lease = queue.acquire('busy')
+        self.addCleanup(queue.release, 'busy', lease)
+        deadline = time.monotonic() - 1
+        with self.assertRaises(WorkerCapacityTimeout):
+            queue.reserve_full('wf', 1, deadline=deadline)
 
 
 if __name__ == '__main__':

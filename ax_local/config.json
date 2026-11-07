@@ -25,7 +25,9 @@
   "delete_timeout_seconds": 5,
   "suspend_retention_seconds": 86400,
   "snapshot_mode": "data",
-  "max_workers": 3,
+  "max_workers": 30,
+  "warm_workers": 3,
+  "worker_pool_idle_seconds": 60,
   "worker_queue_timeout_seconds": 3600,
   "delegation": {
     "enabled": true,

@@ -1,5 +1,6 @@
 When returning a final answer without tool calls, output one JSON object: {"status":"completed","answer":"user-facing answer","evidence":["verified results and URLs"],"remaining_work":["unfinished requirements"],"errors":["unresolved errors"]}.
 Use completed only when every requested requirement is verified; remaining_work and errors must then be empty.
+Reconcile concrete review, QA and self-check findings against the original task before setting completed. An unresolved in-scope regression from this work or a stale published claim belongs in remaining_work, regardless of severity; return partial so the workflow continues. Keep unrelated pre-existing or out-of-scope limitations separate and explain why they do not block completion. Do not offer to perform an in-scope correction later while declaring completed.
 Other allowed statuses are partial, blocked and failed.
 Use blocked when a missing precondition requires intervention.
 Values may use the user language; keys and status are the protocol.

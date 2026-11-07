@@ -6,6 +6,7 @@ import unittest
 from urllib import request, error
 
 from popot_agents.orchestrator.main import create_server
+from popot_agents.orchestrator.workflow import public_workflow, public_outcome_reason
 
 POLICY = {'max_turns':4,'total_seconds':3600,
           'turn_seconds':900,'max_no_progress':2,'max_concurrent':1}
@@ -16,6 +17,16 @@ def result(status, evidence=('receipt',), remaining=(), errors=()):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_list_summary_exposes_bounded_redacted_terminal_reason(self):
+        from unittest.mock import patch
+        saved={'roleConfig':{'_workflow':{'state':'blocked','phase':'finished','turns':4,
+            'deadlineAt':1000,'outcome':{'reason':'workflow_turn_limit'}}}}
+        self.assertEqual(public_workflow(saved)['reason'],'workflow_turn_limit')
+        with patch.dict('os.environ',{'REPORT_TEST_TOKEN':'test-secret-value'}):
+            reason=public_outcome_reason({'reason':'Missing test-secret-value permission '+('x'*500)})
+        self.assertNotIn('test-secret-value',reason)
+        self.assertLessEqual(len(reason),240)
+
     def run_workflow(self, results, *, allow_error=False, after=None, request_id=None, role="planner", coordination=None):
         class Chat:
             container_name='test-coordinator'

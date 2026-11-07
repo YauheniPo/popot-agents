@@ -50,6 +50,13 @@ class FakeRunner:
 
 
 class RoleDirectoryTests(unittest.TestCase):
+    def test_reviewer_can_handoff_authorized_fixes_to_backend_owner(self):
+        path = Path(__file__).resolve().parents[1] / 'config/roles/code_reviewer.json'
+        reviewer = json.loads(path.read_text())
+        self.assertIn('backend_engineer', reviewer['allowed_roles'])
+        prompt = (path.parents[1] / 'prompts/delegation/reviewer.md').read_text()
+        self.assertIn('delegate implementation to backend_engineer', prompt)
+
     def test_every_configured_role_can_delegate_with_team_scoped_permissions(self):
         directory = Path(__file__).resolve().parents[1] / 'config/roles'
         configs = {path.stem: json.loads(path.read_text()) for path in directory.glob('*.json')}
