@@ -330,3 +330,10 @@ class GitSubcommandQuoteFallbackTests(unittest.TestCase):
     def test_unbalanced_quotes_fall_back_to_whitespace_splitting(self):
         from popot_agents.worker.delegation_policy import _git_subcommands
         self.assertEqual(_git_subcommands('git commit -m "unclosed'), {'commit'})
+
+    def test_option_scan_handles_missing_values_and_non_git_segments(self):
+        from popot_agents.worker.delegation_policy import _git_subcommands
+        self.assertEqual(_git_subcommands('git'), set())
+        self.assertEqual(_git_subcommands('git -C'), set())
+        self.assertEqual(_git_subcommands('git --no-pager'), set())
+        self.assertEqual(_git_subcommands('echo hi && git log'), {'log'})
