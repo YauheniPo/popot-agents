@@ -316,6 +316,27 @@ class PublicationOwnershipTests(unittest.TestCase):
         context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
         check_publication_owner('bash',{'command':'git log --grep=commit'},context)
 
+    def test_reviewer_commit_guard_sees_past_git_global_options(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        from popot_agents.tools import ToolInputError
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        for command in ('git --no-pager commit -m x','git -c a=b --no-pager commit -m x',
+                        'git --work-tree=/w commit -m x'):
+            with self.subTest(command=command),self.assertRaisesRegex(ToolInputError, 'reviewer'):
+                check_publication_owner('bash',{'command':command},context)
+
+    def test_reviewer_cannot_create_commit_objects(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        from popot_agents.tools import ToolInputError
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        with self.assertRaisesRegex(ToolInputError, 'reviewer'):
+            check_publication_owner('bash',{'command':'git commit-tree -m x'},context)
+
+    def test_reviewer_guard_ignores_a_missing_command(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        check_publication_owner('bash',{'command':None},context)
+
     def test_non_owner_cannot_publish_branch_but_can_prepare_and_test(self):
         from popot_agents.worker.delegation_policy import check_publication_owner
         from popot_agents.tools import ToolInputError

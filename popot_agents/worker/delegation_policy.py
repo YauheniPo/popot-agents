@@ -53,11 +53,17 @@ def _git_subcommands(command: str) -> set[str]:
     return subcommands
 
 
+def _creates_commit(command: str) -> bool:
+    """Return whether the shell command writes a git commit object."""
+    return any(name == 'commit' or name.startswith('commit-')
+               for name in _git_subcommands(command))
+
+
 def check_publication_owner(name, arguments, context):
     """Coordinate branch publication; role credentials remain the security boundary."""
     if context and context.get('role') == 'code_reviewer' and name == 'bash':
         command = arguments.get('command', '')
-        if isinstance(command, str) and 'commit' in _git_subcommands(command):
+        if isinstance(command, str) and _creates_commit(command):
             raise ToolInputError('The code reviewer cannot create commits; delegate authorized fixes to backend_engineer.')
     if context is None or 'publication_owner' not in context or context.get('publication_owner') == context.get('session_id'):
         return
