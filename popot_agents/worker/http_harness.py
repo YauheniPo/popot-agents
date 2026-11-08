@@ -26,7 +26,7 @@ from . import mcp_client
 from .delegation_policy import (available_roles, delegation_instructions,
                                 handoff_task, publication_policy, check_publication_owner)
 from .verification import (observed_revision, acceptance_revision, requested_pull_request,
-                          verified_roles)
+                           verified_roles, latest_verification, unresolved_findings, verification_failed)
 from .turn_memory import TurnMemory, parse_summary
 from .final_result import evidence_transcript, parse_result, retained_receipts
 from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA as REVIEW_SCHEMA
@@ -324,6 +324,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     schemas.extend(item["schema"] for item in extra_tools.values())
     if instructions and not resuming:
         messages.insert(0, {"role": "system", "content": instructions})
+    if run_context and run_context.get('budget'):
+        messages.append({'role': 'system', 'content': render_prompt('workflow/budget',
+            budget=json.dumps(run_context['budget'], ensure_ascii=False))})
     if run_context and 'publication_owner' in run_context:
         owner = run_context['publication_owner']
         messages.append({'role':'system','content':
@@ -484,10 +487,57 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 _trace('memory_capture_failed', dataset=memory.dataset, phase=phase, error_type=type(exc).__name__)
 
     def save_result(answer, status, reason, report=None):
+        claimed_completed = status == 'completed'
         revision = observed_revision(report, tool_evidence,
             (run_context or {}).get('target_revision') if role_config.get('name',role_config.get('_ax_role')) in {'code_reviewer','qa_engineer'} else None)
-        target = acceptance_revision(list(completed_delegations.values()), tool_evidence,
-                                     requested_pull_request(user_context))
+        pull_request = requested_pull_request(user_context)
+        target = acceptance_revision(list(completed_delegations.values()), tool_evidence, pull_request)
+        role_name = role_config.get('name', role_config.get('_ax_role'))
+        children = list(completed_delegations.values())
+        implementation = role_name in {'backend_engineer', 'frontend_engineer'} or any(
+            child.get('role') in {'backend_engineer', 'frontend_engineer'} for child in children)
+        findings = list((report or {}).get('findings', []))
+        if owns_verification:
+            for child in latest_verification(children, target):
+                for finding in unresolved_findings(child.get('outcome', {})):
+                    if finding not in findings:
+                        findings.append(finding)
+        if findings or 'findings' in (report or {}):
+            report = {**(report or {}), 'evidence': (report or {}).get('evidence', []),
+                'errors': (report or {}).get('errors', []),
+                'remaining_work': (report or {}).get('remaining_work', []), 'findings': findings}
+        open_findings = unresolved_findings(report or {})
+        if open_findings:
+            report = {**report, 'verification_status': 'failed'}
+            if status == 'completed' and implementation:
+                status, reason = 'partial', 'unresolved_in_scope_findings'
+                report.update(evidence=report.get('evidence', []), errors=report.get('errors', []),
+                    remaining_work=report.get('remaining_work', []) + [
+                        'Resolve in-scope findings before acceptance: ' + '; '.join(
+                            finding['description'] for finding in open_findings)])
+        if (status == 'completed' and run_id and role_name in {'code_reviewer', 'qa_engineer'}
+                and (report or {}).get('verification_status') != 'failed' and 'findings' not in (report or {})):
+            status, reason = 'partial', 'verification_findings_missing'
+            report = {**(report or {}), 'evidence': (report or {}).get('evidence', []),
+                'errors': (report or {}).get('errors', []),
+                'remaining_work': (report or {}).get('remaining_work', []) + [
+                    'Return findings with description, scope and status (an empty list when none). '
+                    'Justify out-of-scope exclusions; minor or non-blocking does not mean out of scope. '
+                    'Classify the findings already collected; do not rerun completed checks.']}
+        if (status == 'completed' and state is not None and run_context is not None
+                and role_config.get('name', role_config.get('_ax_role'))
+                in {'backend_engineer', 'frontend_engineer'}
+                and isinstance(pull_request, dict) and not (revision or target)):
+            status, reason = 'partial', 'implementation_revision_missing'
+            report = {**(report or {}), 'evidence': (report or {}).get('evidence', []),
+                'errors': (report or {}).get('errors', []),
+                'remaining_work': (report or {}).get('remaining_work', []) + [
+                'Read back the current PR head or Git HEAD through a permitted tool and return its full '
+                '40-character SHA in revision. Preserve the actual structured tool result; a requested SHA '
+                'or a prose summary is not a read-back. Use a native GitHub PR metadata read, git rev-parse HEAD, '
+                'or get_file_contents with a loaded repo:// resource at the full commit SHA. '
+                'Printing REV from Python does not preserve structured PR metadata. '
+                'Do not repeat completed writes.']}
         if status == 'completed' and target and (report or {}).get('revision') not in (None,target):
             status, reason = 'partial','acceptance_revision_mismatch'
             report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
@@ -499,22 +549,36 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                           ['Verify requested deliverables and provide matching evidence']}
         if role_config.get('_workflow_coordinator') and status == 'completed' and owns_verification:
             children = list(completed_delegations.values())
+            rejected = sorted(child['role'] for child in latest_verification(children, target)
+                              if verification_failed(child.get('outcome', {})))
+            if rejected and (report or {}).get('verification_status') != 'failed':
+                status, reason = 'partial', 'negative_verification_unacknowledged'
+                report = {**(report or {}), 'verification_status': 'failed',
+                          'remaining_work': (report or {}).get('remaining_work', []) + [
+                              'Acknowledge the negative verification from ' + ', '.join(rejected) +
+                              '; resolve its findings if implementation is in the assigned scope']}
             if any(child.get('role') in {'backend_engineer', 'frontend_engineer'} for child in children):
-                verified = verified_roles(children, target)
+                verified = verified_roles(children, target, require_findings=bool(run_id))
                 if (role_config.get('name', role_config.get('_ax_role')) == 'code_reviewer'
-                        and target and revision == target and (report or {}).get('evidence')):
+                        and target and revision == target and (report or {}).get('evidence')
+                        and (report or {}).get('verification_status') != 'failed'):
                     verified.add('code_reviewer')
                 missing = sorted({'code_reviewer', 'qa_engineer'} - verified)
                 if missing:
-                    status, reason = 'partial', 'workflow_validation_missing'
+                    status, reason = 'partial', ('workflow_validation_failed' if rejected else 'workflow_validation_missing')
+                    remaining = ('Resolve findings from ' + ', '.join(rejected) +
+                                 ' and obtain passing verification of the corrected revision' if rejected else
+                                 'Obtain independent verification receipts for the current revision from ' + ', '.join(missing))
                     report = {**(report or {}), 'evidence': (report or {}).get('evidence', []),
                               'errors': (report or {}).get('errors', []),
-                              'remaining_work': (report or {}).get('remaining_work', []) +
-                                  ['Obtain independent verification receipts for the current revision from ' + ', '.join(missing)]}
+                              'remaining_work': (report or {}).get('remaining_work', []) + [remaining]}
                 if not target and _mentions_github_url(user_context):
                     status, reason = 'partial','verification_revision_missing'
                     report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
-                        ['Read back the implementation revision before accepting verification']}
+                        ['Read back the implementation revision before accepting verification: use a permitted '
+                         'read-only tool or delegate one read-only PR-head check to a specialist. Return the '
+                         'observed full SHA with the actual structured tool result, not another summary. '
+                         'Reuse matching review and QA; do not repeat completed PR writes.']}
         if status == 'completed' and (run_context or {}).get('target_revision') and role_config.get('name',role_config.get('_ax_role')) in {'code_reviewer','qa_engineer'}:
             if revision != run_context['target_revision']:
                 status, reason = 'partial','verification_revision_missing'
@@ -532,7 +596,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             outcome['warnings'] = warnings
         if revision or target:
             outcome['revision'] = target or revision
-        checks = [receipt for receipt in tool_evidence if receipt['kind'] == 'checks' and receipt.get('revision')]
+        if (report or {}).get('verification_status') in {'passed', 'failed'}:
+            outcome['verification_status'] = report['verification_status']
+        if 'findings' in (report or {}):
+            outcome['findings'] = report['findings']
+        checks = [receipt for receipt in tool_evidence if receipt['kind'] == 'checks']
         if checks:
             outcome['checks'] = checks[-8:]
         if resolved_delegations:
@@ -556,6 +624,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             outcome['artifacts'] = list(saved_artifacts.values())
         if status != 'completed' and not outcome['remaining_work']:
             outcome['remaining_work'] = ['Task completeness is unverified']
+        if claimed_completed and status != 'completed':
+            answer = ('Completion is not verified (' + outcome['reason'] + ').\n' +
+                      '\n'.join(outcome['remaining_work']))
         if state is not None:
             checkpoint = {'messages': [*messages, {'role': 'assistant', 'content': answer}],
                           **child_results.snapshot(),
@@ -593,7 +664,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             requested_wait = {'session_ids':list(dict.fromkeys(v['session_id']
                 for v in failed_delegations.values() if v.get('pending'))),'wait_for':'all'}
         return save_result(answer or 'Waiting for durable child tasks', 'partial', 'child_pending',
-            {'evidence':(report or {}).get('evidence',retained_receipts(messages,completed_delegations)),
+            {'evidence':(report or {}).get('evidence',retained_receipts(messages,completed_delegations,tool_evidence)),
              'errors':(report or {}).get('errors',[]),
              'remaining_work':['Await selected child results; independent work is checkpointed']})
 
@@ -602,7 +673,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if any(v.get('pending') for v in failed_delegations.values()):
             return wait_for_children(answer, report)
         if report is None:
-            receipts = retained_receipts(messages, completed_delegations) if state is not None else []
+            receipts = retained_receipts(messages, completed_delegations, tool_evidence) if state is not None else []
             report = {'evidence': receipts, 'remaining_work': [],
                       'errors': [e for e in (model_failure, final_validation_error) if e]}
             if receipts:
@@ -832,7 +903,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             if not owns_verification and arguments.get('role') in {'code_reviewer', 'qa_engineer'}:
                                 raise ToolInputError('Review and QA belong to verification owner ' + verification_owner)
                             if (run_context or {}).get('can_delegate') is False:
-                                raise ToolInputError('The last coordinator turn is reserved for acceptance; no child started')
+                                raise ToolInputError('Delegation is unavailable in this workflow context; no child started')
                             delegation_scope = arguments.pop('scope', 'subtask')
                             if delegation_scope not in ('subtask', 'whole_task'):
                                 raise ToolInputError('delegate_task scope must be subtask or whole_task')
@@ -899,6 +970,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 raise ToolInputError('Continue the unfinished child using role and session_id=' +
                                                      previous['session_id'] + '; do not create a replacement sandbox')
                             task_text = arguments['task']
+                            if revision is None and arguments.get('role') in {'code_reviewer', 'qa_engineer'}:
+                                revision = acceptance_revision(list(completed_delegations.values()),
+                                    tool_evidence, requested_pull_request(user_context))
                             scope_assignment = task_text + '\n' + publication_policy(role_config)
                             if user_updates:
                                 scope_assignment += '\nAdditional user requirements:\n' + '\n'.join(user_updates.values())
@@ -981,6 +1055,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 except (ToolInputError, ToolExecutionError, mcp_client.MCPToolError) as exc:
                     _trace("tool_error", round=round_number, name=name, call_id=call_id,
                            error_type=type(exc).__name__,
+                           arguments=(_trace_arguments(name, arguments) if isinstance(arguments, dict)
+                                      else {'argument_type': type(arguments).__name__}),
                            error=('bash execution failed; details retained in tool result'
                                   if name == 'bash' and isinstance(exc, ToolExecutionError) else str(exc)),
                            recoverable=True)
@@ -1044,7 +1120,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 if any(value.get('pending') for value in failed_delegations.values()):
                     return wait_for_children(report={'errors':[structural_blocker]})
                 return save_result('Tool input requires reconciliation: '+structural_blocker, 'blocked',
-                    'non_retryable_tool_input', {'evidence':retained_receipts(messages,completed_delegations),
+                    'non_retryable_tool_input', {'evidence':retained_receipts(messages,completed_delegations,tool_evidence),
                     'errors':[structural_blocker], 'remaining_work':['Correct the structural input before repeating this operation']})
             continue
         answer = message.get("content")

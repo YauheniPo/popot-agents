@@ -21,7 +21,7 @@ FIELDS = {
                  "memory_session_finish_seconds", "memory_summary_seconds",
                  "memory_capture_min_seconds", "memory_capture_margin_seconds", "memory_recall_min_seconds", "memory_tool_request_seconds",
                  "memory_skill_import_seconds"},
-    "workflow": {"max_turns", "total_seconds", "turn_seconds", "max_no_progress", "max_concurrent"},
+    "workflow": {"max_turns", "total_seconds", "turn_seconds", "max_no_progress", "max_concurrent", "verification_reserve_seconds"},
     "mcp": {"discovery_attempts", "discovery_backoff_seconds", "default_role"},
     "limits": {"request_bytes", "message_chars", "history_bytes", "socket_message_bytes", "tool_output_chars",
                "write_file_bytes", "download_bytes", "skill_prompt_bytes"},
@@ -80,9 +80,9 @@ def validate_model_parameters(parameters: dict, label: str = "model parameters")
 def validate_workflow_policy(policy, max_turn_seconds):
     fields = {'max_turns', 'total_seconds', 'turn_seconds',
               'max_no_progress', 'max_concurrent'}
-    if not isinstance(policy, dict) or set(policy) != fields:
+    if not isinstance(policy, dict) or not fields <= set(policy) or set(policy) - fields - {'verification_reserve_seconds'}:
         raise ValueError('workflow config has invalid fields')
-    for key in fields:
+    for key in policy:
         if type(policy[key]) is not int or policy[key] <= 0:
             raise ValueError('workflow ' + key + ' must be a positive integer')
     if policy['turn_seconds'] > max_turn_seconds:

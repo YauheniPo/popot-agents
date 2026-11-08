@@ -5,6 +5,7 @@ import re
 
 from popot_agents.runtime_config import RUNTIME
 from .turn_memory import scrub
+from .verification import validate_findings
 
 
 def evidence_transcript(messages, context=()):
@@ -58,14 +59,36 @@ def parse_result(content, finish_reason=None):
         report['status'] = 'partial'
     if 'revision' in report and (not isinstance(report['revision'], str) or not re.fullmatch(r'[a-f0-9]{40}', report['revision'])):
         raise ValueError('invalid_revision')
+    if 'verification_status' in report and report['verification_status'] not in ('passed', 'failed'):
+        raise ValueError('invalid_verification_status')
+    if 'findings' in report:
+        validate_findings(report['findings'])
     return report
 
 
-def retained_receipts(messages, completed_children):
+def retained_receipts(messages, completed_children, observations=()):
     """Receipts are attributed observations, never proof of whole-task completion."""
     limit = RUNTIME['memory']['tool_evidence_count']
     chars = RUNTIME['memory']['tool_evidence_chars']
     receipts = []
+    # Check outcomes survive transcript compaction and later file reads. An
+    # unbound check remains useful evidence, but cannot verify a specific SHA.
+    for item in reversed(observations):
+        if item.get('source') != 'tool_result' or item.get('kind') not in {'checks', 'ci'}:
+            continue
+        receipt = (f"Observed {item['kind']} {item.get('tool')} ({item.get('callId')}): "
+                   f"{item.get('status')}; {item.get('summary')}; "
+                   f"revision={item.get('revision') or 'unverified'}")
+        if 'exitCode' in item:
+            receipt += f"; exit_code={item['exitCode']}"
+        if 'skipCount' in item:
+            receipt += f"; skipped={item['skipCount']}; unknown_skip_reasons={item.get('unknownSkipReasons', 0)}"
+        receipt += f" [sha256={item.get('outputSha256')}]"
+        if item.get('outputArtifact'):
+            receipt += f" Full output: {item['outputArtifact']}"
+        if item.get('skippedTests'):
+            receipt += '; skip details=' + json.dumps(item['skippedTests'], ensure_ascii=False)
+        receipts.append(scrub(receipt)[:chars])
     for child in completed_children.values():
         label = f"Child {child['role']} (sessionId={child['sessionId']}) reported: "
         receipts.append(label + scrub(child['answer'])[:chars])

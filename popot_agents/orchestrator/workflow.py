@@ -51,6 +51,10 @@ class WorkflowRun:
         self.meta.setdefault('run_id', uuid.uuid4().hex)
         self.meta.setdefault('started_at', datetime.now(timezone.utc).isoformat())
         self.meta.setdefault('authorization', [self.meta.get('original_task', message)])
+        if not previous and policy.get('verification_reserve_seconds'):
+            reserve = min(policy['verification_reserve_seconds'], policy['total_seconds'] / 4)
+            self.meta.update(verificationReserveSeconds=reserve,
+                             implementationDeadlineAt=self.meta['deadlineAt'] - reserve)
         self.deadline = time.monotonic() + max(0, self.meta['deadlineAt'] - time.time())
 
     def remaining(self):
@@ -60,7 +64,7 @@ class WorkflowRun:
         increment = 0 if self.meta.pop('awaiting_children',False) else 1
         self.meta.update(state='running', phase='executing', turns=self.meta['turns'] + increment)
 
-    def record(self, result, checkpoint):
+    def record(self, result, checkpoint, *, yield_for_verification=False):
         outcome = result.get('outcome')
         if not isinstance(outcome, dict) or outcome.get('status') not in {'completed', 'partial', 'blocked', 'failed'}:
             return self.stop(result, 'workflow_missing_outcome')
@@ -89,20 +93,37 @@ class WorkflowRun:
                 return self.stop(result, 'workflow_deadline_exhausted')
             self.meta.update(state='running', phase='checkpoint', awaiting_children=True)
             return None
+        if yield_for_verification:
+            outcome = {**outcome, 'reason': 'verification_reserve'}
+            self.meta.update(state='partial', phase='checkpoint', outcome=outcome)
+            return {**result, 'outcome': outcome}
         material = {key: sorted(outcome[key]) for key in ('evidence', 'remaining_work', 'errors')}
         receipts = []
+        failures = set()
+        used_tools = False
         for item in checkpoint.get('messages', []):
             if not isinstance(item, dict) or item.get('role') != 'tool':
                 continue
+            used_tools = True
             content = item.get('content','')
             try: value = json.loads(content)
             except (ValueError, TypeError): value = {}
-            if isinstance(value, dict) and any(value.get(k) for k in ('isError','error','outcome_unknown','pending')):
+            if isinstance(value, dict) and any(value.get(k) for k in ('outcome_unknown','pending')):
                 continue
-            if isinstance(content, str) and content.startswith('exit_code=') and not content.startswith('exit_code=0\n'):
+            if (isinstance(value, dict) and any(value.get(k) for k in ('isError','error')) or
+                    isinstance(content, str) and content.startswith('exit_code=') and not content.startswith('exit_code=0\n')):
+                # A new failure can advance diagnosis; retrying the same failure cannot.
+                failures.add(hashlib.sha256(str(content).encode()).hexdigest())
                 continue
             receipts.append(hashlib.sha256((str(item.get('tool_call_id',''))+str(content)).encode()).hexdigest())
+        children = checkpoint.get('completed_delegations', {})
+        # A rewritten summary cannot substitute for new observations or child work.
+        # Text-only assignments can still advance without invoking tools.
+        if used_tools or children:
+            material = {'completed_delegations': children}
         material['tool_receipts'] = sorted(receipts)
+        material['failed_observations'] = sorted(failures)
+        material['authorization'] = self.meta['authorization']
         fingerprint = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
         self.meta['no_progress'] = self.meta['no_progress'] + 1 if fingerprint == self.meta.get('fingerprint') else 1
         self.meta['fingerprint'] = fingerprint
@@ -134,7 +155,9 @@ class WorkflowRun:
                 'outcome': outcome}
 
     def continuation(self, *, compact=False):
-        prefix = ((f'Child wait finished; resume coordinator turn {self.meta["turns"]}.\n'
+        prefix = (((f'Resume coordinator turn {self.meta["turns"]} for verification.\n'
+                    if self.meta.get('verificationPhaseStarted') else
+                    f'Child wait finished; resume coordinator turn {self.meta["turns"]}.\n')
                    if self.meta.get('awaiting_children') else
                    f'Coordinator turn {self.meta["turns"]} finished; begin turn {self.meta["turns"] + 1}.\n') +
                   f'{max(0, self.policy["max_turns"] - self.meta["turns"])} coordinator turns remain; '

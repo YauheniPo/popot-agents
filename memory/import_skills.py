@@ -53,8 +53,7 @@ def sync_skills(root: Path, client, dataset: str = 'popot-agents') -> int:
 
 
 def main() -> None:
-    # The existing authenticated adapter is mounted beside this script in Cognee.
-    from cognee_memory import CogneeMemory
+    from popot_agents.worker.cognee_memory import CogneeMemory
     from popot_agents.runtime_config import RUNTIME
 
     parser = argparse.ArgumentParser(description=__doc__)

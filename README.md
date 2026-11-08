@@ -296,7 +296,7 @@ Run this as **one line** in Bash or Zsh. The script prints the complete `curl`
 command, streams progress, then reports the task outcome:
 
 ```bash
-TASK='в MR не должно быть issues в sonarqube и все комменты решены и закрыты. запомни это на будущее для работы с PR/MR' ROLE='' SESSION_ID='aae54772ab8f4f25' bash ax_local/run-mcp-task.sh
+TASK='https://github.com/YauheniPo/popot-bot-2.0/pull/94 исправь все и подготовь к merge и sonarqube 100% и 0 issues и все комментриии должны быть порезолвлены' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
 
 `TASK` is the request. Empty `ROLE` uses `config/runtime.json → mcp.default_role`;

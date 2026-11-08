@@ -9,6 +9,38 @@ AMBIGUOUS = object()
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
 
+def validate_findings(findings):
+    if not isinstance(findings, list):
+        raise ValueError('invalid_findings')
+    for finding in findings:
+        if (not isinstance(finding, dict) or not isinstance(finding.get('description'), str)
+                or not finding['description'].strip()
+                or finding.get('scope') not in ('in_scope', 'out_of_scope')
+                or finding.get('status') not in ('open', 'resolved')
+                or finding['scope'] == 'out_of_scope' and (
+                    not isinstance(finding.get('rationale'), str) or not finding['rationale'].strip())):
+            raise ValueError('invalid_findings')
+
+
+def unresolved_findings(outcome):
+    if not isinstance(outcome, dict):
+        return []
+    findings = outcome.get('findings', [])
+    return [finding for finding in findings if isinstance(finding, dict)
+            and finding.get('scope') == 'in_scope' and finding.get('status') == 'open'] \
+        if isinstance(findings, list) else []
+
+
+def verification_failed(outcome):
+    if not isinstance(outcome, dict):
+        return True
+    try:
+        validate_findings(outcome.get('findings', []))
+    except ValueError:
+        return True
+    return outcome.get('verification_status') == 'failed' or bool(unresolved_findings(outcome))
+
+
 def _moment(value):
     if not isinstance(value, str):
         return None
@@ -80,7 +112,19 @@ def acceptance_revision(children, receipts, target=None):
     return newest['revision'] if newest else revision
 
 
-def verified_roles(children, target):
-    return {c.get('role') for c in children
+def latest_verification(children, target):
+    """A later verdict supersedes earlier verification of the same revision."""
+    latest = {}
+    for child in sorted(children, key=lambda c: _moment(c.get('reportedAt')) or _EPOCH):
+        if child.get('role') and (
+                target is None or child.get('outcome', {}).get('revision') == target):
+            latest[child['role']] = child
+    return list(latest.values())
+
+
+def verified_roles(children, target, *, require_findings=False):
+    return {c.get('role') for c in latest_verification(children, target)
         if c.get('outcome',{}).get('status') == 'completed' and c.get('outcome',{}).get('evidence')
-        and (target is None or c.get('outcome',{}).get('revision') == target)}
+        and not verification_failed(c.get('outcome', {}))
+        and (not require_findings or c.get('role') not in {'code_reviewer', 'qa_engineer'}
+             or 'findings' in c.get('outcome', {}))}

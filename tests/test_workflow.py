@@ -259,8 +259,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('/secret/workspace',json.dumps(data))
 
     def test_workflow_turn_budget_is_enforced_even_when_receipts_change(self):
-        replies=[result('partial', evidence=(f'receipt-{i}',), remaining=('more',)) for i in range(4)]
-        calls,data,_=self.run_workflow(replies)
+        checkpoint = {'messages': []}
+        def next_report():
+            receipt = f'receipt-{len(checkpoint["messages"])}'
+            checkpoint['messages'].append({'role': 'tool', 'content': receipt})
+            return result('partial', evidence=(receipt,), remaining=('more',))
+        calls,data,_=self.run_workflow([next_report] * 4, checkpoint=checkpoint)
         self.assertEqual(len(calls),4)
         self.assertEqual(data['outcome']['reason'],'workflow_turn_limit')
 

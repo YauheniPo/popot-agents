@@ -205,7 +205,7 @@ _HEREDOC_WORD = re.compile(r'[A-Za-z0-9_.-]+')
 _ARITHMETIC = (('$((', '))'), ('$[', ']'), ('((', '))'))
 
 
-def _scan_line(line, quote=None, closer=None):
+def _scan_line(line, quote=None, closer=None, *, offsets=False):
     """Heredoc openers on one physical line plus the quote and arithmetic state left."""
     found, index, word_start, substitutions = [], 0, True, 0
     while index < len(line):
@@ -242,6 +242,7 @@ def _scan_line(line, quote=None, closer=None):
                 word_start = False
                 index += 3
                 continue
+            opener = index
             index += 2
             strip_tabs = line.startswith('-', index)
             index += 1 if strip_tabs else 0
@@ -264,8 +265,10 @@ def _scan_line(line, quote=None, closer=None):
                 # The delimiter word continues past what the scan can resolve
                 # (for example `<<EOF#tag`): keep the body opaque instead of
                 # closing it before the shell would.
-                return found + [(None, strip_tabs, True)], quote, closer
-            found.append((word, strip_tabs, escaped or bool(closing)))
+                unknown = (None, strip_tabs, True)
+                return found + [unknown + (opener,) if offsets else unknown], quote, closer
+            item = (word, strip_tabs, escaped or bool(closing))
+            found.append(item + (opener,) if offsets else item)
             word_start = False
             continue
         arithmetic = next((pair for pair in _ARITHMETIC if line.startswith(pair[0], index)), None)
@@ -332,6 +335,87 @@ def _shell_commands(command):
     for line in _lines(_without_heredoc_bodies(command)):
         commands.extend(_line_commands(line))
     return commands
+
+
+def _shell_reads_stdin(words):
+    if not words or os.path.basename(words[0]) not in _SHELLS:
+        return False
+    options, stdin = words[1:], False
+    while options and options[0].startswith(('-', '+')):
+        option, options = options[0], options[1:]
+        if option == '--':
+            break
+        if option in {'--help', '--version'}:
+            return False
+        if option in {'--rcfile', '--init-file'}:
+            options = options[1:]
+        elif option.startswith('--'):
+            continue
+        else:
+            letters = option[1:]
+            if 'c' in letters:
+                return False
+            stdin = stdin or 's' in letters
+            if letters.endswith(('o', 'O')):
+                options = options[1:]  # -o pipefail / -O extglob consume an option name.
+    return stdin or not options
+
+
+def _stdin_overridden(tail):
+    """Whether a later redirection in this simple command replaces heredoc stdin."""
+    tokens = _tokenize(tail)
+    for index, token in enumerate(tokens[2:], 2):  # Skip this opener and delimiter.
+        if token.quoted:
+            continue
+        if token in _OPERATORS:
+            break
+        if token in {'<', '<<', '<<<', '<&', '<>'}:
+            descriptor = tokens[index - 1]
+            if not descriptor.isdigit() or descriptor == '0':
+                return True
+    return False
+
+
+def _heredoc_bodies(command):
+    """Bodies plus expansion mode and whether a supported shell reads them as stdin."""
+    bodies, pending, quote, closer, continued = [], [], None, None, False
+    for number, raw in enumerate(command.split('\n')):
+        line = raw.rstrip('\r')
+        if pending:
+            body = pending[0]
+            if not continued and (line.lstrip('\t') if body['tabs'] else line) == body['word']:
+                pending.pop(0)
+                continued = False
+            else:
+                body['lines'].append(line.lstrip('\t') if body['tabs'] else line)
+                continued = not body['quoted'] and _continued_body(raw)
+            continue
+        found, quote, closer = _scan_line(line, quote, closer, offsets=True)
+        if closer:
+            continue
+        for word, tabs, quoted, offset in found:
+            if word is None:
+                return bodies
+            prefix = line[:offset]
+            descriptor = re.search(r'(?:^|[\s;|&])([0-9]+)$', prefix)
+            if descriptor:
+                prefix = prefix[:descriptor.start(1)]
+            commands = _line_commands(prefix)
+            words = _command_words(commands[-1]) if commands else []
+            stdin = not descriptor or descriptor[1] == '0'
+            script = stdin and _shell_reads_stdin(words) and not _stdin_overridden(line[offset:])
+            # Only the last stdin redirect supplies a shell's script. Earlier
+            # unquoted bodies still undergo the outer shell's substitutions.
+            consumer = (number, len(commands))
+            if stdin:
+                for previous in bodies:
+                    if previous['consumer'] == consumer:
+                        previous['script'] = False
+            body = {'word': word, 'tabs': tabs, 'quoted': quoted, 'script': script,
+                    'consumer': consumer, 'lines': []}
+            bodies.append(body)
+            pending.append(body)
+    return bodies
 
 
 def _assignment(tokens):
@@ -449,7 +533,8 @@ def _wrapper_arguments(name, tokens, external=False):
     return tokens
 
 
-def _head_read(tokens):
+def _command_words(tokens):
+    """Remove shell prefixes and supported wrappers, retaining executable arguments."""
     while tokens and tokens[0] in _RESERVED and not tokens[0].quoted:
         tokens = tokens[1:]
     # `A=1 timeout 5 git ...` assigns for the wrapper, so strip prefixes first.
@@ -458,14 +543,10 @@ def _head_read(tokens):
     shell = True
     while tokens:
         name = os.path.basename(tokens[0])
-        if name in _SHELLS:
-            if len(tokens) > 2 and re.fullmatch(r'-[A-Za-z]*c', tokens[1]):
-                return _rev_parse_head(tokens[2])
-            return False
         if name not in _WRAPPERS:
             break
         if not shell and name in {'command', 'exec', 'time'}:
-            return False
+            return []
         external = '/' in tokens[0]
         tokens = tokens[1:]
         if name == 'nice':
@@ -482,6 +563,89 @@ def _head_read(tokens):
             while _assignment(tokens):
                 tokens = tokens[1:]
         shell = name == 'command' or name == 'time' and not external
+    return tokens
+
+
+def _substitution_end(command, start, closer):
+    """End of a static command substitution, respecting its inner quoted words."""
+    quote, depth, index = None, 1, start
+    while index < len(command):
+        char = command[index]
+        if char == '\\' and quote != "'":
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in {'"', "'"}:
+            quote = char
+        elif char == closer:
+            depth -= 1
+            if not depth:
+                return index
+        elif char == '(' and closer == ')':
+            depth += 1
+        index += 1
+    return None
+
+
+def _command_substitutions(command, *, heredoc=False):
+    """Executable substitutions, including double quotes but excluding literal data."""
+    quote, index = None, 0
+    while index < len(command):
+        char = command[index]
+        if char == '\\' and quote != "'":
+            index += 2
+            continue
+        if not heredoc and quote == "'":
+            if char == quote:
+                quote = None
+        elif not heredoc and char == quote:
+            quote = None
+        elif not heredoc and not quote and char in {'"', "'"}:
+            quote = char
+        elif not heredoc and not quote and char == '#' and (not index or command[index - 1] in ' \t\n;&|('):
+            newline = command.find('\n', index)
+            index = len(command) if newline < 0 else newline
+        elif (char == '`' or command.startswith('$(', index) and not command.startswith('$((', index)
+              or not quote and not heredoc and command[index:index + 2] in {'<(', '>('}):
+            start = index + (1 if char == '`' else 2)
+            end = _substitution_end(command, start, '`' if char == '`' else ')')
+            if end is not None:
+                yield command[start:end]
+                index = end
+        index += 1
+
+
+def executed_commands(command):
+    """Static executable words, excluding quoted data and opaque script bodies.
+
+    This shares the evidence parser's bounded shell grammar; it is not a shell
+    interpreter or a security boundary for aliases and dynamically built commands.
+    """
+    pending = [command] if isinstance(command, str) else []
+    while pending:
+        source = pending.pop()
+        pending.extend(_command_substitutions(_without_heredoc_bodies(source)))
+        for body in _heredoc_bodies(source):
+            content = '\n'.join(body['lines'])
+            if not body['quoted']:
+                pending.extend(_command_substitutions(content, heredoc=True))
+            if body['script']:
+                pending.append(content)
+        for tokens in _shell_commands(source):
+            tokens = _command_words(tokens)
+            if not tokens:
+                continue
+            if os.path.basename(tokens[0]) in _SHELLS:
+                if len(tokens) > 2 and re.fullmatch(r'-[A-Za-z]*c', tokens[1]):
+                    pending.append(tokens[2])
+            else:
+                yield tokens
+
+
+def _head_read(tokens):
+    # executed_commands has already resolved wrappers and assignment prefixes.
     if not tokens or os.path.basename(tokens[0]) != 'git':
         return False
     rest = tokens[1:]
@@ -508,7 +672,62 @@ def _head_read(tokens):
 
 def _rev_parse_head(command):
     """True only when a shell segment really invokes `git rev-parse HEAD`."""
-    return any(_head_read(tokens) for tokens in _shell_commands(command))
+    return any(_head_read(tokens) for tokens in executed_commands(command))
+
+
+def _runs_checks(command):
+    for words in executed_commands(command):
+        name, args = os.path.basename(words[0]), words[1:]
+        if '--version' in args or '--help' in args:
+            continue
+        if name in {'pytest', 'unittest'}:
+            return True
+        if re.fullmatch(r'python(?:\d+(?:\.\d+)*)?', name) and '-m' in args:
+            module_index = args.index('-m')
+            if any(arg not in {'-u', '-B', '-I', '-E', '-s', '-S', '-O', '-OO', '-q'}
+                   for arg in args[:module_index]):
+                continue
+            args = args[module_index + 1:]
+            if args and args[0] in {'pytest', 'unittest'}:
+                return True
+            if args and args[0] == 'coverage':
+                name, args = 'coverage', args[1:]
+        if name == 'coverage' and args and args[0] == 'run' and '-m' in args:
+            module_index = args.index('-m')
+            if any(arg not in {'--branch', '--parallel-mode', '-p', '--timid'}
+                   for arg in args[1:module_index]):
+                continue
+            module = args[module_index + 1:]
+            if module and module[0] in {'pytest', 'unittest'}:
+                return True
+        if name in {'node', 'nodejs'} and args and args[0] == '--test':
+            return True
+        if name in {'npm', 'pnpm', 'yarn'}:
+            script = args[1:] if args and args[0] in {'run', 'run-script'} else args
+            if script and re.fullmatch(r'test(?::[\w-]+)?', script[0]):
+                return True
+    return False
+
+
+def _node_skips(text):
+    """Bound skip annotations from native Node TAP/spec reporters."""
+    counts = re.findall(r'(?m)^(?:#|ℹ) skipped (\d+)\s*$', text)
+    skips = []
+    for line in text.splitlines():
+        tap = re.match(r'^\s*ok \d+ - (.*?)\s+# SKIP(?:\s+(.*))?$', line)
+        spec = re.match(r'^\s*﹣ (.*?) \([^)]*\) # (.*)$', line)
+        if tap or spec:
+            name, reason = (tap or spec).groups()
+            reason = reason.strip() if reason else None
+            if spec and reason == 'SKIP':
+                reason = None
+            skips.append({'name': name.strip()[:200], 'reason': reason[:320] if reason else None})
+    if not counts and not skips:
+        return {}
+    count = max(sum(map(int, counts)), len(skips))
+    return {'skipCount': count, 'skippedTests': skips[:16],
+            'unknownSkipReasons': max(0, count - sum(s['reason'] is not None for s in skips)),
+            **({'skipsTruncated': True} if len(skips) > 16 else {})}
 
 
 def _pull_reference(data, arguments):
@@ -549,6 +768,18 @@ def observe_tool_result(name, arguments, output, call_id):
     error = bool(data.get('isError') or data.get('error') or exit_code not in (None, 0))
     status, kind, summary = 'observed', None, ''
     revision = None
+    content_reference = None
+    if name == 'mcp__github__get_file_contents' and not error:
+        # MCP renders a loaded resource as a success header, its URI, then the
+        # file text. Match only that envelope, never a URI inside file content.
+        loaded = re.match(r'^successfully downloaded text file \(SHA: '+_SHA+r'\)\n'
+            r'\[repo://('+_NAME+'/'+_NAME+r')/sha/('+_SHA+r')/contents/([^\]\r\n]+)\]\n', body)
+        if (loaded and str(arguments.get('ref', '')).lower() == loaded[2].lower()
+                and f"{arguments.get('owner')}/{arguments.get('repo')}".lower() == loaded[1].lower()
+                and arguments.get('path') == loaded[3]):
+            revision = loaded[2].lower()
+            content_reference = loaded[1].lower()
+            kind, summary = 'revision', 'GitHub file content loaded at immutable revision; PR head is separate.'
     if name == 'git_clone':
         # Native git_clone verifies HEAD before emitting this receipt. Do not
         # infer a revision from requested arguments or arbitrary clone logs.
@@ -558,21 +789,24 @@ def observe_tool_result(name, arguments, output, call_id):
             revision = clone[1].lower()
             exit_code, kind, summary = 0, 'revision', 'Git clone HEAD verified against the requested commit.'
     if name == 'bash':
-        checks = re.search(r'Ran \d+ tests?(?: in [\d.]+s)?|\d+ passed(?:, \d+ failed)?|FAILED \([^\n)]{0,80}\)|# pass \d+', text)
-        if checks and re.search(r'\b(?:pytest|unittest)\b|\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b|\bnode\b[^\n]*--test', command):
+        checks = re.search(r'Ran \d+ tests?(?: in [\d.]+s)?|\d+ passed(?:, \d+ failed)?|FAILED \([^\n)]{0,80}\)|(?:#|ℹ) pass \d+', text)
+        if checks and _runs_checks(command):
             kind, summary = 'checks', checks[0].strip()
-            failed_checks = re.search(r'\b[1-9]\d* (?:failed|errors?)\b|FAILED \(|(?m:^EXIT_CODE=[1-9]\d*\s*$)', text)
+            failed_checks = re.search(r'\b[1-9]\d* (?:failed|errors?)\b|FAILED \('
+                r'|(?m:^(?:EXIT_CODE|PYTEST_EXIT|NODE_EXIT|TEST_EXIT)=-?[1-9]\d*\s*$)'
+                r'|(?m:^(?:#|ℹ) (?:fail|cancelled) [1-9]\d*\s*$)', text)
             if error or failed_checks:
                 status = 'failed'
-            elif exit_code == 0 and re.search(r'(?m)(?:^OK(?:\s|$))|(?:\d+ passed)|(?:# pass \d+)', text):
+            elif exit_code == 0 and re.search(r'(?m)(?:^OK(?:\s|$))|(?:\d+ passed)|(?:(?:#|ℹ) pass \d+)', text):
                 status = 'passed'
         elif exit_code == 0 and re.search(r'\bgit\b[^\n;|&]*\bcommit\b', command) and re.search(r'(?m)^\[[^\]\n]+ [a-f0-9]{7,40}\]', text):
             kind, summary = 'commit', 'Git commit returned successfully; publication is separate.'
         elif exit_code == 0 and re.search(r'\bgit\b[^\n;|&]*\bpush\b', command) and re.search(r'(?m)^\s+\S+\s+\S+\s+->\s+\S+', text):
             kind, summary = 'publication', 'Git push returned a remote-ref update; verify the remote head and CI.'
         if _rev_parse_head(command):
-            match = re.search(r'(?m)^('+_SHA+r')\s*$', text)
-            revision = match[1].lower() if match else None
+            observed = {sha.lower() for sha in re.findall(
+                r'(?m)^(?:(?:HEAD|REV|REVISION|HEAD_SHA)=)?('+_SHA+r')\s*$', text)}
+            revision = next(iter(observed)) if len(observed) == 1 else None
             if revision and kind is None:
                 kind, summary = 'revision', 'Git HEAD read-back observed.'
     if 'github' in name or name == 'bash' and exit_code == 0:
@@ -614,17 +848,25 @@ def observe_tool_result(name, arguments, output, call_id):
         'summary':summary[:320]}
     if revision:
         receipt['revision'] = revision
-        if data.get('headRefOid') or isinstance(data.get('head'),dict) and data['head'].get('sha'):
+        if content_reference:
+            receipt['revisionSource'] = 'repository_content'
+            receipt['repository'] = content_reference
+        elif data.get('headRefOid') or isinstance(data.get('head'),dict) and data['head'].get('sha'):
             receipt['revisionSource'] = 'pr_head'
             pull = _pull_reference(data, arguments)
             if pull:
                 receipt['repository'], receipt['pullRequest'] = pull
     if exit_code is not None:
         receipt['exitCode'] = exit_code
+    dirty = re.findall(r'(?m)^DIRTY=(\d+)\s*$', text)
+    if dirty:
+        receipt['workingTreeClean'] = all(int(value) == 0 for value in dirty)
     if command:
         receipt['command'] = redact_text(command)[:512]
         receipt['commandTruncated'] = len(command) > 512
         receipt['commandSha256'] = hashlib.sha256(command.encode()).hexdigest()
+    if kind == 'checks':
+        receipt.update(_node_skips(text))
     if status == 'unknown':
         receipt['outcomeUnknown'] = True
     artifact = re.search(r'Full output: (\.tool-results/[a-f0-9]{32}\.txt)', text)
@@ -662,14 +904,27 @@ def evidence_event(message):
         return None
     if isinstance(value.get('revision'), str) and re.fullmatch(_SHA, value['revision']):
         result['revision'] = value['revision'].lower()
-    if value.get('revisionSource') == 'pr_head':
-        result['revisionSource'] = 'pr_head'
+    if value.get('revisionSource') in {'pr_head', 'repository_content'}:
+        result['revisionSource'] = value['revisionSource']
         if isinstance(value.get('repository'), str) and re.fullmatch(_NAME + '/' + _NAME, value['repository']):
             result['repository'] = value['repository'].lower()
         if type(value.get('pullRequest')) is int and value['pullRequest'] > 0:
             result['pullRequest'] = value['pullRequest']
     if type(value.get('exitCode')) is int:
         result['exitCode'] = value['exitCode']
+    if type(value.get('workingTreeClean')) is bool:
+        result['workingTreeClean'] = value['workingTreeClean']
+    for key in ('skipCount', 'unknownSkipReasons'):
+        if type(value.get(key)) is int and value[key] >= 0:
+            result[key] = value[key]
+    if isinstance(value.get('skippedTests'), list):
+        result['skippedTests'] = [
+            {'name': redact_text(item['name'])[:200],
+             'reason': redact_text(item['reason'])[:320] if isinstance(item.get('reason'), str) else None}
+            for item in value['skippedTests'][:16] if isinstance(item, dict)
+            and isinstance(item.get('name'), str)]
+    if value.get('skipsTruncated') is True:
+        result['skipsTruncated'] = True
     if value.get('outcomeUnknown') is True:
         result['outcomeUnknown'] = True
     if value.get('commandTruncated') is True:
@@ -688,4 +943,5 @@ def reusable_checks(receipts, revision):
         return []
     return [r for r in receipts if isinstance(r, dict) and r.get('source') == 'tool_result'
             and r.get('kind') == 'checks' and r.get('status') == 'passed'
-            and r.get('revision') == revision.lower() and r.get('exitCode') == 0]
+            and r.get('revision') == revision.lower() and r.get('exitCode') == 0
+            and r.get('workingTreeClean') is not False]

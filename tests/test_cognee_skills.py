@@ -77,7 +77,7 @@ class CogneeSkillsTests(unittest.TestCase):
     def test_import_timeout_comes_from_shared_config(self):
         from popot_agents.runtime_config import RUNTIME
         adapter = Mock()
-        with patch.dict(sys.modules, {'cognee_memory': adapter}), \
+        with patch.dict(sys.modules, {'popot_agents.worker.cognee_memory': adapter}), \
              patch.dict(os.environ, {'DEFAULT_USER_PASSWORD': 'test-only'}), \
              patch.dict(RUNTIME['timeouts'], {'memory_skill_import_seconds': 487}), \
              patch.object(sys, 'argv', ['import_skills.py']), \

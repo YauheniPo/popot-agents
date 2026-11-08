@@ -10,6 +10,11 @@ from .errors import AgentRunError
 from .workflow import include_interventions
 
 
+def _at_implementation_boundary(remaining):
+    return remaining is not None and remaining <= (
+        RUNTIME['timeouts']['turn_response_margin_seconds'] + RUNTIME['timeouts']['min_turn_seconds'])
+
+
 def _run_turns(execution):
     while True:
         execution.stage = 'begin_turn'
@@ -59,10 +64,20 @@ class _RootExecution:
         self.config = {**(self.config or {}), '_workflow': workflow.meta}
         self.save(self.record.messages)
 
+    def implementation_remaining(self):
+        if (self.workflow and not self.workflow.meta.get('verificationPhaseStarted')
+                and hasattr(self.delegation, 'implementation_remaining')):
+            return self.delegation.implementation_remaining(self.session_id)
+        return None
+
     def send(self):
-        return (self.record.worker.send(self.message.strip(), timeout_seconds=min(
-            self.workflow.policy['turn_seconds'], self.workflow.remaining())) if self.workflow
-            else self.record.worker.send(self.message.strip()))
+        if not self.workflow:
+            return self.record.worker.send(self.message.strip())
+        timeout = min(self.workflow.policy['turn_seconds'], self.workflow.remaining())
+        implementation = self.implementation_remaining()
+        if implementation is not None and implementation > 0:
+            timeout = min(timeout, implementation)
+        return self.record.worker.send(self.message.strip(), timeout_seconds=timeout)
 
     def record_result(self, result):
         workflow, record = self.workflow, self.record
@@ -73,9 +88,14 @@ class _RootExecution:
                 self.server.store.recent_interventions(self.session_id), intervention_ids)
             self.stage = 'record_result'
             checkpoint = record.worker.get_checkpoint() if hasattr(record.worker, 'get_checkpoint') else None
-            terminal = workflow.record(result, checkpoint)
+            yield_for_verification = _at_implementation_boundary(self.implementation_remaining())
+            terminal = workflow.record(result, checkpoint, yield_for_verification=yield_for_verification)
             if terminal is not None:
                 result = terminal
+            if (yield_for_verification and terminal is not None
+                    and terminal.get('outcome', {}).get('status') == 'partial'):
+                workflow.meta.update(state='running', awaiting_children=True, verificationPhaseStarted=True)
+                terminal = None
             workflow.meta['waiting_for'] = 'children' if terminal is None and result.get('outcome', {}).get('reason') == 'child_pending' else None
         history = record.messages + [{'role': 'user', 'content': self.message.strip()},
                                      {'role': 'assistant', 'content': result['answer']}]
@@ -119,6 +139,10 @@ class _RootExecution:
         failure = {'code': code, 'stage': self.stage, 'error_type': type(exc).__name__,
                    'childSessionIds': list(dict.fromkeys(sid for sid in pending if isinstance(sid, str))),
                    'deadlineExpired': workflow.remaining() <= 0}
+        diagnostic = getattr(exc, 'diagnostic', None)
+        if isinstance(diagnostic, dict):
+            failure['diagnostic'] = {key: diagnostic[key] for key in
+                ('task', 'phase', 'reason', 'operation', 'command', 'exit_code') if key in diagnostic}
         if isinstance(exc, OSError) and type(exc.errno) is int:
             failure['errno'] = exc.errno
         trace_event('workflow_interrupted', session_id=self.session_id, **failure)
@@ -182,17 +206,37 @@ class _ChildExecution:
         workflow, job = self.workflow, self.job
         if workflow is None:
             return None
+        self.service._remaining(job)
         if workflow.remaining() < RUNTIME['timeouts']['min_turn_seconds']:
             return workflow.stop({'answer': 'No budget remains for another worker turn',
                                   'outcome': workflow.meta.get('outcome')}, 'workflow_deadline_exhausted')
+        previous = job.config['_ax_delegation'].get('workflow', {})
+        if isinstance(previous.get('checkpoint'), dict):
+            workflow.meta.setdefault('checkpoint', previous['checkpoint'])
+        while _at_implementation_boundary(self.service.implementation_remaining(job.session_id)):
+            outcome = workflow.meta.get('outcome') or job.chat.get_checkpoint().get('outcome') or {}
+            result = {'answer': 'Initial implementation window ended; checkpoint retained for verification.',
+                'outcome': {**outcome, 'status': 'partial', 'evidence': outcome.get('evidence', []),
+                    'errors': outcome.get('errors', []), 'remaining_work': outcome.get('remaining_work') or
+                    ['Arrange independent review and QA before resuming corrective work']}}
+            terminal = self.record_result(result)
+            if terminal is not None:
+                return terminal
+            self.advance(result)
+            self.service._remaining(job)
         workflow.begin()
-        job.config['_ax_delegation']['workflow'] = {'state': 'running', 'turns': workflow.meta['turns']}
+        job.config['_ax_delegation']['workflow'] = {key: workflow.meta[key]
+            for key in ('state', 'turns', 'checkpoint') if key in workflow.meta}
         self.service._save(job, 'TASK_STATE_WORKING')
 
     def send(self):
-        return self.job.chat.send(self.message, timeout_seconds=min(
-            self.service._remaining(self.job), self.workflow.policy['turn_seconds']) if self.workflow
-            else self.service._remaining(self.job))
+        timeout = self.service._remaining(self.job)
+        if self.workflow:
+            timeout = min(timeout, self.workflow.policy['turn_seconds'])
+            implementation = self.service.implementation_remaining(self.job.session_id)
+            if implementation is not None:
+                timeout = min(timeout, implementation)
+        return self.job.chat.send(self.message, timeout_seconds=timeout)
 
     def record_result(self, result):
         workflow, job = self.workflow, self.job
@@ -202,10 +246,12 @@ class _ChildExecution:
             self.service.store.recent_interventions(job.session_id), self.intervention_ids)
         if workflow is None:
             return result
-        terminal = workflow.record(result, job.chat.get_checkpoint())
+        terminal = workflow.record(result, job.chat.get_checkpoint(), yield_for_verification=
+            _at_implementation_boundary(self.service.implementation_remaining(job.session_id)))
         meta['outcome'] = workflow.meta['outcome']
         meta['outcomeRecordedAt'] = workflow.meta['outcomeRecordedAt']
-        meta['workflow'] = {key: workflow.meta[key] for key in ('state', 'turns')}
+        meta['workflow'] = {key: workflow.meta[key]
+            for key in ('state', 'turns', 'checkpoint') if key in workflow.meta}
         if terminal is not None:
             return terminal
         servers = job.config.get('mcpServers', {})

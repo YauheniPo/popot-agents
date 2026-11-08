@@ -2,10 +2,13 @@
 
 import base64
 import hashlib
+import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,6 +48,50 @@ main()
 
 @unittest.skipUnless(os.getenv('AX_TEST_LIVE'), 'requires local AX/Substrate and worker image')
 class LiveSessionLifecycleTests(unittest.TestCase):
+    def test_unconfirmed_suspend_waits_for_native_snapshot_before_continuing(self):
+        root = Path(__file__).resolve().parents[2]
+        image = os.getenv('AX_TEST_WORKER_IMAGE') or (
+            root / 'ax_local/.local/worker-image').read_text().strip()
+        environment = {'PATH': str(root / 'ax_local/.local/bin') + os.pathsep + os.environ['PATH'],
+                       'KUBECONFIG': str(root / 'ax_local/.local/kubeconfig')}
+        with patch.dict(os.environ, environment), patch.dict(AX_CONFIG, {'snapshot_mode': 'data'}):
+            runner = LifecycleRunner(image=image, model='unused', base_url='http://localhost:1/v1')
+            chat = runner.start_chat(uuid.uuid4().hex[:16])
+            try:
+                self.assertEqual(chat.send('remember 137')['answer'], 'fresh|remember 137')
+                command = runner._run
+                def lose_suspend_reply(*args, **kwargs):
+                    result = command(*args, **kwargs)
+                    if args[0] == 'suspend':
+                        raise subprocess.TimeoutExpired(['ax', 'suspend'], .01)
+                    return result
+                with patch.object(runner, '_run', side_effect=lose_suspend_reply):
+                    chat.after_turn()
+                self.assertEqual(chat.status, 'snapshot_unconfirmed')
+                self.assertEqual(chat.send('continue')['answer'], 'preserved|remember 137|continue')
+                self.assertEqual(chat.status, 'running')
+                result = runner._run('ssh', chat.container_name, '--', 'sha256sum',
+                                    '/workspace/lifecycle-artifact.bin')
+                self.assertIn(hashlib.sha256(bytes(range(256)) * 4096).hexdigest(), result.stdout)
+            finally:
+                chat.close()
+                runner.shutdown_worker_queue()
+                runner.maintenance()
+                # AX retains golden actors after removing a custom Task. This
+                # fixture's unique template cannot belong to another session.
+                actors = subprocess.run(['kubectl-ate', '--context=' + AX_CONFIG['context'],
+                    'get', 'actors', '-A', '-o', 'json'], capture_output=True,
+                    text=True, check=True, timeout=30)
+                prefix = chat.container_name + '-tmpl-'
+                for actor in json.loads(actors.stdout)['actors']:
+                    template = actor.get('actorTemplate', {})
+                    if (template.get('atespace') == AX_CONFIG['atespace']
+                            and template.get('name', '').startswith(prefix)):
+                        metadata = actor['metadata']
+                        subprocess.run(['kubectl-ate', '--context=' + AX_CONFIG['context'],
+                            'delete', 'actor', metadata['name'], '-a', metadata['atespace'],
+                            '--any-state'], capture_output=True, text=True, check=True, timeout=30)
+
     def test_suspend_continuation_and_expiry_restore_context(self):
         root = Path(__file__).resolve().parents[2]
         image = os.getenv('AX_TEST_WORKER_IMAGE') or (
@@ -100,8 +147,8 @@ class LiveSessionLifecycleTests(unittest.TestCase):
                 resumed.restore(committed)
                 resumed.after_turn()
 
-                # Advance the idle age; no two-hour wall-clock wait is needed.
-                server.live[sid].last_used = time.monotonic() - 7201
+                # Advance beyond the worker's configured retention without waiting.
+                server.live[sid].last_used = time.monotonic() - resumed.idle_timeout_seconds - 1
                 server.service_actions()
                 self.assertTrue(resumed.closed)
                 self.assertNotIn(sid, server.live)

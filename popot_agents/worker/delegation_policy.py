@@ -1,12 +1,13 @@
 """Guide model-selected delegation using user context and available capabilities."""
 
 import json
-import re
+import os
 
 from popot_agents.child_results import completed_answer  # Compatibility import for existing callers.
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import ToolInputError
+from popot_agents.work_evidence import executed_commands
 from .turn_memory import scrub
 
 
@@ -15,12 +16,39 @@ class DelegationContextError(ToolInputError):
     retryable = False
 
 
+def _publication_command(words):
+    """Identify git/gh writes after global options, never from argument text."""
+    program = os.path.basename(words[0])
+    rest = words[1:]
+    operands = ({'-c', '-C', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'}
+                if program == 'git' else {'-R', '--repo', '--hostname'})
+    flags = {'--no-pager', '-P', '--paginate', '-p', '--bare', '--no-replace-objects',
+             '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs',
+             '--icase-pathspecs', '--no-optional-locks', '--no-lazy-fetch'}
+    while rest and rest[0].startswith('-'):
+        option, separator, _ = rest[0].partition('=')
+        if option in operands:
+            rest = rest[1 if separator else 2:]
+        elif program == 'git' and (rest[0] in flags or separator and option == '--exec-path'
+                                  or rest[0][:2] in {'-c', '-C'} and len(rest[0]) > 2):
+            rest = rest[1:]
+        elif program == 'gh' and rest[0].startswith('-R') and len(rest[0]) > 2:
+            rest = rest[1:]
+        else:
+            return None
+    if program == 'git' and rest and rest[0] in {'commit', 'commit-tree', 'push'}:
+        return rest[0]
+    if program == 'gh' and rest[:2] in [['pr', 'create'], ['pr', 'merge']]:
+        return 'push'
+    return None
+
+
 def check_publication_owner(name, arguments, context):
     """Coordinate branch publication; role credentials remain the security boundary."""
-    if context and context.get('role') == 'code_reviewer' and name == 'bash':
-        command = arguments.get('command', '')
-        if isinstance(command, str) and re.search(
-                r'\bgit(?:\s+(?:-c|-C)\s+\S+)*\s+commit\b', command):
+    writes = ({_publication_command(words) for words in executed_commands(arguments.get('command'))}
+              if name == 'bash' else set())
+    if context and context.get('role') == 'code_reviewer':
+        if writes & {'commit', 'commit-tree'}:
             raise ToolInputError('The code reviewer cannot create commits; delegate authorized fixes to backend_engineer.')
     if context is None or 'publication_owner' not in context or context.get('publication_owner') == context.get('session_id'):
         return
@@ -28,9 +56,7 @@ def check_publication_owner(name, arguments, context):
         'push_files','create_or_update_file','delete_file','create_branch',
         'create_pull_request','merge_pull_request','update_pull_request_branch'}
     if name == 'bash':
-        command = arguments.get('command','')
-        branch_write = isinstance(command,str) and bool(re.search(
-            r'\bgit(?:\s+(?:-c|-C)\s+\S+)*\s+push\b|\bgh\s+pr\s+(?:create|merge)\b',command))
+        branch_write = 'push' in writes
     if branch_write:
         raise ToolInputError('Branch publication belongs to integration owner '+
             str(context.get('publication_owner') or 'not assigned')+

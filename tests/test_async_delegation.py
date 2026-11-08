@@ -190,7 +190,7 @@ class AsyncServiceTests(unittest.TestCase):
         self.assertGreaterEqual(peak[0],4)
         self.assertEqual(pool.reservations,{})
 
-    def test_retained_sandbox_reduces_reachable_depth_without_blocking_every_branch(self):
+    def test_retained_sandbox_preserves_reachable_depth_when_pool_has_capacity(self):
         from ax_local.api.worker_queue import WorkerQueue
         from ax_local.api.delegation import Job,Run
         from popot_agents.orchestrator.main import AgentRunError
@@ -201,11 +201,11 @@ class AsyncServiceTests(unittest.TestCase):
         def job(i,depth):
             return Job(f'{i:016x}',{'_ax_delegation':{'lineage':['role']*depth}},'',run,run.deadline)
         for i in range(4):run.admitted[str(i)]=job(i,2)
-        for depth in (3,4,5):
+        for depth in (3,4,5,6):
             child=job(depth+10,depth)
             self.assertTrue(self.service._can_start(child))
             run.admitted[child.session_id]=child
-        with self.assertRaises(AgentRunError):self.service._can_start(job(20,6))
+        with self.assertRaises(AgentRunError):self.service._can_start(job(20,7))
 
     def test_terminal_result_is_published_after_previous_attempt_cleanup(self):
         entered,release=threading.Event(),threading.Event();self.addCleanup(release.set)

@@ -7,6 +7,7 @@ JSON-экранирования и дополнительных библиоте
 | Каталог | Что менять | Основные файлы |
 | --- | --- | --- |
 | `delegation/` | Выбор специалиста, передача контекста, продолжение задачи | [instructions.md](delegation/instructions.md), [handoff.md](delegation/handoff.md), [review_routing.md](delegation/review_routing.md) |
+| `workflow/` | Координация и использование общего бюджета реализации и проверок | [coordinator.md](workflow/coordinator.md), [budget.md](workflow/budget.md) |
 | `review/` | Проверка исходников, публикация, checkpoint и продолжение ревью | [source_and_publication.md](review/source_and_publication.md), [verification.md](review/verification.md), [checkpoint_instructions.md](review/checkpoint_instructions.md), [focus.md](review/focus.md) |
 | `reporting/` | Финальный ответ, требования к evidence, исправление формата | [result_contract.md](reporting/result_contract.md), [final.md](reporting/final.md), [repair.md](reporting/repair.md) |
 | `memory/` | Использование исторической памяти и извлечение новых записей | [lifecycle.md](memory/lifecycle.md), [extract.md](memory/extract.md) |
@@ -42,6 +43,7 @@ Available delegation capability:
 | --- | --- |
 | `delegation/instructions` | `role`, `review_routing`, `description` |
 | `delegation/handoff` | `handoff`, `context` |
+| `workflow/budget` | `budget` — JSON серверного остатка времени и состояния проверки |
 | `reporting/result_contract` | `artifact_count_limit`, `artifact_byte_limit` |
 | `reporting/final` | `result_contract` |
 | `reporting/repair` | `reason`, `result_contract` |

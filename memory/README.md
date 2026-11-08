@@ -36,6 +36,11 @@ separate from agent memory request budgets. Healthy containers do not mean skill
 indexing has finished. If an import fails, the services remain running; rerun
 `bash memory/up.sh` to update the same nodes.
 
+Local Python sources and configuration are mounted as read-only directories so
+atomic editor saves remain visible inside Cognee. After changing these Compose
+mounts, rerun `bash memory/up.sh` to recreate the container; a restart alone keeps
+its old mounts. The named storage volumes retain existing memory.
+
 The API and UI versions are pinned in `[tool.popot.build]` in the root
 `pyproject.toml`: `COGNEE_VERSION`, `COGNEE_COMMIT` and `COGNEE_SOURCE_SHA256`.
 Update all three together; the loader checks that the image tag matches the commit.

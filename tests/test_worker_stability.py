@@ -29,7 +29,6 @@ class StabilityTests(unittest.TestCase):
 
     def test_independent_leaf_children_fit_beside_parent_in_three_worker_pool(self):
         from ax_local.api.delegation import DelegationService, Run, Job
-        from types import SimpleNamespace
         pool = WorkerQueue(3, 1)
         pool.acquire('root'); pool.reserve('run', 2)
         run = Run(time.monotonic() + 10, pool=pool, reservation='run', reserved_slots=2)
@@ -37,8 +36,8 @@ class StabilityTests(unittest.TestCase):
             return Job(sid, {'allowed_roles': [], '_ax_delegation': {'lineage': ['parent', sid]}},
                        'fixture', run, run.deadline)
         first = child('a' * 16); run.admitted[first.session_id] = first
-        service = SimpleNamespace(policy={'max_depth': 2})
-        self.assertTrue(DelegationService._can_start(service, child('b' * 16)))
+        service = DelegationService({}, {'max_depth': 2}, {}, None, '')
+        self.assertTrue(service._can_start(child('b' * 16)))
 
     def test_child_deadline_leaves_parent_a_finalization_window(self):
         from ax_local.tests import test_delegation as delegation_tests

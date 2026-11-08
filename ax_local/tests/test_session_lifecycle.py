@@ -314,10 +314,128 @@ class AxLifecycleTests(unittest.TestCase):
         self.assertNotIn('private-value', log.getvalue())
         self.assertEqual(run.call_count, 1)
         with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)) as run, \
+             patch.object(self.runner, 'task_status', return_value=('Suspended', None)), \
              patch.object(self.runner, 'remote', return_value={'status': 'ok'}):
             self.chat.resume()
         self.assertEqual(run.call_args.args[0], 'resume')
         self.assertEqual(self.chat.status, 'running')
+
+    def test_unconfirmed_suspend_waits_before_issuing_resume(self):
+        self.chat.suspended = True
+        self.chat._snapshot_issue = 'snapshot_unconfirmed'
+        phases = iter(['Suspending', 'Suspended'])
+        observed = []
+
+        def status(*args, **kwargs):
+            phase = next(phases)
+            observed.append(phase)
+            return phase, None
+
+        def command(*args, **kwargs):
+            if not observed or observed[-1] != 'Suspended':
+                raise AgentRunError('AssignWorker prerequisite not met: ACTOR_STATE_SUSPENDING')
+            return subprocess.CompletedProcess([], 0)
+
+        with patch.object(self.runner, 'task_status', side_effect=status), \
+             patch.object(self.runner, '_run', side_effect=command) as run, \
+             patch.object(self.runner, 'remote', return_value={'status': 'ok'}), \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            self.chat.resume(timeout_seconds=10)
+        self.assertEqual(observed, ['Suspending', 'Suspended'])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(self.chat.status, 'running')
+
+    def test_unconfirmed_suspend_timeout_never_resumes_or_sends_a_turn(self):
+        self.chat.suspended = True
+        self.chat._snapshot_issue = 'snapshot_unconfirmed'
+        self.chat._checkpoint = {'outcome': {'evidence': ['saved receipt']}}
+        clock = [100.0]
+        def sleep(seconds):
+            clock[0] += seconds
+        with patch.object(self.runner, 'task_status', return_value=('Suspending', None)), \
+             patch.object(self.runner, '_run') as run, \
+             patch.object(self.runner, 'remote') as remote, \
+             patch('ax_local.api.ax_runner.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('ax_local.api.ax_runner.time.sleep', side_effect=sleep):
+            with self.assertRaises(orchestrator.AgentResumeError):
+                self.chat.send('must not execute', timeout_seconds=1)
+        run.assert_not_called()
+        remote.assert_not_called()
+        self.assertEqual(self.chat._checkpoint['outcome']['evidence'], ['saved receipt'])
+        self.assertFalse(self.chat.closed)
+        self.assertTrue(self.chat._suspend_pending)
+        with patch.object(self.runner, 'task_status', return_value=('Suspended', 'TaskSuspended')) as status, \
+             patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'remote', return_value={'status': 'ok'}):
+            self.chat.resume(timeout_seconds=10)
+        status.assert_called_once()
+        self.assertFalse(self.chat._suspend_pending)
+
+    def test_suspend_retry_is_bounded_and_timeout_preserves_last_phase(self):
+        self.chat.suspended = True
+        self.chat._snapshot_issue = 'snapshot_unconfirmed'
+        clock = [100.0]
+        def sleep(seconds):
+            clock[0] += seconds
+        with patch.object(self.runner, 'task_status', return_value=('Failed', 'ActorSuspendFailed')), \
+             patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)) as run, \
+             patch.object(self.runner, 'remote') as remote, \
+             patch('ax_local.api.ax_runner.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('ax_local.api.ax_runner.time.sleep', side_effect=sleep):
+            with self.assertRaises(orchestrator.AgentResumeError) as caught:
+                self.chat.resume(timeout_seconds=5)
+        self.assertEqual([call.args[0] for call in run.call_args_list], ['suspend'] * 3)
+        self.assertEqual(clock[0], 105)
+        self.assertEqual(caught.exception.diagnostic['phase'], 'Failed')
+        self.assertEqual(caught.exception.diagnostic['reason'], 'ActorSuspendFailed')
+        remote.assert_not_called()
+
+    def test_unconfirmed_suspend_retries_transient_status_failure_within_deadline(self):
+        self.chat.suspended = True
+        self.chat._snapshot_issue = 'snapshot_unconfirmed'
+        with patch.object(self.runner, 'task_status', side_effect=[
+                AgentRunError('controller unavailable'), ('Running', None), ('Suspended', None)]) as status, \
+             patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'remote', return_value={'status': 'ok'}), \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            self.chat.resume(timeout_seconds=10)
+        self.assertEqual(status.call_count, 3)
+
+    def test_unconfirmed_suspend_terminal_failure_does_not_issue_resume(self):
+        self.chat.suspended = True
+        self.chat._snapshot_issue = 'snapshot_unconfirmed'
+        with patch.object(self.runner, 'task_status', return_value=('Failed', 'ActorCreationFailed')), \
+             patch.object(self.runner, '_run') as run, \
+             patch.object(self.runner, 'remote') as remote:
+            with self.assertRaises(orchestrator.AgentResumeError) as caught:
+                self.chat.resume(timeout_seconds=10)
+        run.assert_not_called()
+        remote.assert_not_called()
+        self.assertEqual(caught.exception.diagnostic['phase'], 'Failed')
+        self.assertEqual(caught.exception.diagnostic['reason'], 'ActorCreationFailed')
+
+    def test_unconfirmed_suspend_recovers_controller_failure_before_resume(self):
+        self.chat.suspended = True
+        self.chat._snapshot_issue = 'snapshot_unconfirmed'
+        with patch.object(self.runner, 'task_status', side_effect=[
+                ('Failed', 'ActorSuspendFailed'), ('Suspended', 'TaskSuspended')]), \
+             patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)) as run, \
+             patch.object(self.runner, 'remote', return_value={'status': 'ok'}), \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            self.chat.resume(timeout_seconds=10)
+        self.assertEqual([c.args[0] for c in run.call_args_list], ['suspend', 'resume'])
+        self.assertEqual(self.chat.status, 'running')
+
+    def test_unconfirmed_suspend_reissues_request_that_may_not_have_arrived(self):
+        self.chat.suspended = True
+        self.chat._snapshot_issue = 'snapshot_unconfirmed'
+        with patch.object(self.runner, 'task_status', side_effect=[
+                ('Running', 'TaskRunning'), ('Suspended', 'TaskSuspended')]), \
+             patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)) as run, \
+             patch.object(self.runner, 'remote', return_value={'status': 'ok'}), \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            self.chat.resume(timeout_seconds=10)
+        self.assertEqual([c.args[0] for c in run.call_args_list], ['suspend', 'resume'])
 
     def test_failed_resume_never_sends_model_turn_and_preserves_checkpoint_for_retry(self):
         self.chat.suspended = True

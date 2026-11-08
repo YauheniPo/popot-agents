@@ -25,6 +25,46 @@ def wait_for(predicate):
 
 
 class WorkerQueueTests(unittest.TestCase):
+    def test_reservation_resize_accounts_for_other_workflows_atomically(self):
+        queue = WorkerQueue(7, 1)
+        queue.acquire('root')
+        for key in ('first', 'second'):
+            queue.reserve_full(key, 2, deadline=time.monotonic()+1)
+            for index in range(2):
+                queue.acquire(key+str(index), reservation=key)
+        start = threading.Barrier(3)
+        results = []
+        def expand(key):
+            start.wait()
+            results.append(queue.resize_reservation(key, 4))
+        threads = [threading.Thread(target=expand, args=(key,)) for key in ('first', 'second')]
+        for thread in threads: thread.start()
+        start.wait()
+        for thread in threads: thread.join(1)
+        self.assertEqual(sorted(results), [False, True])
+        self.assertEqual(len(queue.active)+queue._reserved(), 7)
+        expanded = next(key for key, count in queue.reservations.items() if count == 4)
+        self.assertTrue(queue.resize_reservation(expanded, 2))
+        self.assertEqual(queue._reserved(), 0)
+        self.assertFalse(queue.resize_reservation(expanded, 1))
+        self.assertEqual(queue.reservations[expanded], 2)
+
+    def test_shrinking_reservation_wakes_waiting_worker(self):
+        queue = WorkerQueue(3, 1)
+        queue.reserve_full('run', 3, deadline=time.monotonic()+1)
+        queue.acquire('retained', reservation='run')
+        queue.acquire('active', reservation='run')
+        leases = []
+        thread = threading.Thread(target=lambda: leases.append(queue.acquire('other')))
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        wait_for(lambda: queue.status()['queued'] == 1)
+        self.assertEqual(leases, [])
+        self.assertTrue(queue.resize_reservation('run', 2))
+        thread.join(1)
+        self.assertEqual(len(leases), 1)
+        self.assertEqual(queue.status()['active'], 3)
+
     def test_ten_workflows_each_keep_a_two_level_delegation_path(self):
         queue = WorkerQueue(30, 1)
         for index in range(10):

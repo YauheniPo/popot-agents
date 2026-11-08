@@ -247,7 +247,7 @@ class AxAgentRunner:
         except FileNotFoundError as exc:
             raise AgentConfigurationError('AX CLI is not installed') from exc
         deadline = time.monotonic() + timeout
-        pending, answer = b'', None
+        pending, answer, stderr = b'', None, b''
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ, 'out')
@@ -262,7 +262,10 @@ class AxAgentRunner:
                             selector.unregister(key.fileobj)
                             continue
                         if key.data == 'err':
-                            continue  # Drain without retaining CLI diagnostics/credentials.
+                            # Keep a bounded tail; _command_error redacts capabilities
+                            # before any diagnostic leaves the adapter.
+                            stderr = (stderr + chunk)[-8192:]
+                            continue
                         pending += chunk
                         if len(pending) > 8 * 1024 * 1024:
                             raise AgentRunError('AX worker response is too large')
@@ -279,7 +282,8 @@ class AxAgentRunner:
                                 answer = line.decode('utf-8')
                 code = process.wait(timeout=max(.001, deadline - time.monotonic()))
                 if code:
-                    raise AgentRunError('AX command failed while receiving agent progress')
+                    raise self._command_error(args[0], subprocess.CompletedProcess(
+                        command, code, '', stderr.decode('utf-8', errors='replace')))
                 return subprocess.CompletedProcess(command, code, answer or '', '')
         finally:
             if process.poll() is None:
@@ -545,6 +549,7 @@ class AxChat:
     _close_lock: object = field(default_factory=threading.RLock, repr=False)
     _messages: list[dict[str, str]] = field(default_factory=list, repr=False)
     _snapshot_issue: str | None = field(default=None, repr=False)
+    _suspend_pending: bool = field(default=False, repr=False)
     _checkpoint: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -577,6 +582,7 @@ class AxChat:
                         timeout=min(remaining, AX_CONFIG["probe_timeout_seconds"]))
                     if phase == "Suspended":
                         self.suspended = True
+                        self._suspend_pending = False
                         if self.runner.worker_pool is not None:
                             self.runner.worker_pool.release(self.container_name)
                         self._snapshot_issue = None
@@ -595,11 +601,55 @@ class AxChat:
                 # A timeout leaves the phase uncertain. Require an explicit
                 # resume/check before the next turn, retaining files and lease.
                 self.suspended = True
+                self._suspend_pending = True
                 self._snapshot_issue = 'snapshot_unconfirmed'
                 emit_progress('snapshot_unconfirmed', mode=self.runner.snapshot_mode)
                 print(f"AX suspension not confirmed: task={self.container_name} "
                       f"reason={type(exc).__name__}; task retained for retry",
                       file=sys.stderr, flush=True)
+
+    def _confirm_suspended(self, remaining) -> None:
+        """Finish an uncertain suspend before changing AX's desired state."""
+        retry_at, retry_delay = 0, 1
+        diagnostic = {'task': self.container_name, 'operation': 'confirm_suspension'}
+
+        def budget(limit):
+            try:
+                return remaining(limit)
+            except TimeoutError as exc:
+                exc.diagnostic = dict(diagnostic)
+                raise
+
+        while True:
+            budget(AX_CONFIG['probe_timeout_seconds'])
+            try:
+                phase, reason = self.runner.task_status(self.container_name,
+                    timeout=budget(AX_CONFIG['probe_timeout_seconds']))
+            except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
+                diagnostic['probe_error_type'] = type(exc).__name__
+                phase, reason = None, None
+            if phase:
+                diagnostic.update(phase=phase, reason=reason)
+            if phase == 'Suspended':
+                self._suspend_pending = False
+                return
+            if phase == 'Running' or (phase == 'Failed' and reason == 'ActorSuspendFailed'):
+                if time.monotonic() >= retry_at:
+                    # Substrate resumes the same in-progress snapshot on a retry.
+                    # Repeating suspend never starts a model turn or replays tools.
+                    emit_progress('snapshot_suspend_retry', mode=self.runner.snapshot_mode)
+                    try:
+                        self.runner._run('suspend', 'task', self.container_name,
+                            timeout=budget(AX_CONFIG['cli_timeout_seconds']))
+                    except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
+                        diagnostic['retry_error_type'] = type(exc).__name__
+                    retry_at = time.monotonic() + retry_delay
+                    retry_delay = min(retry_delay * 2, 30)
+            elif phase in {'Failed', 'Completed', 'Terminating'}:
+                failure = AgentRunError('AX suspension could not be confirmed')
+                failure.diagnostic = diagnostic
+                raise failure
+            time.sleep(budget(AX_CONFIG['startup_probe_interval_seconds']))
 
     def resume(self, *, timeout_seconds: float | None = None) -> None:
         with self._close_lock:
@@ -612,9 +662,6 @@ class AxChat:
             deadline = started + AX_CONFIG["startup_timeout_seconds"]
             if timeout_seconds is not None:
                 deadline = min(deadline, started + timeout_seconds)
-            if self.runner.worker_pool is not None:
-                self.runner.worker_pool.acquire(self.container_name, deadline=deadline)
-
             def remaining(limit):
                 budget = deadline - time.monotonic()
                 if budget <= 0:
@@ -622,6 +669,11 @@ class AxChat:
                 return min(limit, budget)
 
             try:
+                if self._suspend_pending or self._snapshot_issue == 'snapshot_unconfirmed':
+                    self._suspend_pending = True
+                    self._confirm_suspended(remaining)
+                if self.runner.worker_pool is not None:
+                    self.runner.worker_pool.acquire(self.container_name, deadline=deadline)
                 self.runner._run("resume", "task", self.container_name,
                                  timeout=remaining(AX_CONFIG["cli_timeout_seconds"]))
                 self.suspended = False
@@ -638,14 +690,16 @@ class AxChat:
                 print(f"AX task resumed: task={self.container_name} "
                       f"snapshot={self.runner.snapshot_mode} elapsed_seconds={elapsed}",
                       file=sys.stderr, flush=True)
-            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError):
+            except (AgentRunError, AgentConfigurationError, subprocess.TimeoutExpired, OSError) as exc:
                 self.suspended = True
                 self._snapshot_issue = 'resume_failed'
                 emit_progress('snapshot_restore_failed', mode=self.runner.snapshot_mode)
-                raise AgentResumeError(
+                failure = AgentResumeError(
                     "AX chat worker could not resume; task and checkpoint retained; "
                     "retry with the same sessionId"
-                ) from None
+                )
+                failure.diagnostic = {'task': self.container_name, **getattr(exc, 'diagnostic', {})}
+                raise failure from None
 
     def is_alive(self, timeout_seconds: float = AX_CONFIG["probe_timeout_seconds"]) -> bool:
         if self.closed:

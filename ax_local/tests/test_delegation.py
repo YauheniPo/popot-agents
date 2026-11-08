@@ -63,6 +63,117 @@ class FakeRunner:
 
 
 class DelegationTests(unittest.TestCase):
+    def test_retained_verifiers_leave_capacity_for_fixes_and_can_resume(self):
+        from ax_local.api.worker_queue import WorkerQueue
+        self.runner.worker_queue = pool = WorkerQueue(7, 1)
+        root = pool.acquire(self.parent)
+        self.addCleanup(pool.release, self.parent, root)
+        self.policy['max_calls_per_turn'] = 6
+        self.roles['code_reviewer'] = {**self.roles['qa_engineer'], '_ax_role': 'code_reviewer'}
+        self.roles['tech_lead']['allowed_roles'] = ['code_reviewer', 'qa_engineer', 'backend_engineer']
+        original = self.runner.start_chat
+        def start(sid, config, **kwargs):
+            name = 'popot-chat-'+sid
+            lease = pool.acquire(name, reservation=config['_ax_delegation']['pool_reservation'])
+            chat = original(sid, config, **kwargs)
+            chat.container_name = name
+            close = chat.close
+            def release():
+                close()
+                pool.release(name, lease)
+            chat.close = release
+            return chat
+        self.runner.start_chat = start
+        def callback(chat, task):
+            if task == 'verify':
+                chat.files['evidence.txt'] = 'saved evidence'
+                return {'answer': 'Findings', 'outcome': {'status': 'blocked'}}
+            if task == 'resume verification':
+                self.assertEqual(chat.files['evidence.txt'], 'saved evidence')
+            self.assertLessEqual(len(pool.active)+pool._reserved(), pool.max_workers)
+            return {'answer': 'Done', 'outcome': {'status': 'completed'}}
+        self.runner.callback = callback
+        with self.service.workflow(self.parent, time.monotonic()+5, max_turns=4,
+                metadata={'turns': 1, 'run_id': 'run'}), self.service.turn(self.parent, 5):
+            retained = []
+            for role in ('code_reviewer', 'qa_engineer'):
+                task = self.wait_task(self.send(role=role, message_id=role, task='verify')['id'], role=role)
+                self.assertTrue(task['metadata']['resumable'])
+                retained.append((role, task['id']))
+            backend = self.wait_task(self.send(message_id='fixes')['id'])
+            self.assertEqual(backend['status']['state'], 'TASK_STATE_COMPLETED')
+            self.assertEqual(backend['metadata']['outcome']['status'], 'completed')
+            self.assertEqual(pool.status()['active'], 3)
+            for role, sid in retained:
+                self.service.dispatch(self.token, role, 'SendMessage', {'message': {
+                    'messageId': 'resume-'+role, 'role': 'ROLE_USER', 'taskId': sid,
+                    'parts': [{'text': 'resume verification'}]}})
+                self.assertEqual(self.wait_task(sid, role=role)['metadata']['outcome']['status'], 'completed')
+            self.assertEqual(len(self.runner.chats), 3)
+            self.assertEqual(pool.status()['active'], 1)
+            self.assertEqual(pool.reservations['run'], 2)
+        self.assertEqual(pool.reservations, {})
+
+    def test_capacity_timeout_reports_blocked_without_starting_worker(self):
+        from ax_local.api.delegation import Job, Run
+        from ax_local.api.worker_queue import WorkerQueue
+        pool = WorkerQueue(3, 1)
+        pool.acquire('root')
+        pool.reserve_full('run', 2, deadline=time.monotonic()+1)
+        for index in range(2): pool.acquire('retained-'+str(index), reservation='run')
+        run = Run(time.monotonic()+1, persistent=True, pool=pool,
+                  reservation='run', reserved_slots=2)
+        config = {**self.roles['backend_engineer'], '_ax_delegation': {
+            'parent_session_id': self.parent, 'root_session_id': self.parent,
+            'lineage': ['tech_lead', 'backend_engineer']}}
+        job = Job('f'*16, config, 'fix findings', run, time.monotonic()+.03)
+        self.service.jobs[job.session_id] = job
+        self.service._execute(job)
+        task = self.service._task(self.store.get(job.session_id))
+        self.assertEqual(task['status']['state'], 'TASK_STATE_COMPLETED')
+        self.assertEqual(task['metadata']['outcome']['status'], 'blocked')
+        self.assertEqual(task['metadata']['outcome']['reason'], 'worker_capacity_unavailable')
+        self.assertEqual(task['metadata']['failure']['code'], 'worker_capacity_unavailable')
+        self.assertEqual(self.runner.chats, [])
+        self.assertEqual(pool.status()['active'], 3)
+
+    def test_capacity_wait_wakes_after_release_and_honors_cancellation(self):
+        from ax_local.api.delegation import Job, Run
+        from ax_local.api.worker_queue import WorkerQueue
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                pool = WorkerQueue(5, 1)
+                pool.acquire('root')
+                pool.reserve_full('run', 2, deadline=time.monotonic()+1)
+                for index in range(2):
+                    pool.acquire('retained-'+str(index), reservation='run')
+                    pool.acquire('other-'+str(index))
+                run = Run(time.monotonic()+5, persistent=True, pool=pool,
+                          reservation='run', reserved_slots=2)
+                config = {**self.roles['backend_engineer'], '_ax_delegation': {
+                    'parent_session_id': self.parent, 'root_session_id': self.parent,
+                    'lineage': ['tech_lead', 'backend_engineer']}}
+                sid = ('e' if cancel else 'd')*16
+                job = Job(sid, config, 'fix findings', run, run.deadline)
+                self.service.jobs[sid] = job
+                before = len(self.runner.chats)
+                thread = threading.Thread(target=self.service._execute, args=(job,))
+                thread.start()
+                self.addCleanup(thread.join, 2)
+                wait_for(lambda: job.waiting_for == 'capacity')
+                self.assertEqual(len(self.runner.chats), before)
+                if cancel:
+                    job.canceled.set()
+                else:
+                    for index in range(2): pool.release('other-'+str(index))
+                thread.join(2)
+                self.assertFalse(thread.is_alive())
+                task = self.service._task(self.store.get(sid))
+                self.assertEqual(task['status']['state'],
+                                 'TASK_STATE_CANCELED' if cancel else 'TASK_STATE_COMPLETED')
+                self.assertEqual(len(self.runner.chats), before+(not cancel))
+                self.assertEqual(run.admitted, {})
+
     def test_corrupted_artifact_cannot_be_reported_durable_or_delete_the_sandbox(self):
         self.runner.callback = lambda *_: {'answer': 'Patch prepared', 'outcome': {
             'status': 'completed', 'evidence': ['tests passed'], 'errors': [], 'remaining_work': [],
@@ -214,20 +325,23 @@ class DelegationTests(unittest.TestCase):
 
     def test_same_revision_review_and_qa_overlap_with_reserved_capacity(self):
         from ax_local.api.worker_queue import WorkerQueue
-        self.policy['max_depth']=5
+        self.policy['max_depth']=2
         self.runner.worker_queue=pool=WorkerQueue(10,1)
         root=pool.acquire(self.parent)
         self.addCleanup(pool.release,self.parent,root)
         self.roles['code_reviewer']={**self.roles['qa_engineer'],'_ax_role':'code_reviewer'}
+        self.roles['code_reviewer']['allowed_roles']=['backend_engineer']
+        self.roles['qa_engineer']['allowed_roles']=['backend_engineer']
         self.roles['tech_lead']['allowed_roles']=['code_reviewer','qa_engineer']
         original=self.runner.start_chat
         def start(sid,config,**kwargs):
-            token=pool.acquire(sid,reservation=config['_ax_delegation']['pool_reservation'])
+            name = 'popot-chat-'+sid
+            token=pool.acquire(name,reservation=config['_ax_delegation']['pool_reservation'])
             chat=original(sid,config,**kwargs)
-            chat.container_name=sid
+            chat.container_name=name
             close=chat.close
             def release():
-                close();pool.release(sid,token)
+                close();pool.release(name,token)
             chat.close=release
             return chat
         self.runner.start_chat=start
@@ -247,21 +361,44 @@ class DelegationTests(unittest.TestCase):
                     'configuration':{'returnImmediately':True}})['task']
                 jobs.append((role,task['id']))
             self.assertTrue(all(e.wait(1) for e in entered.values()))
-            self.assertEqual(pool.reservations['run'],5)
+            self.assertEqual(pool.reservations['run'],3)
             # Root + two verifiers; spare reservations remain available to nested tasks.
             self.assertEqual(pool.status()['active'],3)
             finish.set()
             for role,sid in jobs:self.wait_task(sid,role=role)
+            self.assertEqual(pool.status()['active'],1)
+            self.assertEqual(pool.reservations['run'],2)
         wait_for(lambda:pool.status()['active']==1)
         self.assertEqual(pool.reservations,{})
+
+    def test_admission_cleanup_preserves_outcome_when_pool_closes(self):
+        from ax_local.api.delegation import Job,Run
+        from ax_local.api.worker_queue import WorkerQueue
+        pool=WorkerQueue(3,1);pool.acquire('root');pool.reserve('run',2)
+        run=Run(time.monotonic()+5,persistent=True,pool=pool,reservation='run',reserved_slots=2)
+        config={**self.roles['backend_engineer'],'_ax_delegation':{
+            'parent_session_id':self.parent,'root_session_id':self.parent,
+            'lineage':['tech_lead','backend_engineer']}}
+        job=Job('f'*16,config,'finish',run,run.deadline)
+        self.service.jobs[job.session_id]=job
+        def callback(*_args):
+            pool.close()
+            return {'answer':'verified','outcome':{'status':'completed'}}
+        self.runner.callback=callback
+        self.service._execute(job)
+        task=self.service._task(self.store.get(job.session_id))
+        self.assertEqual(task['status']['state'],'TASK_STATE_COMPLETED')
+        self.assertEqual(task['metadata']['outcome']['status'],'completed')
+        self.assertEqual(run.admitted,{})
 
     def test_admission_depends_on_depth_capacity_instead_of_role_or_revision(self):
         from ax_local.api.delegation import Job,Run
         from ax_local.api.worker_queue import WorkerQueue
-        for slots,revision,expected in [(6,'a',True),(6,'b',True),(5,'a',False)]:
-            with self.subTest(slots=slots,revision=revision):
+        for slots,capacity,revision,expected in [(6,10,'a',True),(6,10,'b',True),
+                                                 (5,10,'a',True),(5,5,'a',False)]:
+            with self.subTest(slots=slots,capacity=capacity,revision=revision):
                 self.policy['max_depth']=5
-                pool=WorkerQueue(10,1);pool.reserve('run',slots)
+                pool=WorkerQueue(capacity,1);pool.reserve('run',slots)
                 run=Run(time.monotonic()+5,reserved_slots=slots,pool=pool,reservation='run')
                 first=Job('a'*16,{'_ax_role':'code_reviewer','allowed_roles':['analyst'],'_ax_delegation':{
                     'revision':'a'*40,'lineage':['tech_lead','code_reviewer']}},'',run,run.deadline)
@@ -269,6 +406,83 @@ class DelegationTests(unittest.TestCase):
                     'revision':revision*40,'lineage':['tech_lead','qa_engineer']}},'',run,run.deadline)
                 run.admitted[first.session_id]=first
                 self.assertEqual(self.service._can_start(second),expected)
+                if expected:
+                    run.admitted.clear()
+                    self.assertTrue(self.service._can_start(second))
+                    self.assertEqual(pool.reservations['run'],slots)
+
+    def test_saturated_siblings_leave_reserved_capacity_for_a_nested_leaf(self):
+        from ax_local.api.worker_queue import WorkerQueue
+        self.runner.worker_queue=pool=WorkerQueue(3,1)
+        root=pool.acquire(self.parent)
+        self.addCleanup(pool.release,self.parent,root)
+        self.roles['code_reviewer']={**self.roles['qa_engineer'],'_ax_role':'code_reviewer',
+                                     'allowed_roles':['backend_engineer']}
+        self.roles['tech_lead']['allowed_roles'].append('code_reviewer')
+        self.roles['analyst']={**self.roles['qa_engineer'],'_ax_role':'analyst'}
+        self.roles['backend_engineer']['allowed_roles'].append('analyst')
+        original=self.runner.start_chat
+        def start(sid,config,**kwargs):
+            name='popot-chat-'+sid
+            lease=pool.acquire(name,reservation=config['_ax_delegation']['pool_reservation'])
+            chat=original(sid,config,**kwargs)
+            chat.container_name=name
+            close=chat.close
+            def release():
+                close();pool.release(name,lease)
+            chat.close=release
+            return chat
+        self.runner.start_chat=start
+        backend_entered=threading.Event();reviewer_entered=threading.Event()
+        allow_leaf=threading.Event();leaf_finished=threading.Event();finish=threading.Event()
+        self.addCleanup(allow_leaf.set);self.addCleanup(finish.set)
+        def callback(chat,task):
+            role=chat.config['_ax_role']
+            if role=='backend_engineer':
+                backend_entered.set()
+                self.assertTrue(allow_leaf.wait(2))
+                token=self.service.worker_environment(chat.session_id,chat.config)['AX_DELEGATION_TOKEN']
+                leaf=self.send(token=token,role='analyst',task='inspect leaf')
+                result=self.wait_task(leaf['id'],token=token,role='analyst')
+                self.assertEqual(result['status']['state'],'TASK_STATE_COMPLETED')
+                leaf_finished.set()
+                self.assertTrue(finish.wait(2))
+            elif role=='code_reviewer':
+                reviewer_entered.set()
+            return {'answer':'verified','outcome':{'status':'completed'}}
+        self.runner.callback=callback
+        with self.service.workflow(self.parent,time.monotonic()+5,max_turns=4,
+                metadata={'turns':1,'run_id':'run'}),self.service.turn(self.parent,5):
+            backend=self.send()
+            self.assertTrue(backend_entered.wait(1))
+            reviewer=self.send(role='code_reviewer',message_id='review')
+            wait_for(lambda:self.service.jobs[reviewer['id']].waiting_for=='capacity')
+            self.assertFalse(reviewer_entered.is_set())
+            self.assertEqual(pool.reservations['run'],2)
+            allow_leaf.set()
+            self.assertTrue(leaf_finished.wait(1))
+            self.assertFalse(reviewer_entered.is_set())
+            finish.set()
+            self.assertTrue(reviewer_entered.wait(1))
+            for task,role in ((backend,'backend_engineer'),(reviewer,'code_reviewer')):
+                self.assertEqual(self.wait_task(task['id'],role=role)['status']['state'],
+                                 'TASK_STATE_COMPLETED')
+        self.assertEqual(pool.status()['active'],1)
+        self.assertEqual(pool.reservations,{})
+
+    def test_reduced_path_reservation_rejects_deeper_child(self):
+        from ax_local.api.delegation import Job,Run
+        from ax_local.api.worker_queue import WorkerQueue
+        from popot_agents.orchestrator.main import WorkerCapacityTimeout
+        pool=WorkerQueue(2,1);pool.acquire('root');pool.reserve('run',1)
+        run=Run(time.monotonic()+5,reserved_slots=1,pool=pool,reservation='run')
+        first=Job('a'*16,{'allowed_roles':['qa_engineer'],'_ax_delegation':{
+            'lineage':['tech_lead','backend_engineer']}},'',run,run.deadline)
+        self.assertTrue(self.service._can_start(first))
+        run.admitted[first.session_id]=first
+        leaf=Job('b'*16,{'_ax_delegation':{
+            'lineage':['tech_lead','backend_engineer','qa_engineer']}},'',run,run.deadline)
+        with self.assertRaises(WorkerCapacityTimeout):self.service._can_start(leaf)
 
     def test_continuation_preserves_prior_child_assignment_restrictions(self):
         contexts=[]
@@ -485,11 +699,11 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(saved['roleConfig']['_ax_delegation']['root_call_id'],'call-root')
         self.assertEqual(saved['roleConfig']['_ax_delegation']['root_session_id'],self.parent)
 
-    def test_last_coordinator_turn_rejects_child_before_startup(self):
+    def test_exceeded_coordinator_turn_rejects_child_before_startup(self):
         with self.service.workflow(self.parent,time.monotonic()+30,max_turns=4,
-                                   metadata={'turns':4,'original_task':'fix'}):
+                                   metadata={'turns':5,'original_task':'fix'}):
             with self.service.turn(self.parent,5):
-                with self.assertRaisesRegex(A2AError,'last.*turn|acceptance'):
+                with self.assertRaisesRegex(A2AError,'turn limit'):
                     self.send()
         self.assertEqual(self.runner.chats,[])
 
