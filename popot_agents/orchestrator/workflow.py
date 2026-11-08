@@ -6,9 +6,15 @@ import uuid
 from datetime import datetime, timezone
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.progress import redact_text
 
 
 from popot_agents.workflow_config import POLICY, validate_policy, role_policy
+
+
+def public_outcome_reason(outcome):
+    reason = outcome.get('reason') if isinstance(outcome, dict) else None
+    return redact_text(reason)[:240] if isinstance(reason, str) and reason.strip() else None
 
 
 def public_workflow(saved, *, include_result=False):
@@ -19,6 +25,8 @@ def public_workflow(saved, *, include_result=False):
     result.update(runId=meta.get('run_id'), startedAt=meta.get('started_at'),
                   finishedAt=meta.get('finished_at'), waitingFor=meta.get('waiting_for'))
     result['deadlineAt'] = datetime.fromtimestamp(meta['deadlineAt'], timezone.utc).isoformat()
+    if meta['state'] in {'blocked', 'failed'}:
+        result['reason'] = public_outcome_reason(meta.get('outcome'))
     if include_result and meta['state'] in {'completed', 'blocked', 'failed'}:
         messages = saved.get('messages', [])
         answer = messages[-1]['content'] if messages and messages[-1]['role'] == 'assistant' else ''

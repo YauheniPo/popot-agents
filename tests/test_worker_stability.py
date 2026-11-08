@@ -63,6 +63,13 @@ class StabilityTests(unittest.TestCase):
         self.assertIn('capacity', reason)
         self.assertNotIn('private-value', reason)
 
+    def test_ax_lookup_failure_identifies_control_plane_without_leaking_detail(self):
+        from ax_local.api.delegation import _worker_failure
+        from popot_agents.orchestrator.main import AgentRunError
+        reason, failure = _worker_failure(AgentRunError('AX task lookup failed'), 'worker_startup')
+        self.assertEqual(failure['code'], 'ax_task_lookup_failed')
+        self.assertIn('AX task lookup', reason)
+
     def test_memory_capture_records_summary_and_save_timeouts_separately(self):
         from popot_agents.worker.turn_memory import TurnMemory
         for phase in ('summary', 'save'):

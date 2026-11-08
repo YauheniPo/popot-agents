@@ -1,3 +1,6 @@
+# Named build contexts cannot carry a tag, so the pinned Go image is also
+# passed as an argument to keep every FROM reference versioned.
+ARG GO_IMAGE=golang:1.27.1-bookworm
 FROM --platform=$BUILDPLATFORM python-base AS build-versions
 WORKDIR /build
 COPY pyproject.toml ./
@@ -15,6 +18,18 @@ RUN . /build-versions.env \
 WORKDIR /src/ax
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax ./cmd/ax
+
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS substrate-cli
+ARG TARGETOS
+ARG TARGETARCH
+COPY --from=build-versions /build-versions.env /build-versions.env
+RUN . /build-versions.env \
+    && git clone --filter=blob:none https://github.com/agent-substrate/substrate.git /src/substrate \
+    && git -C /src/substrate checkout "$SUBSTRATE_COMMIT" \
+    && test "$(git -C /src/substrate rev-parse HEAD)" = "$SUBSTRATE_COMMIT"
+WORKDIR /src/substrate
+RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+    go build -mod=vendor -trimpath -o /kubectl-ate ./cmd/kubectl-ate
 
 FROM python-base
 LABEL com.popot.project="popot-agents"
@@ -35,6 +50,7 @@ COPY pyproject.toml ./
 RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
     && python -m pip install --no-cache-dir --only-binary=:all: --group build --group orchestrator --group ax
 COPY --from=ax-cli /ax /usr/local/bin/ax
+COPY --from=substrate-cli /kubectl-ate /usr/local/bin/kubectl-ate
 COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.py popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/skills.py /app/popot_agents/
 COPY popot_agents/prompts.py /app/popot_agents/

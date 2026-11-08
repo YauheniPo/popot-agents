@@ -98,7 +98,7 @@ class DelegationTests(unittest.TestCase):
                     'configuration':{'returnImmediately':True}})['task']
                 jobs.append((role,task['id']))
             self.assertTrue(all(e.wait(1) for e in entered.values()))
-            self.assertEqual(pool.reservations['run'],9)
+            self.assertEqual(pool.reservations['run'],5)
             # Root + two verifiers; spare reservations remain available to nested tasks.
             self.assertEqual(pool.status()['active'],3)
             finish.set()
@@ -316,6 +316,19 @@ class DelegationTests(unittest.TestCase):
                 context=self.service.turn_context(self.parent)
                 self.assertEqual(context['authorization'],authority)
                 self.assertEqual(context['assignments'],[])
+                self.assertEqual(context['role'],'tech_lead')
+
+    def test_reviewer_handoff_assigns_backend_publication_owner(self):
+        reviewer = 'f' * 16
+        self.roles['code_reviewer'] = {'agent': 'test', 'instructions': 'review',
+                                       'tools': [], '_ax_role': 'code_reviewer',
+                                       'allowed_roles': ['backend_engineer']}
+        token = self.service.worker_environment(reviewer, self.roles['code_reviewer'])['AX_DELEGATION_TOKEN']
+        with self.service.workflow(reviewer, time.monotonic() + 5, max_turns=4), self.service.turn(reviewer, 5):
+            self.assertIsNone(self.service.turn_context(reviewer)['publication_owner'])
+            child = self.send(token=token, task='fix approved finding')
+            self.assertEqual(self.service.turn_context(reviewer)['publication_owner'], child['id'])
+            self.wait_task(child['id'], token=token)
 
     def test_child_tool_observation_is_persisted_before_its_turn_finishes(self):
         from popot_agents.work_evidence import observe_tool_result
@@ -1346,3 +1359,12 @@ class DelegationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerFailureMappingTests(unittest.TestCase):
+    def test_unmatched_worker_detail_keeps_the_generic_code(self):
+        from ax_local.api.delegation import _worker_failure
+        from popot_agents.orchestrator.main import AgentRunError
+        reason, payload = _worker_failure(AgentRunError('AX task lookup failed unexpectedly'), 'start')
+        self.assertEqual(payload['code'], 'worker_failed')
+        self.assertNotIn('unexpectedly', reason)

@@ -117,7 +117,8 @@ class RuntimeConfigTests(unittest.TestCase):
         runner = AxAgentRunner('worker@sha256:' + 'a' * 64, 'test', 'http://model/v1')
         manifest = runner.task_manifest('0123456789abcdef')
         env = {item['name']: item['value'] for item in manifest['spec']['env']}
-        self.assertEqual(env['HARNESS_TURN_TIMEOUT_SECONDS'], '885')
+        self.assertEqual(env['HARNESS_TURN_TIMEOUT_SECONDS'],
+                         str(900 - RUNTIME['timeouts']['turn_response_margin_seconds']))
         self.assertEqual(manifest['spec']['resources'], AX_CONFIG['task_resources'])
         self.assertGreater(AX_CONFIG['route_timeout_seconds'],
                            RUNTIME['timeouts']['max_turn_seconds'] + AX_CONFIG['response_margin_seconds'])

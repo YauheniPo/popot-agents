@@ -29,6 +29,7 @@
     "SONAR_TOKEN"
   ],
   "allowed_roles": [
+    "backend_engineer",
     "qa_engineer",
     "analyst",
     "security_engineer"

@@ -28,7 +28,7 @@ from .session_store import SessionStore
 from .work_status import build_work_status
 from popot_agents.work_evidence import evidence_event
 from popot_agents.workflow_config import role_policy
-from .workflow import POLICY, WorkflowRun, public_workflow, validate_policy, recover_workflows, run_history
+from .workflow import POLICY, WorkflowRun, public_workflow, public_outcome_reason, validate_policy, recover_workflows, run_history
 
 
 MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
@@ -512,6 +512,8 @@ def create_server(
                         "runId": ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('run_id'),
                         "runStates": {r['run_id']:r['state'] for r in (saved.get('roleConfig') or {}).get('_workflow_runs',[])},
                         "outcomeStatus": (((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('outcome') or {}).get('status'),
+                        "outcomeReason": public_outcome_reason(
+                            ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('outcome')),
                         "waitingFor": (getattr(getattr(self.server,'delegation',None),'wait_state',lambda _:None)(saved['sessionId'])
                             or ((saved.get('roleConfig') or {}).get('_workflow') or {}).get('waiting_for')),
                     }

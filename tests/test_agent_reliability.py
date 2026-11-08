@@ -35,6 +35,24 @@ class AgentReliabilityTests(unittest.TestCase):
         self.assertIn('code_reviewer', ' '.join(state['outcome']['remaining_work']))
         self.assertIn('qa_engineer', ' '.join(state['outcome']['remaining_work']))
 
+    def test_reviewer_coordinator_counts_own_verified_final_revision(self):
+        revision = 'a' * 40
+        children = {
+            'b' * 16: {'role': 'backend_engineer', 'reportedAt': '2026-11-03T10:00:00Z',
+                       'outcome': {'status': 'completed', 'revision': revision,
+                                   'evidence': ['implementation committed']}},
+            'c' * 16: {'role': 'qa_engineer',
+                       'outcome': {'status': 'completed', 'revision': revision,
+                                   'evidence': ['regression checks passed']}},
+        }
+        state = {'messages': [{'role': 'user', 'content': 'Fix and review the PR'}],
+                 'outcome': {'status': 'partial'}, 'completed_delegations': children,
+                 'tool_evidence': [{'kind': 'revision', 'revision': revision, 'status': 'observed'}]}
+        _, state, _ = self.run_sequence([self.result()], state=state,
+            role={'name': 'code_reviewer', '_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual(state['outcome']['revision'], revision)
+
     def test_review_routing_depends_on_available_role_and_current_owner(self):
         from ax_local.worker.delegation import make_tools
         for role, allowed, delegate_review in (

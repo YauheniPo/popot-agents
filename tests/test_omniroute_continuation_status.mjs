@@ -17,8 +17,23 @@ test('AX child, CI and tool waits are distinguished from an unowned stalled requ
     const s=conversationStatus({...args,ax:{status:'running',waitingFor}},a);
     assert.equal(s.continuationState,expected);assert.equal(s.isStalled,false);
   }
-  assert.equal(conversationStatus({...args,ax:{status:'blocked'}},a).continuationState,'blocked');
+  const blocked=conversationStatus({...args,ax:{status:'blocked',reason:'workflow_turn_limit'}},a);
+  assert.equal(blocked.continuationState,'blocked');
+  assert.equal(blocked.continuationCode,'workflow_turn_limit');
+  assert.match(blocked.continuationReason,/workflow_turn_limit/);
 });
+test('Non-string and malformed AX reasons are not exposed as codes',()=>{
+  const s=conversationStatus({...args,ax:{status:'blocked',reason:42}},artifact({}));
+  assert.equal(s.continuationState,'blocked');
+  assert.equal(s.continuationCode,null);
+  assert.equal(s.continuationReason,'AX workflow blocked.');
+  const bad=conversationStatus({...args,ax:{status:'failed',reason:'Not a code!'}},artifact({}));
+  assert.equal(bad.continuationCode,null);
+  assert.equal(bad.continuationReason,'AX workflow failed: Not a code!');
+  const ok=conversationStatus({...args,ax:{status:'failed',reason:'workflow_turn_limit'}},artifact({}));
+  assert.equal(ok.continuationCode,'workflow_turn_limit');
+});
+
 test('Responses output and unavailable artifacts retain honest states',()=>{
   assert.equal(conversationStatus(args,{pipeline:{clientResponse:{status:'completed',output:[{type:'message'}]}}}).continuationState,'completed');
   assert.equal(conversationStatus(args,null).continuationState,'unknown');
@@ -35,6 +50,22 @@ test('pinned route and browser transformations are guarded and idempotent',async
   const patched=page(browser);
   assert.match(patched,/continuationState:e.continuationState/);
   assert.match(patched,/waiting tool/);
+  assert.match(patched,/popot-continuation-reason/);
   assert.equal(page(patched),patched);
   assert.throws(()=>page('unsupported page'));
+});
+test('AX index derives running, outcome, fallback and workflow states',async()=>{
+  const {axIndexFrom}=await import('../ax_local/omniroute_continuation_status.mjs');
+  const index=axIndexFrom({chats:[
+    {sessionId:'running',status:'running'},
+    {sessionId:'outcome',status:'idle',outcomeStatus:'completed'},
+    {sessionId:'fallback',status:'idle'},
+    {sessionId:'workflow',workflow:{state:'blocked',reason:'limit',runId:'r'},runStates:{'1':'running'}},
+  ]});
+  assert.equal(index.get('running').status,'running');
+  assert.equal(index.get('outcome').status,'completed');
+  assert.equal(index.get('fallback').status,'idle');
+  assert.equal(index.get('workflow').status,'blocked');
+  assert.equal(index.get('workflow').reason,'limit');
+  assert.equal(index.get('workflow:1').status,'running');
 });
