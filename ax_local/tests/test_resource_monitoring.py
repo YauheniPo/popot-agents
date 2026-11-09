@@ -175,7 +175,8 @@ class ResourceMonitoringTests(unittest.TestCase):
     def test_agent_panels_group_by_root_call_and_session(self):
         result=dashboard()
         variables={item['name']:item for item in result['templating']['list']}
-        self.assertTrue({'root_session_id','call_id','session_id'} <= variables.keys())
+        for name in ('root_session_id','call_id','session_id'):
+            self.assertIn(name,variables)
         for title in ('Agent activity by task','Agent CPU by task and role',
                       'Agent RSS by task and role','Agents involved in selected period'):
             chart=next(p for p in result['panels'] if p['title']==title)

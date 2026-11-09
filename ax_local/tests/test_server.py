@@ -26,6 +26,24 @@ class AxServerTests(unittest.TestCase):
             self.assertEqual(os.environ['AX_SERVER'], 'http://127.0.0.1:34967')
         self.assertEqual(run.call_count, 2)
 
+    def test_api_keeps_an_already_configured_ax_tunnel(self):
+        from ax_local.api.server import configure_ax_server_tunnel
+        with patch.dict(os.environ, {'AX_SERVER': 'http://127.0.0.1:1'}), \
+             patch('ax_local.api.server.subprocess.run') as run:
+            configure_ax_server_tunnel('kind-popot-ax', 'ate-demo-counter')
+            self.assertEqual(os.environ['AX_SERVER'], 'http://127.0.0.1:1')
+        run.assert_not_called()
+
+    def test_api_fails_when_ax_has_no_active_server_tunnel(self):
+        from ax_local.api.server import configure_ax_server_tunnel
+        listing = 'CONTEXT LOCAL PORT REMOTE SERVICE PID STATUS CREATED\n'
+        with patch.dict(os.environ, {'AX_SERVER': ''}), \
+             patch('ax_local.api.server.subprocess.run', side_effect=[
+                 subprocess.CompletedProcess([], 0, ''),
+                 subprocess.CompletedProcess([], 0, listing)]):
+            with self.assertRaisesRegex(RuntimeError, 'active ax-server tunnel'):
+                configure_ax_server_tunnel('kind-popot-ax', 'ate-demo-counter')
+
     def test_workflow_capacity_reserves_room_for_nested_specialists(self):
         from ax_local.api.server import AX_CONFIG
         with patch.dict(os.environ, {'AX_LOCAL_WORKER_IMAGE': 'test-image'}), \
