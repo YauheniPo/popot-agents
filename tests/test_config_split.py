@@ -76,15 +76,21 @@ runner.shutdown_worker_queue()
                 path.write_text(json.dumps(settings))
                 environment[f'POPOT_{name}_CONFIG'] = str(path)
             self.run_python('''
+import json
+import os
 import tempfile
 from ax_local.api.ax_runner import AxAgentRunner
+settings = json.loads(open(os.environ['POPOT_RUNTIME_CONFIG']).read())
 runner = AxAgentRunner('worker@sha256:' + 'a' * 64, 'test', 'http://model/v1')
 try:
     manifest = runner.task_manifest('0123456789abcdef')
     assert manifest['spec']['resources']['limits']['memory'] == '4Gi'
     assert runner.worker_queue.max_workers == 4
     env = {item['name']: item['value'] for item in manifest['spec']['env']}
-    assert env['HARNESS_TURN_TIMEOUT_SECONDS'] == '225'
+    timeouts = settings['timeouts']
+    turn_budget = timeouts['turn_seconds'] - timeouts['turn_response_margin_seconds']
+    actual = env['HARNESS_TURN_TIMEOUT_SECONDS']
+    assert actual == str(turn_budget), actual
 finally:
     runner.shutdown_worker_queue()
 ''', **environment)
