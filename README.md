@@ -296,7 +296,7 @@ Run this as **one line** in Bash or Zsh. The script prints the complete `curl`
 command, streams progress, then reports the task outcome:
 
 ```bash
-TASK='https://github.com/YauheniPo/popot-bot-2.0/pull/94 исправь все и подготовь к merge и sonarqube 100% и 0 issues и все комментриии должны быть порезолвлены' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
+TASK='https://github.com/YauheniPo/popot-agents/pull/57 исправь все и подготовь к merge и sonarqube 100% и 0 issues и все комментриии должны быть порезолвлены и подтяни main и учти комменты из https://github.com/YauheniPo/popot-bot-2.0/runs/129098960761' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
 
 `TASK` is the request. Empty `ROLE` uses `config/runtime.json → mcp.default_role`;
@@ -390,10 +390,13 @@ Waiting for durable children (`child_pending`) does not trigger memory extractio
 The bash schema advertises the 4000-character command limit; write longer scripts
 with `write_file` and invoke the saved file with a short command.
 
-[config/runtime.json](config/runtime.json) → `workflow` supplies shared defaults: four turns,
-900 seconds per turn, 3600 seconds including startup, two unchanged partial
-outcomes without new tool receipts before stopping, and one concurrent workflow.
-Roles may override `max_turns`, `total_seconds`, `turn_seconds` and `max_no_progress`.
+[config/runtime.json](config/runtime.json) → `workflow` supplies shared defaults: eight turns,
+900 seconds per turn, 7200 seconds including startup, two unchanged partial
+outcomes without new tool receipts before stopping, and four concurrent workflows.
+Roles may override `max_turns`, `total_seconds`, `turn_seconds`, `max_no_progress`,
+`verification_reserve_seconds` and `max_child_recoveries`. The default verification
+reserve is 1800 seconds; a child can recover twice from its turn limit, with new
+check receipts required for the second recovery.
 `max_concurrent` is always server-wide. `partial` resumes internally from the
 checkpoint; blockers and failures return immediately. Completion requires reported
 evidence; delegated implementation also requires completed reviewer and QA receipts.

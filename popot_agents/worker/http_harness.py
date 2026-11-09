@@ -20,7 +20,8 @@ from popot_agents.skills import prepare_role_config
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env, export_artifacts, read_repository_context
 from popot_agents.artifacts import ArtifactError, MAX_ARTIFACTS, validate_artifacts
 from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks
-from popot_agents.child_results import ChildResults
+from popot_agents.child_results import ChildResults, budget_recovery_allowed
+from popot_agents.workflow_config import role_policy
 from .context import compact_tool_results
 from . import mcp_client
 from .delegation_policy import (available_roles, delegation_instructions,
@@ -259,6 +260,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if previous_answer:
             user_context.append(previous_answer)
     run_id = (run_context or {}).get('run_id')
+    recovery_limit = role_policy(role_config, stored=True)['max_child_recoveries']
     resuming = bool(_checkpoint_matches_run(state, run_context) and
                     state.get('outcome', {}).get('status') in {'partial', 'blocked', 'failed'})
     included_intervention_ids = set(state.get('included_intervention_ids', [])) if resuming else set()
@@ -488,14 +490,17 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
     def save_result(answer, status, reason, report=None):
         claimed_completed = status == 'completed'
-        revision = observed_revision(report, tool_evidence,
-            (run_context or {}).get('target_revision') if role_config.get('name',role_config.get('_ax_role')) in {'code_reviewer','qa_engineer'} else None)
-        pull_request = requested_pull_request(user_context)
-        target = acceptance_revision(list(completed_delegations.values()), tool_evidence, pull_request)
         role_name = role_config.get('name', role_config.get('_ax_role'))
         children = list(completed_delegations.values())
         implementation = role_name in {'backend_engineer', 'frontend_engineer'} or any(
             child.get('role') in {'backend_engineer', 'frontend_engineer'} for child in children)
+        pinned_revision = ((run_context or {}).get('target_revision')
+            if role_name in {'code_reviewer', 'qa_engineer'} and not implementation else None)
+        revision = observed_revision(report, tool_evidence, pinned_revision)
+        pull_request = requested_pull_request(user_context)
+        # A scoped assessment stays bound to its assignment when the PR moves.
+        # The verification owner still requires review and QA of the current head.
+        target = pinned_revision or acceptance_revision(children, tool_evidence, pull_request)
         findings = list((report or {}).get('findings', []))
         if owns_verification:
             for child in latest_verification(children, target):
@@ -538,7 +543,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 'or get_file_contents with a loaded repo:// resource at the full commit SHA. '
                 'Printing REV from Python does not preserve structured PR metadata. '
                 'Do not repeat completed writes.']}
-        if status == 'completed' and target and (report or {}).get('revision') not in (None,target):
+        if status == 'completed' and not pinned_revision and target and (report or {}).get('revision') not in (None,target):
             status, reason = 'partial','acceptance_revision_mismatch'
             report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
                       ['Final acceptance must match revision '+target]}
@@ -579,11 +584,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                          'read-only tool or delegate one read-only PR-head check to a specialist. Return the '
                          'observed full SHA with the actual structured tool result, not another summary. '
                          'Reuse matching review and QA; do not repeat completed PR writes.']}
-        if status == 'completed' and (run_context or {}).get('target_revision') and role_config.get('name',role_config.get('_ax_role')) in {'code_reviewer','qa_engineer'}:
-            if revision != run_context['target_revision']:
+        if status == 'completed' and pinned_revision:
+            if revision != pinned_revision:
                 status, reason = 'partial','verification_revision_missing'
                 report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
-                    ['Observe and verify the requested revision ' + run_context['target_revision']]}
+                    ['Observe and verify the requested revision ' + pinned_revision]}
         outcome = {'status': status, 'reason': reason,
             **({key: list(dict.fromkeys(item.strip() for item in report[key]
                     if isinstance(item, str) and item.strip()))
@@ -680,8 +685,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 answer = (answer.strip() + '\n\n' if answer else '') + ('Retained evidence '
                     '(not a completion claim):\n' + '\n'.join(receipts))
         recoverable = [value for value in failed_delegations.values()
-            if value.get('resumable') and value.get('outcome', {}).get('reason') == 'workflow_turn_limit'
-            and child_recoveries.get(value.get('session_id'), 0) < 1]
+            if budget_recovery_allowed(value, child_recoveries.get(value.get('session_id'), 0), recovery_limit)]
         blocked_child = any(value not in recoverable and (value.get('status') == 'blocked' or
                             value.get('status') == 'failed' and not value.get('resumable')
                             ) for value in failed_delegations.values())
@@ -722,7 +726,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         for value in recoverable:
             report['remaining_work'].append('Resume the existing ' + value['role'] +
                 ' child with session_id=' + value['session_id'] +
-                ' once: verify existing effects and finish its concrete remaining deliverables; do not repeat writes.')
+                ': verify existing effects and finish its concrete remaining deliverables; do not repeat writes. '
+                'Further budget recovery requires new tool-observed checks and is limited to '
+                + str(recovery_limit) + ' per child.')
         status = ('Partial result: a delegated task is blocked; resolve its reported precondition.'
                   if blocked_child else
                   'Partial result: the model returned an invalid final result; inspect the saved evidence.'
@@ -920,8 +926,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             recovering_child = next((value for value in failed_delegations.values()
                                 if value.get('session_id') == session_id and value.get('role') == arguments['role']
                                 and value.get('outcome', {}).get('reason') == 'workflow_turn_limit'), None) if session_id else None
-                            if recovering_child and child_recoveries.get(session_id, 0) >= 1:
-                                raise ToolInputError('This child already used its one budget recovery; reconcile remaining work')
+                            if recovering_child and not budget_recovery_allowed(
+                                    recovering_child, child_recoveries.get(session_id, 0), recovery_limit):
+                                raise ToolInputError('Child budget recovery requires new tool-observed checks '
+                                    'and permits at most ' + str(recovery_limit) + ' recoveries; reconcile remaining work')
                             completed_child = (completed_delegations.get(session_id)
                                                if isinstance(session_id, str) else None)
                             if completed_child and completed_child['role'] != arguments['role']:

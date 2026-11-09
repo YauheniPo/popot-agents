@@ -226,7 +226,8 @@ def test_soft_cutoff_returns_resumable_checkpoint_through_real_child_execution(h
 def test_waiting_implementation_yields_at_soft_deadline_without_consuming_reserve(helper, waiting_for):
     with workflow(helper) as run:
         started = time.monotonic()
-        run.metadata['implementationDeadlineAt'] = run.metadata['deadlineAt'] - 3599.97
+        clock, waits = [started], []
+        run.metadata['implementationDeadlineAt'] = run.metadata['deadlineAt'] - (run.deadline - started - .03)
         config = {**helper.roles['backend_engineer'], '_ax_delegation': {
             'parent_session_id': helper.parent, 'root_session_id': helper.parent,
             'lineage': ['tech_lead', 'backend_engineer'],
@@ -246,10 +247,15 @@ def test_waiting_implementation_yields_at_soft_deadline_without_consuming_reserv
             helper.service.jobs[dependency.session_id] = dependency
             helper.store.save(dependency.session_id, 'test', [], 'backend_engineer', dependency.config)
             config['_ax_delegation']['depends_on'] = [dependency.session_id]
-        helper.service._execute(job)
-        elapsed = time.monotonic() - started
+        def wait(timeout):
+            waits.append(timeout)
+            clock[0] += timeout
+        with patch('time.monotonic', side_effect=lambda: clock[0]), \
+             patch.object(run.lane_condition, 'wait', side_effect=wait):
+            helper.service._execute(job)
         saved = helper.store.get(job.session_id)['roleConfig']['_ax_delegation']
-        assert elapsed < .15
+        assert sum(waits) == pytest.approx(.03, abs=.000001)
+        assert clock[0] - started == pytest.approx(.03, abs=.000001)
         assert helper.runner.chats == []
         assert saved['outcome']['status'] == 'partial'
         assert saved['outcome']['reason'] == 'verification_reserve'

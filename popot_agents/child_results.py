@@ -8,6 +8,33 @@ from popot_agents.progress import redact_text
 from popot_agents.work_evidence import child_resolution, MAX_RECEIPTS
 
 
+def budget_recovery_allowed(failure, used, limit):
+    """A repeated budget recovery needs new checks, not a rewritten summary."""
+    if (not failure.get('resumable') or failure.get('outcome', {}).get('reason') != 'workflow_turn_limit'
+            or used >= limit):
+        return False
+    if not used:
+        return True
+    def checks(outcome):
+        if not isinstance(outcome, dict):
+            return set()
+        receipts = outcome.get('checks')
+        if not isinstance(receipts, list):
+            return set()
+        return {(check.get('revision'), check['commandSha256'], check.get('summary'), check['exitCode'])
+            for check in receipts if isinstance(check, dict)
+            and check.get('kind') == 'checks' and check.get('source') == 'tool_result'
+            and check.get('status') in ('passed', 'failed') and type(check.get('exitCode')) is int
+            and isinstance(check.get('summary'), str)
+            and (check.get('revision') is None or isinstance(check['revision'], str))
+            and isinstance(check.get('commandSha256'), str)
+            and re.fullmatch(r'[a-f0-9]{64}', check['commandSha256'])
+            and isinstance(check.get('outputSha256'), str)
+            and re.fullmatch(r'[a-f0-9]{64}', check['outputSha256'])}
+    previous = failure.get('previous_failure', {}).get('outcome', {})
+    return bool(checks(failure.get('outcome', {})) - checks(previous))
+
+
 def completed_answer(output: str, role: str, *, session_id: str | None = None) -> str:
     """Validate the untrusted response envelope returned by delegate_task."""
     try:

@@ -136,6 +136,16 @@ class RuntimeConfigTests(unittest.TestCase):
                     + ax['restore_timeout_seconds'] + ax['response_margin_seconds'])
         self.assertGreater(RUNTIME['timeouts']['mcp_upstream_seconds'], required)
 
+    def test_mcp_transport_covers_the_complete_workflow_and_ax_setup(self):
+        from popot_agents.runtime_config import RUNTIME
+        from ax_local.config import AX_CONFIG
+        required = (RUNTIME['workflow']['total_seconds'] + AX_CONFIG['worker_queue_timeout_seconds']
+                    + AX_CONFIG['startup_timeout_seconds'] + AX_CONFIG['restore_timeout_seconds']
+                    + 3 * AX_CONFIG['cli_timeout_seconds'] + AX_CONFIG['response_margin_seconds'])
+        self.assertGreaterEqual(RUNTIME['timeouts']['mcp_upstream_seconds'], required)
+        self.assertEqual(RUNTIME['model']['default_max_tool_rounds'], 60)
+        self.assertEqual(RUNTIME['model']['max_tool_rounds'], 120)
+
     def test_shared_worker_budget_applies_to_ax(self):
         from popot_agents.runtime_config import RUNTIME
         from ax_local.api.ax_runner import AxAgentRunner

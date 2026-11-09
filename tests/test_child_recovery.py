@@ -1,6 +1,7 @@
 import json
 import unittest
 from unittest.mock import Mock
+from unittest.mock import patch
 
 from tests import test_agent_reliability as reliability
 
@@ -8,6 +9,64 @@ from tests import test_agent_reliability as reliability
 class ChildRecoveryTests(unittest.TestCase):
     run_sequence = reliability.AgentReliabilityTests.run_sequence
     result = staticmethod(reliability.AgentReliabilityTests.result)
+
+    def test_malformed_child_check_claims_cannot_unlock_recovery(self):
+        from popot_agents.child_results import budget_recovery_allowed
+        receipt = {'kind': 'checks', 'source': 'tool_result', 'status': 'passed', 'revision': 'b' * 40,
+            'commandSha256': 'd' * 64, 'outputSha256': 'e' * 64, 'summary': '3 passed', 'exitCode': 0}
+        malformed = [[{**receipt, field: value}] for field, value in (
+            ('status', []), ('summary', []), ('revision', {}), ('outputSha256', 'invalid'), ('exitCode', '0'))]
+        for checks in (None, '3 passed', {}, [None], *malformed):
+            with self.subTest(checks=checks):
+                failure = self.checkpoint()['failed_delegations'][0][1]
+                failure['outcome']['checks'] = checks
+                self.assertFalse(budget_recovery_allowed(failure, 1, 2))
+
+    def test_role_can_keep_a_smaller_recovery_limit(self):
+        state = self.checkpoint()
+        state['child_recoveries'] = {'a' * 16: 1}
+        delegate = Mock(return_value=self.completed())
+        _, state, _ = self.run_sequence([
+            self.continuation(), self.result('partial', remaining=['verify'])],
+            delegate=delegate, state=state,
+            role={'name': 'planner', 'tools': [], 'coordination': {'max_child_recoveries': 1}})
+        delegate.assert_not_called()
+        self.assertEqual(state['outcome']['status'], 'blocked')
+
+    def test_second_budget_recovery_requires_new_tool_observed_checks(self):
+        from popot_agents.runtime_config import RUNTIME
+        for progress in (False, True):
+            with self.subTest(progress=progress):
+                checkpoint = self.checkpoint()
+                checkpoint['child_recoveries'] = {'a' * 16: 1}
+                failure = checkpoint['failed_delegations'][0][1]
+                receipt = {'kind': 'checks', 'source': 'tool_result', 'status': 'passed',
+                    'revision': 'b' * 40, 'commandSha256': 'd' * 64,
+                    'outputSha256': 'e' * 64, 'summary': '3 passed', 'exitCode': 0}
+                failure['previous_failure'] = {'role': 'qa_engineer', 'session_id': 'a' * 16,
+                    'outcome': {**failure['outcome'], 'checks': [receipt]}}
+                failure['outcome']['checks'] = [{**receipt, 'callId': 'repeated-command',
+                    'outputSha256': 'f' * 64, 'summary': '4 passed' if progress else '3 passed'}]
+                delegate = Mock(return_value=self.completed())
+                with patch.dict(RUNTIME['workflow'], max_child_recoveries=2):
+                    _, state, _ = self.run_sequence([
+                        self.continuation('b' * 40), self.result('partial', remaining=['verify'])],
+                        delegate=delegate, state=checkpoint)
+                self.assertEqual(delegate.call_count, int(progress))
+                self.assertEqual(state['child_recoveries']['a' * 16], 2 if progress else 1)
+                self.assertEqual(bool(state.get('resolved_delegations')), progress)
+
+    def test_exhausted_configured_recovery_budget_still_blocks(self):
+        from popot_agents.runtime_config import RUNTIME
+        state = self.checkpoint()
+        state['child_recoveries'] = {'a' * 16: 2}
+        delegate = Mock(return_value=self.completed())
+        with patch.dict(RUNTIME['workflow'], max_child_recoveries=2):
+            _, state, _ = self.run_sequence([
+                self.continuation(), self.result('partial', remaining=['verify'])],
+                delegate=delegate, state=state)
+        delegate.assert_not_called()
+        self.assertEqual(state['outcome']['status'], 'blocked')
 
     def checkpoint(self, reason='workflow_turn_limit', role='qa_engineer'):
         return {'messages': [{'role': 'user', 'content': 'Verify the existing artifact'}],
