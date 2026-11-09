@@ -33,7 +33,9 @@ class ProcessMetricsTests(unittest.TestCase):
     def test_otlp_payload_has_cumulative_cpu_and_pid_reuse_identity(self):
         samples = [dict(pid=41, name='python', start_ticks=900, cpu_seconds=2.5,
                         rss_bytes=8192, virtual_bytes=16384, threads=3)]
-        payload = make_payload(samples, task='popot-chat-abc', timestamp_ns=123456789)
+        payload = make_payload(samples, task='popot-chat-abc', timestamp_ns=123456789,
+                               role='code_reviewer', agent='omniroute_cloud',
+                               session_id='a'*16, root_session_id='b'*16, call_id='call-123')
         metrics = payload['resourceMetrics'][0]['scopeMetrics'][0]['metrics']
         cpu = next(m for m in metrics if m['name'] == 'popot.sandbox.process.cpu')
         self.assertEqual(cpu['sum']['aggregationTemporality'], 2)
@@ -44,6 +46,10 @@ class ProcessMetricsTests(unittest.TestCase):
         self.assertEqual(labels['task'], 'popot-chat-abc')
         self.assertEqual(labels['process_start'], '900')
         self.assertEqual(labels['pid'], '41')
+        self.assertEqual({key: labels[key] for key in
+            ('role','agent','session_id','root_session_id','call_id')}, {
+            'role':'code_reviewer','agent':'omniroute_cloud','session_id':'a'*16,
+            'root_session_id':'b'*16,'call_id':'call-123'})
         self.assertTrue(any(m['name'] == 'popot.sandbox.process.sampled_at' for m in metrics))
 
     def test_disabled_exporter_never_starts_thread(self):
@@ -51,6 +57,20 @@ class ProcessMetricsTests(unittest.TestCase):
             with ProcessMetrics.from_env():
                 pass
         thread.assert_not_called()
+
+    def test_exporter_reads_task_identity_from_environment(self):
+        values={'POPOT_RESOURCE_METRICS_URL':'http://collector/v1/metrics',
+                'POPOT_RESOURCE_METRICS_TASK':'popot-chat-'+'a'*16,
+                'POPOT_RESOURCE_METRICS_ROLE':'backend_engineer',
+                'POPOT_RESOURCE_METRICS_AGENT':'omniroute_cloud',
+                'POPOT_RESOURCE_METRICS_SESSION_ID':'a'*16,
+                'POPOT_RESOURCE_METRICS_ROOT_SESSION_ID':'b'*16,
+                'POPOT_RESOURCE_METRICS_CALL_ID':'call-root'}
+        with patch.dict('os.environ',values,clear=True):
+            exporter=ProcessMetrics.from_env()
+        self.assertEqual((exporter.role,exporter.agent,exporter.session_id,
+                          exporter.root_session_id,exporter.call_id),
+                         ('backend_engineer','omniroute_cloud','a'*16,'b'*16,'call-root'))
 
     def test_thread_stops_even_when_harness_fails(self):
         with patch('ax_local.worker.process_metrics.threading.Thread') as thread:

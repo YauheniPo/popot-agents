@@ -11,7 +11,9 @@ class WorkStatusTests(unittest.TestCase):
         root = {'sessionId': 'a'*16, 'role':'planner', 'updatedAt':'2026-10-31T20:00:00Z',
                 'messages':[{'role':'user','content':'private-task'}],
                 'roleConfig':{'_workflow':{'state':'blocked', 'phase':'finished', 'outcome':{
-                    'status':'blocked', 'evidence':[], 'remaining_work':['reconcile'], 'errors':['MCP failed']}}}}
+                    'status':'blocked', 'evidence':[], 'remaining_work':['reconcile'], 'errors':['MCP failed'],
+                    'failure':{'code':'worker_timeout','stage':'waiting_for_children',
+                               'error_type':'TimeoutError','childSessionIds':['b'*16]}}}}}
         child = {'sessionId':'b'*16, 'role':'backend_engineer','updatedAt':'2026-10-31T19:59:00Z',
             'roleConfig':{'_ax_delegation':{'root_session_id':'a'*16, 'parent_session_id':'a'*16,
                 'state':'TASK_STATE_FAILED', 'input':'private-delegation-input', 'outcome':{
@@ -29,9 +31,24 @@ class WorkStatusTests(unittest.TestCase):
         self.assertEqual(receipt['commits'], ['c'*40, 'd'*40])
         self.assertTrue(receipt['reportedAt'])
         self.assertEqual(result['source'], 'stored_worker_reports')
+        parent = next(item for item in result['tasks'] if item['sessionId']=='a'*16)
+        self.assertEqual(parent['failure']['stage'],'waiting_for_children')
+        self.assertEqual(parent['failure']['childSessionIds'],['b'*16])
         self.assertNotIn('private-', json.dumps(result))
         # Reading the same persisted data after a restart needs no live worker.
         self.assertEqual(result, build_work_status(json.loads(json.dumps(root)), [child, root, foreign]))
+
+    def test_failure_details_survive_without_child_sessions(self):
+        from popot_agents.orchestrator.work_status import build_work_status
+        root = {'sessionId':'a'*16,'role':'planner','updatedAt':'2026-11-01T00:00:00Z',
+                'roleConfig':{'_workflow':{'state':'failed','phase':'finished','outcome':{
+                    'status':'failed','evidence':[],'remaining_work':[],'errors':[],
+                    'failure':{'code':'deadline_expired','deadlineExpired':True,'errno':13}}}}}
+        failure = build_work_status(root, [root])['tasks'][0]['failure']
+        self.assertEqual(failure['code'], 'deadline_expired')
+        self.assertTrue(failure['deadlineExpired'])
+        self.assertEqual(failure['errno'], 13)
+        self.assertNotIn('childSessionIds', failure)
 
     def test_reports_are_bounded_redacted_and_truncation_is_explicit(self):
         from popot_agents.orchestrator.work_status import build_work_status

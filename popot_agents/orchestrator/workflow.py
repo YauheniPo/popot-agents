@@ -127,6 +127,8 @@ class WorkflowRun:
         prefix = ((f'Child wait finished; resume coordinator turn {self.meta["turns"]}.\n'
                    if self.meta.get('awaiting_children') else
                    f'Coordinator turn {self.meta["turns"]} finished; begin turn {self.meta["turns"] + 1}.\n') +
+                  f'{max(0, self.policy["max_turns"] - self.meta["turns"])} coordinator turns remain; '
+                  f'{int(self.remaining())} seconds remain before the workflow deadline.\n' +
                   'Continue the same authorized task from the saved checkpoint. Do not repeat completed '
                   'actions, implementation, publications or completed child tasks. Reconcile uncertain effects '
                   'before any write. Finish missing review/QA and read back requested publication/CI results. '
@@ -213,8 +215,21 @@ def recover_workflows(server, policy, token):
                     continue
             workflow = WorkflowRun(selected_policy, '', meta)
             if meta.get('phase') != 'checkpoint' or not isinstance(meta.get('checkpoint'), dict):
+                checkpoint = meta.get('checkpoint')
+                checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+                pending = [value.get('session_id') for _, value in checkpoint.get('failed_delegations', [])
+                           if isinstance(value, dict) and value.get('pending')]
+                prior = meta.get('outcome')
+                prior = prior if isinstance(prior, dict) else {}
+                errors = prior.get('errors') if isinstance(prior.get('errors'), list) else []
                 workflow.stop({'answer':'API restarted during execution; reconcile external effects before continuing.',
-                               'outcome':meta.get('outcome')}, 'workflow_interrupted_execution')
+                               'outcome':{**prior,
+                                   'failure':{'code':'api_restart_during_execution', 'stage':'unknown',
+                                              'error_type':'ProcessRestart',
+                                              'childSessionIds':list(dict.fromkeys(
+                                                  sid for sid in pending if isinstance(sid,str)))},
+                                   'errors':[*errors, 'API restarted during execution; external effects require reconciliation']}},
+                              'workflow_interrupted_execution')
                 server.store.save(sid, saved['agent'], saved['messages'], saved['role'],
                                   {**saved['roleConfig'], '_workflow': workflow.meta})
             elif workflow.remaining() < 1 or meta['turns'] >= policy['max_turns']:

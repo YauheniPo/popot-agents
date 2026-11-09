@@ -172,6 +172,21 @@ class ResourceMonitoringTests(unittest.TestCase):
         self.assertIn('[$__range]', history['targets'][0]['expr'])
         self.assertNotIn('< 20', history['targets'][0]['expr'])
 
+    def test_agent_panels_group_by_root_call_and_session(self):
+        result=dashboard()
+        variables={item['name']:item for item in result['templating']['list']}
+        for name in ('root_session_id','call_id','session_id'):
+            self.assertIn(name,variables)
+        for title in ('Agent activity by task','Agent CPU by task and role',
+                      'Agent RSS by task and role','Agents involved in selected period'):
+            chart=next(p for p in result['panels'] if p['title']==title)
+            expression=chart['targets'][0]['expr']
+            for label in ('root_session_id','call_id','session_id','role'):
+                self.assertIn(label,expression)
+            self.assertIn('root_session_id!=""',expression)
+            self.assertIn('sampled_at_seconds',expression)
+            self.assertIn('{{root_session_id}}',chart['targets'][0]['legendFormat'])
+
     def test_prometheus_extension_preserves_existing_jobs_and_is_idempotent(self):
         original = 'global:\n  scrape_interval: 15s\nscrape_configs:\n  - job_name: existing\n'
         updated = extend_prometheus_config(original, 'local-control-plane', 'node.internal')

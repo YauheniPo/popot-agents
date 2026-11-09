@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from popot_agents.tools import TOOL_SCHEMAS
-from popot_agents.progress import is_progress_message, emit_progress, observe_progress, format_progress, TurnProgress
+from popot_agents.progress import is_progress_message, emit_progress, observe_progress, format_progress, trace_event, TurnProgress
 from popot_agents.role_env import validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
@@ -735,6 +735,7 @@ def create_server(
                 if getattr(self, '_workflow', None):
                     worker_config['_workflow_coordinator'] = True
                     worker_config['timeout_seconds'] = self._workflow.policy['turn_seconds']
+                    worker_config['_ax_metrics_call_id'] = self._workflow.meta.get('request_id', '')
                 worker_kwargs = {'deadline': self._workflow.deadline} if getattr(self, '_workflow', None) else {}
                 worker = (agents[agent].start_chat(session_id, worker_config, **worker_kwargs) if worker_config
                           else agents[agent].start_chat(session_id))
@@ -803,6 +804,7 @@ def create_server(
                     if getattr(self, '_workflow', None):
                         worker_config['_workflow_coordinator'] = True
                         worker_config['timeout_seconds'] = self._workflow.policy['turn_seconds']
+                        worker_config['_ax_metrics_call_id'] = self._workflow.meta.get('request_id', '')
                     worker_kwargs = {'deadline': self._workflow.deadline} if getattr(self, '_workflow', None) else {}
                     worker = (agents[agent].start_chat(session_id, worker_config, **worker_kwargs) if worker_config
                               else agents[agent].start_chat(session_id))
@@ -824,13 +826,46 @@ def create_server(
                 self._work_session_id = session_id
             scope = ExitStack()
             delegation = getattr(agents[record.agent], 'delegation', None)
+            stage = 'delegation_setup'
+
+            def interrupted(exc):
+                checkpoint = workflow.meta.get('checkpoint')
+                checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+                pending = [value.get('session_id') for _, value in checkpoint.get('failed_delegations', [])
+                           if isinstance(value, dict) and value.get('pending')]
+                if isinstance(exc, AgentRunError):
+                    code = 'agent_run_error'
+                elif isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+                    code = 'child_wait_interrupted' if stage == 'waiting_for_children' else 'worker_timeout'
+                else:
+                    code = 'os_error'
+                failure = {'code': code,
+                           'stage': stage, 'error_type': type(exc).__name__,
+                           'childSessionIds': list(dict.fromkeys(sid for sid in pending if isinstance(sid, str))),
+                           'deadlineExpired': workflow.remaining() <= 0}
+                if isinstance(exc, OSError) and type(exc.errno) is int:
+                    failure['errno'] = exc.errno
+                trace_event('workflow_interrupted', session_id=session_id, **failure)
+                prior = workflow.meta.get('outcome')
+                prior = prior if isinstance(prior, dict) else {}
+                errors = prior.get('errors') if isinstance(prior.get('errors'), list) else []
+                remaining = prior.get('remaining_work') if isinstance(prior.get('remaining_work'), list) else []
+                return workflow.stop({'answer': 'Worker execution interrupted; reconcile effects before retrying',
+                    'outcome': {**prior, 'failure': failure,
+                                'errors': [*errors, f'{failure["error_type"]} at {stage}'],
+                                'remaining_work': ['Reconcile interrupted execution and external effects before continuing',
+                                                   *remaining]}},
+                    'workflow_execution_uncertain')
+
             try:
                 workflow = getattr(self, '_workflow', None)
                 if workflow and delegation:
                     scope.enter_context(delegation.workflow(session_id, workflow.deadline,
                                         max_turns=workflow.policy['max_turns'], metadata=workflow.meta))
+                    stage = 'waiting_for_children'
                     delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
                 while True:
+                    stage = 'begin_turn'
                     if workflow:
                         if workflow.remaining() < RUNTIME['timeouts']['min_turn_seconds'] or workflow.meta['turns'] >= workflow.policy['max_turns'] and not workflow.meta.get('awaiting_children'):
                             result = workflow.stop({'answer': 'Autonomous workflow time budget exhausted',
@@ -843,11 +878,13 @@ def create_server(
                         role_config = {**(role_config or {}), '_workflow': workflow.meta}
                         self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
                     emit_progress('turn_started')
+                    stage = 'worker_send'
                     result = (record.worker.send(message.strip(), timeout_seconds=min(
                         workflow.policy['turn_seconds'], workflow.remaining())) if workflow
                         else record.worker.send(message.strip()))
                     terminal = result
                     if workflow:
+                        stage = 'record_result'
                         checkpoint = record.worker.get_checkpoint() if hasattr(record.worker, 'get_checkpoint') else None
                         terminal = workflow.record(result, checkpoint)
                         if terminal is not None:
@@ -858,6 +895,7 @@ def create_server(
                         {"role": "assistant", "content": result["answer"]},
                     ]
                     emit_progress('saving')
+                    stage = 'save_result'
                     self.server.store.save(session_id, record.agent, history, record.role, role_config)
                     record.messages, record.role_config = history, role_config
                     record.last_used = time.monotonic()
@@ -865,34 +903,34 @@ def create_server(
                         break
                     emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
                     if delegation:
+                        stage = 'waiting_for_children'
                         delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
                         workflow.meta['waiting_for'] = None
                         workflow.meta['checkpoint'] = record.worker.get_checkpoint()
                         self.server.store.save(session_id, record.agent, history, record.role, role_config)
                     try:
+                        stage = 'prepare_continuation'
                         message = workflow.continuation(compact=bool(getattr(record.worker,'supports_run_context',False)))
                     except ValueError:
                         result = workflow.stop(result, 'workflow_context_limit')
                         self.server.store.save(session_id, record.agent, history, record.role, role_config)
                         break
+                stage = 'after_turn'
                 if hasattr(record.worker, "after_turn"):
                     record.worker.after_turn()
-            except AgentRunError:
+            except AgentRunError as exc:
                 if workflow := getattr(self, '_workflow', None):
-                    workflow.stop({'answer': 'Worker execution interrupted; reconcile effects before retrying',
-                                   'outcome': workflow.meta.get('outcome')},
-                                  'workflow_execution_uncertain')
+                    result = interrupted(exc)
                     self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
                 if not record.worker.is_alive():
                     record.worker.close()
                     with self.server.live_lock:
                         self.server.live.pop(session_id, None)
-                raise
-            except (subprocess.TimeoutExpired, OSError):
+                if not workflow:
+                    raise
+            except (subprocess.TimeoutExpired, OSError) as exc:
                 if workflow := getattr(self, '_workflow', None):
-                    result = workflow.stop({'answer': 'Worker execution interrupted; reconcile effects before retrying',
-                                   'outcome': workflow.meta.get('outcome')},
-                                  'workflow_execution_uncertain')
+                    result = interrupted(exc)
                     self.server.store.save(session_id, record.agent, record.messages, record.role, role_config)
                 record.worker.close()
                 with self.server.live_lock:

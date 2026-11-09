@@ -92,7 +92,15 @@ class AxAgentRunner:
         # Server bookkeeping can exceed AX's 32 KiB per-env-value limit. The
         # worker receives its task/checkpoint over the control socket instead.
         worker_role = {key: value for key, value in role_config.items()
-                       if key not in {'_ax_delegation', '_workflow', '_work_evidence', '_workflow_runs'}}
+                       if key not in {'_ax_delegation', '_workflow', '_work_evidence', '_workflow_runs',
+                                      '_ax_metrics_call_id'}}
+        delegation = role_config.get('_ax_delegation', {})
+        root_session_id = delegation.get('root_session_id', chat_id)
+        if not isinstance(root_session_id, str) or not re.fullmatch(r'[0-9a-f]{16}', root_session_id):
+            root_session_id = chat_id
+        call_id = delegation.get('root_call_id') or role_config.get('_ax_metrics_call_id', '')
+        if not isinstance(call_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', call_id):
+            call_id = ''
         env = {
             "HARNESS_BASE_URL": self.base_url,
             "HARNESS_MODEL": self.model,
@@ -104,6 +112,10 @@ class AxAgentRunner:
             "POPOT_RESOURCE_METRICS_URL": "http://opentelemetry-collector.otel-system.svc:4318/v1/metrics",
             "POPOT_RESOURCE_METRICS_TASK": f"popot-chat-{chat_id}",
             "POPOT_RESOURCE_METRICS_ROLE": role_config.get("_ax_role") or "unassigned",
+            "POPOT_RESOURCE_METRICS_AGENT": role_config.get("agent") or "unassigned",
+            "POPOT_RESOURCE_METRICS_SESSION_ID": chat_id,
+            "POPOT_RESOURCE_METRICS_ROOT_SESSION_ID": root_session_id,
+            "POPOT_RESOURCE_METRICS_CALL_ID": call_id,
             "PYTHONPATH": "/app",
             "HOME": "/workspace",
             "XDG_CACHE_HOME": "/workspace/.cache",
@@ -153,7 +165,8 @@ class AxAgentRunner:
         # Substrate permits at most 32 env entries. Restore internal capabilities
         # in the entrypoint, keeping role/tool credentials under their own names.
         capabilities = {key: value for key, value in env.items()
-                        if key.startswith(('AX_DELEGATION_', 'AX_HARNESS2_', 'HARNESS2_'))}
+                        if key.startswith(('AX_DELEGATION_', 'AX_HARNESS2_', 'HARNESS2_',
+                                           'POPOT_RESOURCE_METRICS_'))}
         for key in capabilities:
             del env[key]
         if capabilities:

@@ -753,6 +753,8 @@ class DelegationService:
             config['_ax_delegation']['resumable'] = False
             durable = grant.run.persistent and not is_probe
             config['_ax_delegation']['durable'] = durable
+            if grant.run.metadata.get('request_id'):
+                config['_ax_delegation']['root_call_id'] = grant.run.metadata['request_id']
             config['_ax_delegation']['depends_on'] = dependencies
             config['_ax_delegation'].pop('dependency_results',None)
             parent_meta = grant.config.get('_ax_delegation', {})

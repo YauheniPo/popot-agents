@@ -1,4 +1,5 @@
 """Validate final reports and retain bounded receipts when formatting fails."""
+import hashlib
 import json
 import re
 
@@ -60,10 +61,7 @@ def parse_result(content, finish_reason=None):
     return report
 
 
-def retained_receipts(messages, completed_children):
-    """Receipts are attributed observations, never proof of whole-task completion."""
-    limit = RUNTIME['memory']['tool_evidence_count']
-    chars = RUNTIME['memory']['tool_evidence_chars']
+def _child_receipts(completed_children, chars):
     receipts = []
     for child in completed_children.values():
         label = f"Child {child['role']} (sessionId={child['sessionId']}) reported: "
@@ -71,16 +69,42 @@ def retained_receipts(messages, completed_children):
         for item in child.get('outcome', {}).get('evidence', []):
             if isinstance(item, str) and item.strip():
                 receipts.append(label + scrub(item)[:chars])
-    names = {call.get('id'): call.get('function', {}).get('name', 'tool')
-             for m in messages for call in m.get('tool_calls', [])}
-    recent = [m for m in messages if m.get('role') == 'tool'][-limit:]
-    for m in recent:
-        call_id = m.get('tool_call_id')
-        name = names.get(call_id, 'tool')
-        if name in {'delegate_task', 'review_checkpoint'} or name.startswith('mcp__cognee__'):
+    return receipts
+
+
+def _tool_name_index(messages):
+    return {call.get('id'): call.get('function', {}).get('name', 'tool')
+            for m in messages for call in m.get('tool_calls', [])}
+
+
+def _is_own_receipt(name):
+    """Delegation and memory traffic is reported by the server, not as raw receipts."""
+    return name in {'delegate_task', 'review_checkpoint'} or name.startswith('mcp__cognee__')
+
+
+def _tool_receipt(message, name, chars):
+    content = message.get('content')
+    if not isinstance(content, str) or not content.strip():
+        return None
+    preview = ' | '.join(scrub(content).splitlines()[:3])[:min(chars, 240)]
+    artifact = re.search(r'Full output: (\.tool-results/[a-f0-9]{32}\.txt)', content)
+    return (f'Tool receipt {name} ({message.get("tool_call_id")}); '
+            + f'outcome requires interpretation: {preview}'
+            + f' [sha256={hashlib.sha256(content.encode()).hexdigest()}]'
+            + (f' Full output: {artifact[1]}' if artifact else ''))
+
+
+def retained_receipts(messages, completed_children):
+    """Receipts are attributed observations, never proof of whole-task completion."""
+    limit = RUNTIME['memory']['tool_evidence_count']
+    chars = RUNTIME['memory']['tool_evidence_chars']
+    receipts = _child_receipts(completed_children, chars)
+    names = _tool_name_index(messages)
+    for m in [m for m in messages if m.get('role') == 'tool'][-limit:]:
+        name = names.get(m.get('tool_call_id'), 'tool')
+        if _is_own_receipt(name):
             continue
-        content = m.get('content')
-        if isinstance(content, str) and content.strip():
-            receipts.append(f'Tool receipt {name} ({call_id}); outcome requires interpretation: '
-                            + scrub(content)[:chars])
+        receipt = _tool_receipt(m, name, chars)
+        if receipt:
+            receipts.append(receipt)
     return list(dict.fromkeys(receipts))[:limit]

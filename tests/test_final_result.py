@@ -169,3 +169,32 @@ class FinalResultTests(unittest.TestCase):
         self.assertNotIn('secret-test-value', '\n'.join(receipts))
         self.assertIn('isError', receipts[0])
         self.assertIn('outcome requires interpretation', receipts[0])
+
+    def test_retained_tool_receipt_is_short_and_links_full_output(self):
+        from popot_agents.worker.final_result import retained_receipts
+        artifact='.tool-results/'+'a'*32+'.txt'
+        content='exit_code=0\n'+'long output\n'*300+f'Full output: {artifact}\n'
+        receipts=retained_receipts([{'role':'assistant','tool_calls':[
+            {'id':'shell','function':{'name':'bash'}}]},
+            {'role':'tool','tool_call_id':'shell','content':content}],{})
+        self.assertEqual(len(receipts),1)
+        self.assertLess(len(receipts[0]),500)
+        self.assertIn('exit_code=0',receipts[0])
+        self.assertIn(artifact,receipts[0])
+
+    def test_blank_child_and_tool_entries_are_skipped_and_own_tools_are_not_receipts(self):
+        from popot_agents.worker.final_result import retained_receipts
+        children = {'s': {'role': 'backend_engineer', 'sessionId': 'b'*16, 'answer': 'tests green',
+                          'outcome': {'evidence': [None, '   ', 'exit code 0']}}}
+        messages = [{'role': 'assistant', 'tool_calls': [
+            {'id': 'checkpoint', 'function': {'name': 'review_checkpoint'}},
+            {'id': 'read', 'function': {'name': 'read_file'}}]},
+            {'role': 'tool', 'tool_call_id': 'checkpoint', 'content': 'claimed review passed'},
+            {'role': 'tool', 'tool_call_id': 'read', 'content': '   '},
+            {'role': 'tool', 'tool_call_id': 'lost', 'content': 'orphan stdout'}]
+        receipts = retained_receipts(messages, children)
+        joined = '\n'.join(receipts)
+        self.assertIn('exit code 0', joined)
+        self.assertIn('Tool receipt tool (lost)', joined)
+        self.assertNotIn('claimed review passed', joined)
+        self.assertEqual(len(receipts), 3)

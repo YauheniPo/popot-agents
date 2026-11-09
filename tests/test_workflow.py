@@ -3,6 +3,7 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from urllib import request, error
 
 from popot_agents.orchestrator.main import create_server
@@ -27,7 +28,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn('test-secret-value',reason)
         self.assertLessEqual(len(reason),240)
 
-    def run_workflow(self, results, *, allow_error=False, after=None, request_id=None, role="planner", coordination=None):
+    def run_workflow(self, results, *, allow_error=False, after=None, request_id=None, role="planner", coordination=None,
+                     checkpoint=None, delegation=None, started_configs=None):
         class Chat:
             container_name='test-coordinator'
             def __init__(self):self.calls=[]
@@ -36,12 +38,15 @@ class WorkflowTests(unittest.TestCase):
                 item=results.pop(0)
                 if isinstance(item,Exception):raise item
                 return item() if callable(item) else item
-            def get_checkpoint(self):return {'messages':[{'role':'tool','content':'receipt'}]}
+            def get_checkpoint(self):return checkpoint or {'messages':[{'role':'tool','content':'receipt'}]}
             def is_alive(self):return True
             def close(self):pass
         chat=Chat()
         class Runner:
-            def start_chat(self,*_,**kwargs):return chat
+            def __init__(self):self.delegation=delegation
+            def start_chat(self,*args,**kwargs):
+                if started_configs is not None:started_configs.append(args[1] if len(args)>1 else None)
+                return chat
         with tempfile.TemporaryDirectory() as directory:
             server=create_server({'test':Runner()},roles={'analyst':{'agent':'test'}, role:{'agent':'test','instructions':'', 'coordination': coordination if coordination is not None else {}}},
                 session_dir=directory,host='127.0.0.1',port=0,workflow_policy=POLICY)
@@ -83,6 +88,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertLessEqual(calls[0][1], 120)
         self.assertEqual(saved['roleConfig']['_workflow']['state'], 'completed')
 
+    def test_root_call_id_reaches_worker_metrics_config(self):
+        configs=[]
+        self.run_workflow([result('completed')],request_id='call-root',started_configs=configs)
+        self.assertEqual(configs[0]['_ax_metrics_call_id'],'call-root')
+
     def test_role_without_coordination_settings_uses_shared_defaults(self):
         calls, data, saved = self.run_workflow([result('partial', remaining=('review',)), result('completed')],
             role='backend_engineer', coordination={})
@@ -121,10 +131,61 @@ class WorkflowTests(unittest.TestCase):
 
     def test_uncertain_execution_is_not_automatically_repeated(self):
         from popot_agents.orchestrator.main import AgentRunError
-        calls,_,saved=self.run_workflow([AgentRunError('response lost after publication')],allow_error=True)
+        calls,data,saved=self.run_workflow([AgentRunError('response lost after publication')])
         self.assertEqual(len(calls),1)
+        self.assertEqual(data['sessionId'],saved['sessionId'])
+        self.assertEqual(data['outcome']['status'],'blocked')
         self.assertEqual(saved['roleConfig']['_workflow']['state'],'blocked')
         self.assertEqual(saved['roleConfig']['_workflow']['outcome']['reason'],'workflow_execution_uncertain')
+        self.assertEqual(saved['roleConfig']['_workflow']['outcome']['failure'], {
+            'code':'agent_run_error', 'stage':'worker_send', 'error_type':'AgentRunError',
+            'childSessionIds':[], 'deadlineExpired':False})
+
+    def test_interrupted_turn_reports_stage_and_pending_children_without_replaying(self):
+        child_id='a'*16
+        checkpoint={'messages':[], 'failed_delegations':[[['qa_engineer','review'],
+                    {'session_id':child_id,'pending':True}]]}
+        calls,data,saved=self.run_workflow([result('partial',remaining=('review',)),
+            TimeoutError('workflow canceled or deadline exceeded while waiting for children')],
+            checkpoint=checkpoint)
+        self.assertEqual(len(calls),2)
+        self.assertEqual(data['outcome']['status'],'blocked')
+        self.assertEqual(data['outcome']['failure'], {
+            'code':'worker_timeout', 'stage':'worker_send', 'error_type':'TimeoutError',
+            'childSessionIds':[child_id], 'deadlineExpired':False})
+        self.assertIn('TimeoutError at worker_send',data['outcome']['errors'])
+        self.assertEqual(saved['roleConfig']['_workflow']['checkpoint'],checkpoint)
+
+    def test_child_wait_timeout_identifies_wait_stage_and_keeps_checkpoint(self):
+        class Delegation:
+            waits=0
+            @contextmanager
+            def workflow(self,*_,**__):
+                yield
+            def await_children(self,*_):
+                self.waits+=1
+                if self.waits==2:
+                    raise TimeoutError('child wait timed out')
+        child_id='b'*16
+        checkpoint={'messages':[], 'failed_delegations':[[['qa_engineer','review'],
+                    {'session_id':child_id,'pending':True}]]}
+        calls,data,saved=self.run_workflow([result('partial',remaining=('review',))],
+            checkpoint=checkpoint,delegation=Delegation())
+        self.assertEqual(len(calls),1)
+        self.assertEqual(data['outcome']['failure'], {
+            'code':'child_wait_interrupted', 'stage':'waiting_for_children', 'error_type':'TimeoutError',
+            'childSessionIds':[child_id], 'deadlineExpired':False})
+        self.assertEqual(data['outcome']['remaining_work'][0],
+                         'Reconcile interrupted execution and external effects before continuing')
+        self.assertEqual(saved['roleConfig']['_workflow']['checkpoint'],checkpoint)
+
+    def test_os_error_reports_errno_without_exposing_exception_message(self):
+        calls,data,_=self.run_workflow([OSError(13,'private path /secret/workspace')])
+        self.assertEqual(len(calls),1)
+        self.assertEqual(data['outcome']['failure'], {
+            'code':'os_error','stage':'worker_send','error_type':'PermissionError',
+            'childSessionIds':[],'deadlineExpired':False,'errno':13})
+        self.assertNotIn('/secret/workspace',json.dumps(data))
 
     def test_workflow_turn_budget_is_enforced_even_when_receipts_change(self):
         replies=[result('partial', evidence=(f'receipt-{i}',), remaining=('more',)) for i in range(4)]
@@ -258,5 +319,8 @@ class RecoveryTests(unittest.TestCase):
                 meta=store.get(sid)['roleConfig']['_workflow']
                 self.assertEqual(meta['state'],'blocked')
                 self.assertEqual(meta['outcome']['reason'],'workflow_interrupted_execution')
+                self.assertEqual(meta['outcome']['failure'], {
+                    'code':'api_restart_during_execution', 'stage':'unknown',
+                    'error_type':'ProcessRestart', 'childSessionIds':[]})
                 runner.start_chat.assert_not_called()
             finally:server.server_close()

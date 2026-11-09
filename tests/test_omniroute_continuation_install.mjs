@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {after, test} from 'node:test';
 import {
   axIndexFrom,
+  conversationStatus,
   installConversationStatus,
   readSnapshot,
   requestAxStatus,
@@ -134,6 +135,19 @@ test('axIndexFrom keys sessions and their runs for browser lookups', () => {
   assert.deepEqual(index.get('s3'), {status: 'failed', reason: 'worker_startup_failed', waitingFor: undefined, runId: undefined});
   assert.deepEqual(index.get('s4'), {status: 'blocked', reason: 'workflow_turn_limit', waitingFor: undefined, runId: undefined});
   assert.equal(axIndexFrom({}).size, 0);
+});
+
+test('axIndexFrom preserves failure reasons for conversation status', () => {
+  const index = axIndexFrom({chats: [
+    {sessionId: 's1', workflow: {state: 'blocked', reason: 'workflow_turn_limit'}, outcomeReason: 'older_reason'},
+    {sessionId: 's2', outcomeStatus: 'failed', outcomeReason: 'model_timeout'},
+  ]});
+  for(const [sessionId, reason] of [['s1', 'workflow_turn_limit'], ['s2', 'model_timeout']]) {
+    assert.equal(index.get(sessionId).reason, reason);
+    const status = conversationStatus({ax: index.get(sessionId)}, null);
+    assert.equal(status.continuationCode, reason);
+    assert.match(status.continuationReason, new RegExp(reason));
+  }
 });
 
 test('installConversationStatus patches the pinned bundles and manifests', () => {

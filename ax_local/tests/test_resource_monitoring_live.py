@@ -23,11 +23,16 @@ class LiveResourceMonitoringTests(unittest.TestCase):
         with patch.dict(os.environ, environment):
             runner = AxAgentRunner(image=(root / 'ax_local/.local/worker-image').read_text().strip(),
                                    model='unused', base_url='http://localhost:1/v1')
-            manifest = runner.task_manifest(uuid.uuid4().hex[:16], {'_ax_role': 'backend_engineer'})
+            session_id = uuid.uuid4().hex[:16]
+            call_id = 'live-metrics-call'
+            manifest = runner.task_manifest(session_id, {'_ax_role': 'backend_engineer',
+                'agent': 'omniroute_cloud', '_ax_metrics_call_id': call_id})
             name = manifest['metadata']['name']
             script = '''
 import subprocess, time
+from ax_local.worker.entrypoint import load_capabilities
 from ax_local.worker.process_metrics import ProcessMetrics
+load_capabilities()
 child = subprocess.Popen(['python', '-c', 'import time; data=bytearray(16*1024*1024); exec("while True: sum(range(20000)); time.sleep(0.002)")'])
 try:
     with ProcessMetrics.from_env():
@@ -59,6 +64,10 @@ finally:
                     time.sleep(3)
                 self.assertGreaterEqual(len(rows), 2, 'no individual gVisor processes reached Prometheus')
                 self.assertTrue(all(r['metric'].get('role') == 'backend_engineer' for r in rows), rows)
+                self.assertTrue(all(r['metric'].get('session_id') == session_id
+                    and r['metric'].get('root_session_id') == session_id
+                    and r['metric'].get('call_id') == call_id
+                    and r['metric'].get('agent') == 'omniroute_cloud' for r in rows), rows)
                 self.assertEqual(query(f'popot_sandbox_process_memory_bytes{{task="{name}",role="other_role"}}'), [])
                 self.assertGreater(max(float(r['value'][1]) for r in rows), 16 * 1024 * 1024)
                 rates = []

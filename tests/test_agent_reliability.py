@@ -121,6 +121,40 @@ class AgentReliabilityTests(unittest.TestCase):
             self.run_sequence([self.delegate_call(),self.result()], delegate=delegate)
         memory.summary_messages.assert_not_called()
 
+    def test_repeated_bad_file_input_waits_for_existing_children(self):
+        from unittest.mock import Mock
+        child_id = 'a' * 16
+        delegate = Mock(return_value=json.dumps({'sessionId': child_id, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_WORKING', 'pending': True,
+            'outcome': {'status': 'partial', 'evidence': [], 'errors': [],
+                        'remaining_work': ['review in progress']}}))
+        def read(path, identifier):
+            return {'tool_calls': [{'id': identifier, 'function': {
+                'name': 'read_file', 'arguments': json.dumps({'path': path})}}]}
+        _, state, bodies = self.run_sequence([
+            self.delegate_call(), read('/workspace', 'bad-1'), read('.', 'bad-2')],
+            delegate=delegate, role={'tools': ['read_file'], '_workflow_coordinator': True})
+        self.assertEqual(len(bodies), 3)
+        self.assertEqual(state['outcome']['reason'], 'child_pending')
+        self.assertEqual(state['await_tasks'], {'session_ids': [child_id], 'wait_for': 'all'})
+        self.assertTrue(state['failed_delegations'][0][1]['pending'])
+        self.assertIn('path is outside workspace', state['outcome']['errors'])
+
+    def test_repeated_bad_file_input_without_children_still_blocks(self):
+        def read(path, identifier):
+            return {'tool_calls': [{'id': identifier, 'function': {
+                'name': 'read_file', 'arguments': json.dumps({'path': path})}}]}
+        _, state, _ = self.run_sequence([read('/workspace', 'bad-1'), read('.', 'bad-2')],
+            role={'tools': ['read_file']})
+        self.assertEqual(state['outcome']['reason'], 'non_retryable_tool_input')
+
+    def test_unassigned_publication_owner_prompt_explains_child_assignment(self):
+        _, _, bodies = self.run_sequence([self.result()], run_context={
+            'publication_owner': None, 'session_id': 'a' * 16})
+        instructions = ' '.join(message['content'] for message in bodies[0]['messages']
+                                if message['role'] == 'system')
+        self.assertIn('first durable backend_engineer or frontend_engineer child becomes owner', instructions)
+
     def test_verification_handoff_shares_only_checks_for_requested_revision(self):
         from unittest.mock import Mock
         from popot_agents.work_evidence import observe_tool_result

@@ -300,6 +300,15 @@ class DelegationTests(unittest.TestCase):
         self.assertTrue(self.runner.chats[0].closed)
         self.assertNotIn(self.token, str(saved))
 
+    def test_root_call_id_reaches_delegated_session(self):
+        with self.service.workflow(self.parent,time.monotonic()+5,max_turns=4,
+                metadata={'turns':1,'request_id':'call-root','run_id':'run'}), \
+                self.service.turn(self.parent,5):
+            task=self.wait_task(self.send()['id'])
+        saved=self.store.get(task['id'])
+        self.assertEqual(saved['roleConfig']['_ax_delegation']['root_call_id'],'call-root')
+        self.assertEqual(saved['roleConfig']['_ax_delegation']['root_session_id'],self.parent)
+
     def test_last_coordinator_turn_rejects_child_before_startup(self):
         with self.service.workflow(self.parent,time.monotonic()+30,max_turns=4,
                                    metadata={'turns':4,'original_task':'fix'}):

@@ -80,10 +80,19 @@ def _report(saved):
         commits.update(match.group(1).lower() for match in _COMMIT.finditer(text))
     report['commits'] = sorted(commits)[:6]
     report['truncated'] |= len(commits) > 6
-    failure = child.get('failure')
+    failure = child.get('failure') or outcome.get('failure')
     if isinstance(failure, dict):
         report['failure'] = {key: redact_text(str(failure[key]))[:160]
                              for key in ('code', 'stage', 'error_type') if key in failure}
+        child_ids = failure.get('childSessionIds')
+        if isinstance(child_ids, list):
+            report['failure']['childSessionIds'] = [sid for sid in child_ids[:16]
+                if isinstance(sid, str) and re.fullmatch(r'[0-9a-f]{16}', sid)]
+            report['truncated'] |= len(child_ids) > 16
+        if type(failure.get('deadlineExpired')) is bool:
+            report['failure']['deadlineExpired'] = failure['deadlineExpired']
+        if type(failure.get('errno')) is int:
+            report['failure']['errno'] = failure['errno']
     return report
 
 

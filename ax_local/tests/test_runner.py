@@ -4,6 +4,8 @@ import os
 import subprocess
 import socket
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from ax_local.config import AX_CONFIG
@@ -47,6 +49,43 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(role['_ax_delegation']['input'], 'контекст ' * 6000)
         self.assertEqual(role['_workflow']['checkpoint']['messages'], ['x' * 40000])
 
+    def test_resource_metrics_identify_root_call_and_child_agent(self):
+        role={'_ax_role':'code_reviewer','agent':'omniroute_cloud',
+              '_ax_metrics_call_id':'call-root',
+              '_ax_delegation':{'root_session_id':'a'*16,'root_call_id':'call-root'}}
+        env={item['name']:item['value'] for item in
+             self.runner.task_manifest('b'*16,role)['spec']['env']}
+        metrics = json.loads(env['AX_CAPABILITIES_JSON'])
+        self.assertEqual(metrics['POPOT_RESOURCE_METRICS_SESSION_ID'],'b'*16)
+        self.assertEqual(metrics['POPOT_RESOURCE_METRICS_ROOT_SESSION_ID'],'a'*16)
+        self.assertEqual(metrics['POPOT_RESOURCE_METRICS_CALL_ID'],'call-root')
+        self.assertEqual(metrics['POPOT_RESOURCE_METRICS_AGENT'],'omniroute_cloud')
+        self.assertNotIn('_ax_metrics_call_id',json.loads(env['HARNESS_ROLE_JSON']))
+
+    def test_invalid_delegated_root_session_falls_back_to_the_task_session(self):
+        role={'_ax_role':'code_reviewer',
+              '_ax_delegation':{'root_session_id':'not-a-session','root_call_id':'call-root'}}
+        env={item['name']:item['value'] for item in
+             self.runner.task_manifest('b'*16,role)['spec']['env']}
+        metrics = json.loads(env['AX_CAPABILITIES_JSON'])
+        self.assertEqual(metrics['POPOT_RESOURCE_METRICS_ROOT_SESSION_ID'],'b'*16)
+        self.assertEqual(metrics['POPOT_RESOURCE_METRICS_CALL_ID'],'call-root')
+
+    def test_backend_task_with_delegation_fits_ax_environment_limit(self):
+        role = json.loads((Path(__file__).resolve().parents[2] /
+                           'config/roles/backend_engineer.json').read_text())
+        role.update(_ax_role='backend_engineer', _ax_metrics_call_id='call-root')
+        self.runner.proxy_token = 'proxy-token'
+        self.runner.upstream_host = 'upstream.example'
+        self.runner.model_parameters = {'temperature': 0.5}
+        self.runner.delegation = SimpleNamespace(
+            worker_environment=lambda *_: {'AX_DELEGATION_URL': 'http://delegate',
+                                           'AX_DELEGATION_TOKEN': 'grant'},
+            policy={'poll_interval_seconds': 1})
+        with patch.dict(os.environ, {name: 'fixture' for name in role['env_names']}):
+            env = self.runner.task_manifest('a' * 16, role)['spec']['env']
+        self.assertLessEqual(len(env), 32)
+
     def test_control_socket_is_outside_the_tool_owned_workspace(self):
         manifest = self.runner.task_manifest('0123456789abcdef', {'tools': ['bash']})
         env = {item['name']: item['value'] for item in manifest['spec']['env']}
@@ -78,6 +117,8 @@ class AxRunnerTests(unittest.TestCase):
             manifest = self.runner.task_manifest('0123456789abcdef', config)
             env = {item['name']: item['value'] for item in manifest['spec']['env']}
             with patch.dict(os.environ, env, clear=True):
+                from ax_local.worker.entrypoint import load_capabilities
+                load_capabilities()
                 exporter = ProcessMetrics.from_env()
             payload = make_payload([sample], task=exporter.task, role=exporter.role,
                                    timestamp_ns=123456789)
