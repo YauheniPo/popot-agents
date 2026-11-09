@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from popot_agents.orchestrator.main import load_agents, load_roles
+from popot_agents.prompts import render_prompt
 from popot_agents.worker.http_harness import run_http
 from popot_agents.worker.mcp_client import MCPToolError
 
@@ -23,7 +24,8 @@ class ReviewerRoleTests(unittest.TestCase):
         self.assertIn('engineering/code-review', reviewer['skills'])
         self.assertIn('engineering/diagnosing-bugs', reviewer['skills'])
         self.assertTrue({'bash', 'read_file', 'write_file', 'git_clone'} <= set(reviewer['tools']))
-        self.assertEqual(reviewer['allowed_roles'], ['backend_engineer', 'qa_engineer', 'analyst', 'security_engineer'])
+        self.assertEqual(reviewer['allowed_roles'],
+                         ['backend_engineer', 'qa_engineer', 'analyst', 'security_engineer'])
         self.assertEqual(set(reviewer['mcpServers']['github']['tools']),
                          {'get_file_contents', 'get_commit', 'pull_request_read', 'search_repositories',
                           'pull_request_review_write', 'add_comment_to_pending_review'})
@@ -33,6 +35,12 @@ class ReviewerRoleTests(unittest.TestCase):
             self.assertIn('code_reviewer', roles[name]['instructions'])
         for config in roles.values():
             self.assertTrue(config['description'].strip())
+
+    def test_reviewer_delegates_authorized_code_fixes_to_backend_engineer(self):
+        prompt = render_prompt('delegation/reviewer')
+        self.assertIn('delegate implementation to backend_engineer', prompt)
+        self.assertIn('Do not implement or commit in the reviewer session', prompt)
+        self.assertIn('then review the final revision', prompt)
 
     def test_review_scope_has_stopping_rule_and_explicit_thread_authorization(self):
         roles = load_roles(ROOT / 'config/roles', load_agents(ROOT / 'config/agents.json'))

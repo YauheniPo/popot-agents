@@ -1829,3 +1829,12 @@ class DelegationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerFailureMappingTests(unittest.TestCase):
+    def test_unmatched_worker_detail_keeps_the_generic_code(self):
+        from ax_local.api.delegation import _worker_failure
+        from popot_agents.orchestrator.main import AgentRunError
+        reason, payload = _worker_failure(AgentRunError('AX task lookup failed unexpectedly'), 'start')
+        self.assertEqual(payload['code'], 'worker_failed')
+        self.assertNotIn('unexpectedly', reason)

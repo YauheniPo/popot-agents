@@ -112,12 +112,19 @@ class AsyncServiceTests(unittest.TestCase):
                     'failed_delegations':[[['backend_engineer',name],{'session_id':sid,'pending':True}]
                         for sid,name in [(first['id'],'first'),(second['id'],'second')]]}
                 def restore(inner,history,**options):inner.checkpoint=options['checkpoint']
+                runner=type('Runner',(),{'worker_pool':object()})()
+                after_turn_calls=0
+                def after_turn(inner):
+                    inner.after_turn_calls=inner.after_turn_calls+1
+                def resume(inner,**options):inner.resume_calls=options['timeout_seconds']
             parent=Parent();started=time.monotonic()
             self.service.await_children(self.parent,parent,[],time.monotonic()+1)
             self.assertLess(time.monotonic()-started,.8)
             self.assertIn(first['id'],parent.checkpoint['completed_delegations'])
             self.assertNotIn(second['id'],parent.checkpoint['completed_delegations'])
             self.assertEqual(parent.checkpoint['failed_delegations'][0][1]['session_id'],second['id'])
+            self.assertEqual(parent.after_turn_calls,1)
+            self.assertGreater(parent.resume_calls,0)
             second_release.set();self.wait_task(second['id'])
 
     def test_backend_and_qa_run_concurrently_in_the_same_workflow(self):
@@ -304,6 +311,32 @@ class PublicationOwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(ToolInputError, 'reviewer'):
             check_publication_owner('bash',{'command':'git -C repo commit -m fix'},context)
 
+    def test_reviewer_can_inspect_history_but_not_commit(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        check_publication_owner('bash',{'command':'git log --grep=commit'},context)
+
+    def test_reviewer_commit_guard_sees_past_git_global_options(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        from popot_agents.tools import ToolInputError
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        for command in ('git --no-pager commit -m x','git -c a=b --no-pager commit -m x',
+                        'git --work-tree=/w commit -m x'):
+            with self.subTest(command=command),self.assertRaisesRegex(ToolInputError, 'reviewer'):
+                check_publication_owner('bash',{'command':command},context)
+
+    def test_reviewer_cannot_create_commit_objects(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        from popot_agents.tools import ToolInputError
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        with self.assertRaisesRegex(ToolInputError, 'reviewer'):
+            check_publication_owner('bash',{'command':'git commit-tree -m x'},context)
+
+    def test_reviewer_guard_ignores_a_missing_command(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        check_publication_owner('bash',{'command':None},context)
+
     def test_non_owner_cannot_publish_branch_but_can_prepare_and_test(self):
         from popot_agents.worker.delegation_policy import check_publication_owner
         from popot_agents.tools import ToolInputError
@@ -317,3 +350,16 @@ class PublicationOwnershipTests(unittest.TestCase):
         check_publication_owner('mcp__github__pull_request_review_write',{},context)
         check_publication_owner('bash',{'command':'git push origin feature'},
             {'session_id':'b'*16,'publication_owner':'b'*16})
+
+
+class PublicationCommandParsingTests(unittest.TestCase):
+    def test_unbalanced_quotes_do_not_describe_an_executable_command(self):
+        from popot_agents.work_evidence import executed_commands
+        self.assertEqual(list(executed_commands('git commit -m "unclosed')), [])
+
+    def test_option_scan_handles_missing_values_and_non_git_segments(self):
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        for command in ('git', 'git -C', 'git --no-pager', 'echo hi && git log'):
+            with self.subTest(command=command):
+                self.assertIsNone(check_publication_owner('bash', {'command':command}, context))

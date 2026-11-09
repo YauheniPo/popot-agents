@@ -38,6 +38,11 @@ class AxConfigTests(unittest.TestCase):
                 with self.subTest(key=key, value=value):
                     self.assert_invalid(settings, key)
 
+    def test_warm_workers_cannot_exceed_max_workers(self):
+        settings = load_ax_config()
+        settings['warm_workers'] = settings['max_workers'] + 1
+        self.assert_invalid(settings, 'warm_workers')
+
     def test_proxy_response_margin_validation(self):
         for value in (0, -1, True, '5', None):
             settings = load_ax_config()
