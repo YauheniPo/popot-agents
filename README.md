@@ -334,7 +334,7 @@ its next model request, the comment remains queued for a later turn.
 MCP accepts any configured `role` (or explicit agent profile). When omitted,
 `config/runtime.json → mcp.default_role` selects the role (`planner` by default).
 By default, every role coordinates its task automatically, including delegated child roles.
-Unless `disableDelegation=true`, each agent may select other roles from
+Unless `disable_delegation=true`, each agent may select other roles from
 `allowed_roles`, collect their results,
 continue recoverable partial work, and return its accepted result to its parent.
 Each configured role has a team-specific delegation list; cycles are rejected and

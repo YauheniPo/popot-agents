@@ -229,7 +229,7 @@ class GatewayTests(unittest.TestCase):
             with patch('popot_agents.mcp_server.stream_call', new_callable=AsyncMock) as streamed:
                 streamed.return_value = {'sessionId': 'solo123', 'answer': 'done'}
                 solo = FakeMCPServer.instance.tools["run_task"](
-                    "work alone", role="backend_engineer", disableDelegation=True, ctx=context)
+                    "work alone", role="backend_engineer", disable_delegation=True, ctx=context)
                 self.assertEqual(solo['sessionId'], 'solo123')
                 self.assertEqual(streamed.call_args.args[1:3], ('/tasks', {
                     'task': 'work alone', 'requestId': 'solo-call',

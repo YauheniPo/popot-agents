@@ -76,7 +76,7 @@ def _describe_chat_tool_schema(schema: dict, names: tuple[str, ...]) -> None:
         "sessionId": "Existing session ID returned by run_task; omit when starting a new session.",
         "session_id": "Existing session ID returned by a previous response; "
                       "omit when starting a new session.",
-        "disableDelegation": "Set true when starting a new session to keep the agent working alone. "
+        "disable_delegation": "Set true when starting a new session to keep the agent working alone. "
                              "The setting persists for the session and cannot change on continuation.",
     }
     for name in names:
@@ -326,7 +326,7 @@ def main() -> None:
             for tool in tools:
                 if tool.name == "run_task":
                     _describe_chat_tool_schema(tool.input_schema,
-                                               ("role", "agent", "sessionId", "session_id", "disableDelegation"))
+                                               ("role", "agent", "sessionId", "session_id", "disable_delegation"))
                 elif tool.name == "send_message":
                     _describe_chat_tool_schema(tool.input_schema,
                                                ("session_id", "role", "agent"))
@@ -341,7 +341,7 @@ def main() -> None:
     @server.tool()
     async def run_task(task: str, role: str | None = None, agent: str | None = None,
                        sessionId: str | None = None, session_id: str | None = None,
-                       disableDelegation: bool | None = None,
+                       disable_delegation: bool | None = None,
                        ctx: Context = None) -> dict:
         """Start a task with a configured role or agent; omit both to use the configured default role.
         By default, roles coordinate tasks, select permitted specialists and continue checkpoints,
@@ -351,7 +351,7 @@ def main() -> None:
         or start a new implementation workflow. If the user requested MCP execution,
         report an MCP publication blocker instead of silently implementing locally.
         For a follow-up, pass the returned sessionId or session_id instead.
-        Set disableDelegation=true for a new session when the selected agent must
+        Set disable_delegation=true for a new session when the selected agent must
         work on its own; the setting is immutable for that session.
         For clients that hide progress notifications, monitor the running call with
         list_chats then get_chat; poll every 15-30 seconds and report changed progress.
@@ -366,7 +366,7 @@ def main() -> None:
             role = RUNTIME['mcp']['default_role']
         if ctx is None:
             return await _tool_call(asyncio.to_thread(client.run_task, task, role=role, agent=agent,
-                                                       session_id=selected, disable_delegation=disableDelegation))
+                                                       session_id=selected, disable_delegation=disable_delegation))
         _require_target(role, agent, selected)
         payload = {'message' if selected else 'task': task}
         if request_id := _call_request_id(ctx):
@@ -377,8 +377,8 @@ def main() -> None:
             payload['role'] = role
         if agent is not None:
             payload['agent'] = agent
-        if disableDelegation is not None:
-            payload['disableDelegation'] = disableDelegation
+        if disable_delegation is not None:
+            payload['disableDelegation'] = disable_delegation
         return await _tool_call(asyncio.wait_for(
             stream_call(client, '/messages' if selected else '/tasks', payload, ctx), timeout=client.timeout_seconds))
 
