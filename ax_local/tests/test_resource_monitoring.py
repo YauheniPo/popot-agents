@@ -170,7 +170,8 @@ class ResourceMonitoringTests(unittest.TestCase):
         history = next(p for p in result['panels'] if p['title'] == 'Tasks by role in selected period')
         self.assertIn('max_over_time(', history['targets'][0]['expr'])
         self.assertIn('[$__range]', history['targets'][0]['expr'])
-        self.assertNotIn('< 20', history['targets'][0]['expr'])
+        # History must cover finished work, not only the 20s 'active' threshold.
+        self.assertNotRegex(history['targets'][0]['expr'], r'<\s*20')
 
     def test_agent_panels_group_by_root_call_and_session(self):
         result=dashboard()

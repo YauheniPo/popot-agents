@@ -52,8 +52,8 @@ def make_payload(samples: list[dict], *, task: str, timestamp_ns: int,
                               ('sampled_at', 's', None)]:
         points = []
         for process in samples:
-            labels = dict(task=task, role=role, agent=agent, pid=str(process['pid']), process=process['name'],
-                          process_start=str(process['start_ticks']))
+            labels = {'task': task, 'role': role, 'agent': agent, 'pid': str(process['pid']),
+                      'process': process['name'], 'process_start': str(process['start_ticks'])}
             labels.update({key: value for key, value in (
                 ('session_id', session_id), ('root_session_id', root_session_id), ('call_id', call_id)) if value})
             points.append({
