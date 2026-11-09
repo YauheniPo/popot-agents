@@ -1542,6 +1542,47 @@ nginx и базовых образов Python/Go/Node задаются в одн
 При обновлении AX меняйте `AX_VERSION` и
 `AX_COMMIT` вместе и проверяйте совместимость Substrate и наших патчей.
 
+Для локального ARM64-кластера [gvisor-runtime.json](gvisor-runtime.json)
+закрепляет сборку gVisor из коммита
+`93dbdc19004bd65e526b0f100cefc1f390e3c2bc`
+([upstream PR #17176](https://github.com/google/gvisor/pull/17176)).
+Это сборка до официального релиза с исправлением обхода `O_DIRECTORY|O_NOFOLLOW`
+через симлинк каталога. AMD64 в этом манифесте сохраняет прежний upstream pin;
+исправление для него здесь не собиралось и не проверялось.
+
+Архив содержит весь release fileset, включая `runsc` и `gvisor-bin/`.
+Он собран Bazel 9.3.1, target `//debian:gvisor-release-tar-zstd`, с параметрами
+`--config=aarch64 -c opt --jobs=2 --local_resources=memory=2048` в образе
+`us-central1-docker.pkg.dev/gvisor-presubmit/gvisor-presubmit-images/default_aarch64@sha256:485fb1a8e7dd871774537a20fcae5f185708f07045ac3849805113029a6bdf19`.
+`bootstrap.sh` и `rebuild-worker.sh` автоматически вызывают
+`cluster/gvisor_runtime.py` до проверки воркеров и запуска API. Установщик
+проверяет SHA256 локального архива в `ax_local/.local/gvisor/<commit>/` и
+копии в RustFS. Если локального кеша нет, он скачивает архив из RustFS;
+если архива нет нигде, собирает закреплённый коммит в указанном Docker-образе.
+Version stamp задаётся явно, поэтому shallow checkout не меняет версию сборки.
+Первая сборка занимает несколько минут; повторный запуск не пересобирает
+и не загружает заново уже проверенный архив. Параллельные вызовы в одном
+checkout сериализуются файловым lock.
+
+Перед изменением `gvisor-default` установщик проверяет архив в RustFS,
+при необходимости загружает его и сверяет SHA256 скачанной копии.
+Затем меняет только ARM64 asset и метки
+происхождения, проверяя `resourceVersion`, и читает результат обратно.
+Проверки SHA256 не отключаются при ошибке сборки, сети или хранилища:
+раскатка останавливается до запуска API. После повторной установки upstream
+Substrate следующий bootstrap/rebuild восстанавливает выбранный pin.
+Запуск отдельно на подготовленном кластере:
+
+```bash
+python3 ax_local/cluster/gvisor_runtime.py
+```
+
+Существующие snapshots сохраняют runtime, которым были созданы; новый pin
+не означает автоматическое обновление уже сохранённой памяти процессов.
+Перед переключением проверяйте FULL/DATA suspend/resume и live-тест
+`ax_local/tests/test_workspace_permissions_live.py`: он проверяет доступ UID
+10001, отказ на симлинке каталога и допустимый путь с завершающим `/`.
+
 Нужны работающий Docker Desktop с BuildKit и Compose 2.17+, `git`, Go 1.27.3+,
 `kubectl` 1.37.2 и Python 3.11+.
 Команда `python3` в текущем окружении должна запускать Python 3.11 или новее:

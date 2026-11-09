@@ -29,13 +29,32 @@ def answer(*args, **kwargs):
     _file_action('write', {'path': 'permission-marker', 'content': 'kept'})
     assert 'kept' in _file_action('read', {'path': 'permission-marker'})
     child = subprocess.run([sys.executable, '-c', """
-import os
+import errno, os, tempfile
 from pathlib import Path
 assert os.getuid() == 10001
 root = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
 os.close(root)
 assert os.access('/', os.R_OK | os.X_OK)
 assert not os.access('/', os.W_OK)
+with tempfile.TemporaryDirectory(dir='/workspace') as directory:
+    parent = Path(directory)
+    (parent / 'target').mkdir()
+    (parent / 'link').symlink_to('target', target_is_directory=True)
+    directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            target_fd = os.open('link', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=directory_fd)
+        except OSError as exc:
+            assert exc.errno == errno.ENOTDIR, exc
+        else:
+            os.close(target_fd)
+            raise AssertionError('O_DIRECTORY|O_NOFOLLOW followed a directory symlink')
+        target_fd = os.open('link/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd)
+        os.close(target_fd)
+    finally:
+        os.close(directory_fd)
 caps = next(line.split()[1] for line in Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))
 assert int(caps, 16) == 0, caps
 assert Path('/workspace/permission-marker').read_text() == 'kept'
@@ -46,7 +65,8 @@ except PermissionError:
 else:
     raise AssertionError('tool user could replace the control socket')
 """], user=10001, group=10001, extra_groups=[], capture_output=True, text=True)
-    assert child.returncode == 0, child.stderr
+    if child.returncode:
+        return json.dumps({'probe_error': child.stderr, 'exit_code': child.returncode})
     stranger = subprocess.run([sys.executable, '-c', """
 from pathlib import Path
 for operation in (lambda: Path('/workspace/permission-marker').read_text(),
