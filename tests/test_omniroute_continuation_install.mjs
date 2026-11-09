@@ -125,13 +125,15 @@ test('axIndexFrom keys sessions and their runs for browser lookups', () => {
     chats: [
       {sessionId: 's1', workflow: {state: 'running', waitingFor: 'ci', runId: 'r1'}, runStates: {r2: 'blocked'}},
       {sessionId: 's2', status: 'running'},
-      {sessionId: 's3', outcomeStatus: 'failed'},
+      {sessionId: 's3', outcomeStatus: 'failed', outcomeReason: 'worker_startup_failed'},
+      {sessionId: 's4', workflow: {state: 'blocked', reason: 'workflow_turn_limit'}},
     ],
   });
   assert.deepEqual(index.get('s1'), {status: 'running', reason: undefined, waitingFor: 'ci', runId: 'r1'});
   assert.deepEqual(index.get('s1:r2'), {status: 'blocked', runId: 'r2'});
   assert.deepEqual(index.get('s2'), {status: 'running', reason: undefined, waitingFor: undefined, runId: undefined});
-  assert.deepEqual(index.get('s3'), {status: 'failed', reason: undefined, waitingFor: undefined, runId: undefined});
+  assert.deepEqual(index.get('s3'), {status: 'failed', reason: 'worker_startup_failed', waitingFor: undefined, runId: undefined});
+  assert.deepEqual(index.get('s4'), {status: 'blocked', reason: 'workflow_turn_limit', waitingFor: undefined, runId: undefined});
   assert.equal(axIndexFrom({}).size, 0);
 });
 

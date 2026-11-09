@@ -8,7 +8,7 @@ from contextlib import redirect_stderr
 from unittest.mock import patch
 
 from ax_local.api.ax_runner import AxAgentRunner
-from ax_local.api.worker_queue import WorkerQueue
+from ax_local.api.worker_queue import WorkerCapacityTimeout, WorkerQueue
 from ax_local.config import AX_CONFIG
 from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
 from popot_agents.runtime_config import RUNTIME
@@ -388,6 +388,30 @@ class AxWorkerCapacityTests(unittest.TestCase):
         self.assertGreaterEqual(AX_CONFIG['max_workers'],
             RUNTIME['workflow']['max_concurrent'] * (AX_CONFIG['delegation']['max_depth'] + 1))
         self.assertEqual(AX_CONFIG['worker_queue_timeout_seconds'], 3600)
+
+
+class WorkerQueueReservationTests(unittest.TestCase):
+    def test_reserve_full_reuses_a_live_reservation_for_the_same_workflow(self):
+        queue = WorkerQueue(2, 5)
+        self.addCleanup(queue.close)
+        deadline = time.monotonic() + 5
+        self.assertEqual(queue.reserve_full('wf', 2, deadline=deadline), 2)
+        self.assertEqual(queue.reserve_full('wf', 2, deadline=deadline), 2)
+
+    def test_reserve_full_rejects_a_closed_queue(self):
+        queue = WorkerQueue(2, 5)
+        queue.close()
+        with self.assertRaisesRegex(AgentRunError, 'shutting down'):
+            queue.reserve_full('wf', 1, deadline=0)
+
+    def test_reserve_full_times_out_when_capacity_never_frees(self):
+        queue = WorkerQueue(1, 5)
+        self.addCleanup(queue.close)
+        lease = queue.acquire('busy')
+        self.addCleanup(queue.release, 'busy', lease)
+        deadline = time.monotonic() - 1
+        with self.assertRaises(WorkerCapacityTimeout):
+            queue.reserve_full('wf', 1, deadline=deadline)
 
 
 if __name__ == '__main__':

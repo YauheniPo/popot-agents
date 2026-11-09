@@ -109,6 +109,8 @@ services:
       additional_contexts:
         python-base: docker-image://${PYTHON_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
         go-base: docker-image://${GO_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
+      args:
+        GO_IMAGE: ${GO_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
     env_file: ../.env
     depends_on:
       db:
