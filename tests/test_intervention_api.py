@@ -100,6 +100,11 @@ class RunningSessionCommentTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertIn('unknown sessionId', body['error'])
 
+    def test_request_id_of_another_delegation_setting_is_rejected(self):
+        status, body = self.comment(requestId='req-live', disableDelegation=True)
+        self.assertEqual(status, 409)
+        self.assertIn('disableDelegation cannot change', body['error'])
+
     def test_request_id_of_a_running_workflow_is_rejected_for_a_new_session(self):
         self.server.store.save('b' * 16, 'test_agent', [], role='test_role',
                                role_config={'_workflow': {'state': 'running',
