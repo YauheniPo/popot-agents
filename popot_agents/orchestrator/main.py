@@ -684,11 +684,9 @@ def create_server(
                                       'status': item['status']})
                     return
                 if meta and not recovering:
+                    # A running session was answered from the queue above, so this
+                    # path only reconciles ids for a session that is not running.
                     if not self._workflow_request(payload, payload.get('message'), saved):
-                        return
-                    if meta.get('state') == 'running':
-                        self._reply(409, {'error': WORKFLOW_RUNNING_ERROR,
-                                          'sessionId': session_id})
                         return
                 with self.server.session_lock(session_id):
                     self._coordinated_message(payload)
