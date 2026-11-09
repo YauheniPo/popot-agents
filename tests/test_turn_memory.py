@@ -322,6 +322,30 @@ class TurnMemoryTests(unittest.TestCase):
         client.remember.assert_called_once()
         self.assertEqual([call.args[0] for call in trace.call_args_list].count('memory_summary_retry'), 1)
 
+    def test_summary_connection_reset_on_retry_is_raised_without_further_attempts(self):
+        client = Mock()
+        client.recall.return_value = []
+        report = {'status': 'completed', 'answer': 'Review complete',
+                  'evidence': ['checked'], 'remaining_work': [], 'errors': []}
+        calls = []
+        def respond(*args, **kwargs):
+            calls.append(args[0])
+            if len(calls) == 1:
+                return io.BytesIO(json.dumps({'choices': [{'message': {
+                    'content': json.dumps(report)}, 'finish_reason': 'stop'}]}).encode())
+            raise ConnectionResetError('model connection reset')
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness._trace') as trace:
+            self.assertEqual(run_http(TASK, ROLE, state={}), 'Review complete')
+        events = [call.args[0] for call in trace.call_args_list]
+        self.assertEqual(len(calls), 3)
+        client.remember.assert_not_called()
+        self.assertEqual(events.count('memory_summary_retry'), 1)
+        self.assertIn('memory_capture_failed', events)
+
     def test_memory_write_connection_reset_is_not_replayed(self):
         client = Mock()
         client.recall.return_value = []

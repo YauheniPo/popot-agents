@@ -314,6 +314,41 @@ class AgentReliabilityTests(unittest.TestCase):
         self.assertTrue(all(item.strip() for item in state['outcome']['remaining_work']))
         self.assertTrue(state['outcome']['remaining_work'])
 
+    def test_resumed_user_update_already_in_scope_is_not_repeated_in_the_handoff(self):
+        from unittest.mock import Mock
+        context = {'run_id': 'run-scope', 'authorization': ['Resume scope marker']}
+        state = {'run_id': 'run-scope',
+                 'messages': [{'role': 'user', 'content': 'Verify the requested work'}],
+                 'outcome': {'status': 'partial', 'remaining_work': ['finish']},
+                 'user_updates': {'1': 'Resume scope marker'}}
+        delegate = Mock(return_value=json.dumps({'sessionId': 'a' * 16, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_COMPLETED', 'answer': 'verified', 'outcome': {
+                'status': 'completed', 'evidence': ['checked'], 'errors': [], 'remaining_work': []}}))
+        _, state, _ = self.run_sequence([self.delegate_call(), self.result()], state=state,
+                                       delegate=delegate, run_context=context)
+        assignment = delegate.call_args.args[0]
+        self.assertEqual(assignment['task'].count('Resume scope marker'), 1)
+        self.assertEqual(list(state['user_updates'].values()), ['Resume scope marker'])
+
+    def test_resume_does_not_redeliver_an_intervention_already_in_the_checkpoint(self):
+        from unittest.mock import Mock
+        comment = {'id': 'intervention-1', 'message': 'Please also verify the docs'}
+        context = {'run_id': 'r', 'authorization': ['Verify the pull request']}
+        with patch('popot_agents.worker.http_harness._pending_interventions', return_value=[comment]):
+            _, state, _ = self.run_sequence([self.result('partial', remaining=['verify'])],
+                                           run_context=context)
+        self.assertEqual(state['intervention_ids'], ['intervention-1'])
+        delegate = Mock(return_value=json.dumps({'sessionId': 'a' * 16, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_COMPLETED', 'answer': 'verified', 'outcome': {
+                'status': 'completed', 'evidence': ['checked'], 'errors': [], 'remaining_work': []}}))
+        with patch('popot_agents.worker.http_harness._pending_interventions', return_value=[comment]):
+            _, resumed, _ = self.run_sequence([self.delegate_call(), self.result()], state=state,
+                                             delegate=delegate, run_context=context)
+        assignment = delegate.call_args.args[0]
+        self.assertEqual(assignment['task'].count(comment['message']), 1)
+        self.assertEqual(assignment['_scope_assignment'].count(comment['message']), 1)
+        self.assertEqual(resumed['intervention_ids'], ['intervention-1'])
+
     def test_short_remaining_budget_uses_final_response_in_long_and_resumed_turns(self):
         for timeout, elapsed in ((900, 774), (35, 20)):
             with self.subTest(timeout=timeout):
