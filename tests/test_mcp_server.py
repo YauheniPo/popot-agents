@@ -234,6 +234,9 @@ class GatewayTests(unittest.TestCase):
                 self.assertEqual(streamed.call_args.args[1:3], ('/tasks', {
                     'task': 'work alone', 'requestId': 'solo-call',
                     'role': 'backend_engineer', 'disableDelegation': True}))
+                FakeMCPServer.instance.tools["run_task"](
+                    "work alone", role="backend_engineer", ctx=context)
+                self.assertNotIn('disableDelegation', streamed.call_args.args[2])
             continued = FakeMCPServer.instance.tools["run_task"](
                 "что еще добавишь?", role="planner",
                 sessionId="d7ed630a2ce24092")
