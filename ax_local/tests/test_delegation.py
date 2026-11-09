@@ -462,9 +462,9 @@ class DelegationTests(unittest.TestCase):
             with request.urlopen(call, timeout=2) as response:
                 received.extend(json.load(response)['interventions'])
             self.assertEqual(received[0]['id'], own['id'])
+            unauthenticated = request.Request(self.service.base_url + '/interventions', data=b'{}')
             with self.assertRaises(error.HTTPError) as denied:
-                request.urlopen(request.Request(self.service.base_url + '/interventions', data=b'{}'),
-                                timeout=2)
+                request.urlopen(unauthenticated, timeout=2)
             self.assertEqual(denied.exception.code, 403)
             return {'answer': 'child result', 'interventionIds': [own['id']]}
         self.runner.callback = callback

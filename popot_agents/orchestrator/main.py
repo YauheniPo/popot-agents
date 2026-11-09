@@ -33,6 +33,7 @@ from .workflow import POLICY, WorkflowRun, public_workflow, public_outcome_reaso
 
 MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
 MAX_TASK_LENGTH = RUNTIME["limits"]["message_chars"]
+WORKFLOW_RUNNING_ERROR = "workflow is already running; read get_chat instead"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOG_SECRET_FIELDS = {"api_key", "apikey", "authorization", "cookie", "password",
                      "secret", "token", "access_token", "refresh_token"}
@@ -661,7 +662,7 @@ def create_server(
                         self._reply(400, {'error': 'requestId must be a nonempty string up to 256 characters'})
                         return
                     if meta and request_id is not None and request_id == meta.get('request_id'):
-                        self._reply(409, {'error': 'workflow is already running; read get_chat instead',
+                        self._reply(409, {'error': WORKFLOW_RUNNING_ERROR,
                                           'sessionId': session_id})
                         return
                     if (payload.get('role') not in (None, saved['role']) or
@@ -686,7 +687,7 @@ def create_server(
                     if not self._workflow_request(payload, payload.get('message'), saved):
                         return
                     if meta.get('state') == 'running':
-                        self._reply(409, {'error': 'workflow is already running; read get_chat instead',
+                        self._reply(409, {'error': WORKFLOW_RUNNING_ERROR,
                                           'sessionId': session_id})
                         return
                 with self.server.session_lock(session_id):
@@ -713,7 +714,7 @@ def create_server(
                         and payload['role'] != item.get('role')):
                     self._reply(409, {'error': 'requestId belongs to another task or role'})
                 elif meta.get('state') == 'running':
-                    self._reply(409, {'error': 'workflow is already running; read get_chat instead',
+                    self._reply(409, {'error': WORKFLOW_RUNNING_ERROR,
                                       'sessionId': item['sessionId']})
                 else:
                     result = public_workflow(item, include_result=True)['result']

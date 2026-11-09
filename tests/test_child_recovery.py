@@ -105,8 +105,9 @@ class ChildRecoveryTests(unittest.TestCase):
 
     def test_successful_qa_does_not_clear_backend_failure(self):
         from popot_agents.work_evidence import child_resolution
+        evidence = json.loads(self.completed())
         with self.assertRaisesRegex(RuntimeError, 'unresolved work'):
-            child_resolution({'role': 'backend_engineer'}, json.loads(self.completed()))
+            child_resolution({'role': 'backend_engineer'}, evidence)
         delegate = Mock(return_value=self.completed())
         new_qa = self.continuation()
         arguments = json.loads(new_qa['tool_calls'][0]['function']['arguments'])

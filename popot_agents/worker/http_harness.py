@@ -650,13 +650,17 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                   'Partial result: work budget exhausted. '
                   'Task completeness is unverified. External actions may have persisted; '
                   'inspect their results before retrying.')
+        reason = 'work_budget_exhausted'
+        for flag, candidate in ((blocked_child, 'delegated_task_blocked'),
+                                (recoverable, 'child_recovery_required'),
+                                (invalid_results, 'invalid_final_result'),
+                                (model_failure, 'model_request_failed'),
+                                (incomplete_child, 'delegated_task_incomplete')):
+            if flag:
+                reason = candidate
+                break
         return save_result(status + ('\n\n' + answer.strip() if answer else ''),
-                           'blocked' if blocked_child else 'partial',
-                           'delegated_task_blocked' if blocked_child else
-                           'child_recovery_required' if recoverable else
-                           'invalid_final_result' if invalid_results else
-                           'model_request_failed' if model_failure else
-                           'delegated_task_incomplete' if incomplete_child else 'work_budget_exhausted', report)
+                           'blocked' if blocked_child else 'partial', reason, report)
 
     def completion(round_number, final):
         for item in _pending_interventions():

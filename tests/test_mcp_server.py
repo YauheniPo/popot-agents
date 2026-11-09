@@ -128,8 +128,8 @@ class GatewayTests(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=self.urlopen):
             client.run_task("work alone", role="backend_engineer", disable_delegation=True)
             client.run_task("continue", session_id="abc123", disable_delegation=True)
-        self.assertEqual(self.calls[0][2]["disableDelegation"], True)
-        self.assertEqual(self.calls[1][2]["disableDelegation"], True)
+        self.assertIs(self.calls[0][2]["disableDelegation"], True)
+        self.assertIs(self.calls[1][2]["disableDelegation"], True)
 
     def test_tool_errors_keep_orchestrator_status_and_message(self):
         from popot_agents.mcp_server import OrchestratorClient
