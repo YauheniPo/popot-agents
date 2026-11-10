@@ -139,6 +139,69 @@ class ModelTimeoutTests(unittest.TestCase):
         self.assertIn('Verified partial result', answer)
         self.assertIn('partial result', answer.lower())
 
+    def test_batched_tool_call_after_deadline_returns_partial_answer(self):
+        now, state = [0.0], {}
+        def respond(call, timeout):
+            return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
+                {'id': 'first', 'function': {'name': 'utc_time', 'arguments': '{}'}},
+                {'id': 'second', 'function': {'name': 'utc_time', 'arguments': '{}'}}]}}]}).encode())
+        def spend_budget(*args, **kwargs):
+            now[0] = 60.0
+            return 'ok'
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1',
+             'HARNESS_MODEL': 'example', 'HARNESS_TURN_TIMEOUT_SECONDS': '60'}, clear=True), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness.execute_tool', side_effect=spend_budget) as tool, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('task', {'tools': ['utc_time']}, state=state)
+        self.assertEqual(tool.call_count, 1)
+        self.assertTrue(answer.startswith('Partial result:'))
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertTrue(state['messages'])
+
+    def test_tool_racing_the_deadline_gets_no_time_and_turn_still_checkpoints(self):
+        now, state = [0.0], {}
+        def respond(call, timeout):
+            return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
+                {'id': 'read', 'function': {'name': 'utc_time', 'arguments': '{}'}}]}}]}).encode())
+        def trace(event, **fields):
+            if event == 'tool_call':
+                now[0] = 60.0
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1',
+             'HARNESS_MODEL': 'example', 'HARNESS_TURN_TIMEOUT_SECONDS': '60'}, clear=True), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness._trace', side_effect=trace), \
+             patch('popot_agents.worker.http_harness.execute_tool', return_value='ok') as tool, \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('task', {'tools': ['utc_time']}, state=state)
+        self.assertEqual(tool.call_args.kwargs['timeout_seconds'], 0.0)
+        self.assertTrue(answer.startswith('Partial result:'))
+        self.assertEqual(state['outcome']['status'], 'partial')
+
+    def test_answer_received_after_deadline_returns_partial_checkpoint(self):
+        now, state = [0.0], {}
+        def respond(call, timeout):
+            report = {'status': 'partial', 'answer': 'Late but complete',
+                      'evidence': [], 'remaining_work': [], 'errors': []}
+            return io.BytesIO(json.dumps({'choices': [
+                {'message': {'content': json.dumps(report)}}]}).encode())
+        def trace(event, **fields):
+            if event == 'assistant_answer':
+                now[0] = 60.0
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1',
+             'HARNESS_MODEL': 'example', 'HARNESS_TURN_TIMEOUT_SECONDS': '60'}, clear=True), \
+             patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness._trace', side_effect=trace), \
+             redirect_stderr(io.StringIO()):
+            answer = run_http('task', {}, state=state)
+        self.assertTrue(answer.startswith('Partial result:'))
+        self.assertIn('Late but complete', answer)
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertTrue(state['messages'])
+
     def test_final_model_timeout_returns_partial_result_without_repeating_write(self):
         now = [0.0]
         memory_client = Mock()

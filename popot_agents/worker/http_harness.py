@@ -261,6 +261,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             raise RuntimeError("turn deadline exceeded")
         return remaining
 
+    def remaining_or_none() -> float | None:
+        """Remaining turn budget, or None once the deadline has passed."""
+        remaining = deadline - time.monotonic()
+        return remaining if remaining > 0 else None
+
     messages = [{"role": "user", "content": task}] if isinstance(task, str) else list(task)
     user_context = list(messages)
     if run_context is not None:
@@ -413,6 +418,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if budget <= 0:
             raise _FinalAnswerRequired()
         return budget
+
+    def tool_seconds() -> float:
+        """Bound a tool call to the budget left after the final-answer reserve."""
+        remaining = remaining_or_none()
+        return 0.0 if remaining is None else max(0.0, remaining - final_reserve)
 
     def guidance_seconds():
         """Time auxiliary guidance may spend without touching the model-call reserve."""
@@ -747,8 +757,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     max_tool_rounds = role_config.get('max_tool_rounds', RUNTIME['model']['default_max_tool_rounds'])
     for round_number in range(1, max_tool_rounds + 3):
         # Leave a useful model-call window, including on short resumed turns.
+        remaining = remaining_or_none()
+        if remaining is None:
+            _trace('turn_partial', reason='turn_deadline_exhausted', round=round_number)
+            return partial_answer()
         forced_final = bool(invalid_results or delegated_work_finished or review_progress and review_progress.finished or round_number > max_tool_rounds
-                            or final_reserve and remaining_seconds() <= final_reserve + min(30, turn_timeout / 2))
+                            or final_reserve and remaining <= final_reserve + min(30, turn_timeout / 2))
         checkpoint_only = bool(review_progress and review_progress.due and not forced_final)
         try:
             try:
@@ -799,7 +813,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             messages.append({'role': 'assistant', **message})
             requested_wait = None
             for tool_call in calls:
-                remaining_seconds()
+                if remaining_or_none() is None:
+                    _trace('turn_partial', reason='turn_deadline_exhausted',
+                           round=round_number)
+                    return partial_answer()
                 name = None
                 arguments = {}
                 delegation_key = None
@@ -829,7 +846,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     if not isinstance(arguments, dict):
                         raise ToolInputError("tool arguments must be an object")
                     check_publication_owner(name, arguments, run_context)
-                    if remaining_seconds() <= final_reserve:
+                    remaining = remaining_or_none()
+                    if remaining is None:
+                        _trace('turn_partial', reason='turn_deadline_exhausted',
+                               round=round_number)
+                        return partial_answer()
+                    if remaining <= final_reserve:
                         raise ToolInputError('Tool not executed: time reserved for the final answer.')
                     _trace("tool_call", round=round_number, name=name,
                            call_id=tool_call["id"],
@@ -838,7 +860,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                         if name == 'await_tasks':
                             if requested_wait:
                                 raise ToolInputError('Use one await_tasks selection per tool batch')
-                            output = extra_tools[name]['call'](arguments)
+                            output = extra_tools[name]['call'](
+                                arguments, timeout_seconds=tool_seconds())
                             selection = json.loads(output)['await_tasks']
                             known = set(completed_delegations) | {v.get('session_id') for v in failed_delegations.values()}
                             if not set(selection['session_ids']) <= known:
@@ -892,7 +915,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             # Durable children outlive this activation. Reserve
                             # only the two bounded submission RPC attempts here.
                             submission_budget = 10 if run_context is not None else 60
-                            if not completed_child and work_seconds() < submission_budget:
+                            if not completed_child and tool_seconds() < submission_budget:
                                 if delegation_key in failed_delegations or any(
                                         value.get('session_id') == session_id
                                         for value in failed_delegations.values() if value.get('session_id')):
@@ -953,7 +976,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             if name == 'delegate_task' and recovering_child:
                                 child_recoveries[session_id] = child_recoveries.get(session_id, 0) + 1
                             output = extra_tools[name]["call"](
-                                arguments, timeout_seconds=work_seconds(),
+                                arguments, timeout_seconds=tool_seconds(),
                                 call_id=turn_id + ":" + tool_call["id"])
                             if name == REVIEW_CHECKPOINT and review_progress:
                                 _trace('review_checkpoint',
@@ -990,7 +1013,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                         try:
                             output = mcp_client.call_tool(
                                 mcp_servers[selected["server"]], selected["native_name"], arguments,
-                                timeout_seconds=work_seconds())
+                                timeout_seconds=tool_seconds())
                         except RuntimeError as exc:
                             if discovery_cache is not None:
                                 discovery_cache.invalidate(selected['server'])
@@ -1000,7 +1023,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 'Project memory is unavailable; continue using current sources.') from None
                     else:
                         output = execute_tool(name, arguments, allowed,
-                                              timeout_seconds=work_seconds())
+                                              timeout_seconds=tool_seconds())
                 except (ToolInputError, ToolExecutionError, mcp_client.MCPToolError) as exc:
                     _trace("tool_error", round=round_number, name=name, call_id=call_id,
                            error_type=type(exc).__name__,
@@ -1167,7 +1190,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 json.dumps(list(failed_delegations.values()), ensure_ascii=False)})
             continue
         _trace("assistant_answer", round=round_number, content=answer.strip())
-        remaining_seconds()
+        if remaining_or_none() is None:
+            _trace('turn_partial', reason='turn_deadline_exhausted',
+                   round=round_number)
+            return partial_answer(answer, report)
         if (delegated_work_finished or review_progress and review_progress.finished) and report and report['status'] == 'partial':
             memory.run_complete = False
             return save_result(answer, 'partial', 'agent_reported', report)
