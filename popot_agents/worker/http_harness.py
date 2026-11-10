@@ -311,9 +311,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             name: shutil.which(name, path=tool_path) is not None for name in (
                 'git', 'gh', 'node', 'npm', 'go', 'postgres', 'pytest', 'coverage', 'ggshield', 'sonar-scanner')})
     mcp_servers = role_config.get("mcpServers", {})
-    mcp_tools = (mcp_client.discover_tools(mcp_servers, timeout_seconds=remaining_seconds(),
+    # Optional startup work must not raise once the deadline is gone: skip it and
+    # let the round loop checkpoint the partial answer.
+    discovery_budget = remaining_or_none() if mcp_servers else None
+    mcp_tools = (mcp_client.discover_tools(mcp_servers, timeout_seconds=discovery_budget,
                     **({"cache":discovery_cache} if discovery_cache is not None else {}))
-                 if mcp_servers else {})
+                 if discovery_budget else {})
     memory_warnings = list(discovery_cache.warnings) if discovery_cache is not None else []
     if memory_warnings:
         instructions += '\nProject memory is unavailable. Continue with current sources and tools; report this limitation.'
@@ -372,7 +375,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             render_prompt('memory/lifecycle') +
             (memory.dataset if memory.enabled else
              render_prompt('memory/unknown_project'))})
-    context = memory.context(min(RUNTIME["timeouts"]["memory_recall_seconds"], remaining_seconds()))
+    recall_budget = remaining_or_none()
+    context = (memory.context(min(RUNTIME["timeouts"]["memory_recall_seconds"], recall_budget))
+               if recall_budget else '')
     if context:
         first_user = next((index for index, item in enumerate(messages)
                            if item['role'] != 'system'), len(messages))
