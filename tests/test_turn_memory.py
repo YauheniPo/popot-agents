@@ -678,3 +678,48 @@ class TurnMemoryTests(unittest.TestCase):
              patch('popot_agents.worker.http_harness.request.urlopen',
                    side_effect=lambda *a, **kw: io.BytesIO(json.dumps(replies.pop(0)).encode())):
             self.assertEqual(run_http(TASK, ROLE), 'done')
+
+    def test_disabled_optional_memory_does_not_block_the_main_task(self):
+        for failure in ('recall', 'start', 'no_project', 'no_credentials'):
+            with self.subTest(failure=failure):
+                client = Mock()
+                client.recall.return_value = []
+                if failure == 'recall':
+                    client.recall.side_effect = RuntimeError('HTTP 503')
+                if failure == 'start':
+                    client.session_event.side_effect = RuntimeError('HTTP 503')
+                env = dict(ENV)
+                if failure == 'no_credentials':
+                    env.pop('COGNEE_PASSWORD')
+                role = dict(ROLE)
+                if failure != 'no_project':
+                    role['memory_project'] = 'popot-agents'
+                replies = [
+                    {'tool_calls': [{'id': str(index), 'function': {
+                        'name': 'mcp__cognee__recall', 'arguments': '{"query":"facts"}'}}]}
+                    for index in range(RUNTIME['workflow']['max_no_progress'])]
+                replies.append({'content': json.dumps({'status': 'completed', 'answer': 'done',
+                    'evidence': ['Current service health inspected'], 'remaining_work': [], 'errors': []})})
+                calls, state = [], {}
+                def respond(request, **kwargs):
+                    calls.append(json.loads(request.data))
+                    return io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())
+                tool = {'server': 'cognee', 'native_name': 'recall',
+                        'schema': {'type': 'function', 'function': {'name': 'mcp__cognee__recall'}}}
+                with patch.dict(os.environ, env, clear=True), \
+                     patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+                     patch('popot_agents.worker.http_harness.mcp_client.discover_tools',
+                           return_value={'mcp__cognee__recall': tool}), \
+                     patch('popot_agents.worker.http_harness.mcp_client.call_tool') as call_tool, \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
+                    self.assertEqual(run_http('Inspect the local services', role, state=state), 'done')
+                self.assertEqual(state['outcome']['status'], 'completed')
+                self.assertEqual(len(calls), RUNTIME['workflow']['max_no_progress'] + 1)
+                call_tool.assert_not_called()
+                errors = [json.loads(item['content'])['error'] for item in state['messages']
+                          if item['role'] == 'tool']
+                self.assertTrue(all('continue' in error.lower() for error in errors))
+                if failure != 'no_project':
+                    self.assertTrue(all('unavailable' in error for error in errors))
+                    self.assertFalse(any('repository URL' in error for error in errors))
+                    self.assertIn('dataset_name=popot-agents', calls[0]['messages'][0]['content'])

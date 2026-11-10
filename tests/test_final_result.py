@@ -96,6 +96,53 @@ class FinalResultTests(unittest.TestCase):
         self.assertEqual(len(bodies), 2)
         self.assertNotIn('tools', bodies[-1])
 
+    def test_format_repair_is_request_scoped_when_required_verification_remains(self):
+        from popot_agents.prompts import render_prompt
+        partial = self.result('partial', remaining=['Obtain independent QA at the target revision'])
+        _, state, bodies = self.run_sequence([{'content': 'bad JSON'}, partial])
+        repair_prefix = render_prompt('reporting/repair', reason='invalid_json', result_contract='').splitlines()[0]
+        self.assertEqual(bodies[-1]['messages'][0]['content'].splitlines()[0], repair_prefix)
+        self.assertNotIn('tools', bodies[-1])
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertFalse(any(m.get('role') == 'system' and repair_prefix in m.get('content', '')
+                             for m in state['messages']))
+        delegate = Mock(return_value=json.dumps({'sessionId': 'a'*16, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_COMPLETED', 'answer': 'QA assessed', 'outcome': {
+                'status': 'completed', 'evidence': ['QA check'], 'errors': [], 'remaining_work': []}}))
+        _, resumed, requests = self.run_sequence([self.delegate_call(), self.result()], state=state, delegate=delegate)
+        delegate.assert_called_once()
+        self.assertIn('tools', requests[0])
+        self.assertFalse(any(m.get('role') == 'system' and repair_prefix in m.get('content', '')
+                             for m in requests[0]['messages']))
+        self.assertEqual(resumed['outcome']['status'], 'completed')
+
+    def test_legacy_checkpoint_drops_only_runtime_format_repair_directives(self):
+        from popot_agents.prompts import render_prompt
+        repair = render_prompt('reporting/repair', reason='invalid_json', result_contract='OLD CONTRACT')
+        context = {'role': 'system', 'content': 'Keep independent QA and the original deadline'}
+        quoted = {'role': 'user', 'content': repair}
+        state = {'messages': [context, quoted, {'role': 'system', 'content': repair}],
+                 'outcome': {'status': 'partial'}}
+        _, _, bodies = self.run_sequence([self.result('partial', remaining=['QA'])], state=state)
+        messages = bodies[0]['messages']
+        self.assertIn(context, messages)
+        self.assertIn(quoted, messages)
+        self.assertFalse(any(m.get('role') == 'system' and m.get('content') == repair for m in messages),
+                         'Legacy runtime repair directive must not govern a new work turn')
+
+    def test_format_repair_does_not_bypass_missing_independent_verification(self):
+        child = {'sessionId': 'a'*16, 'role': 'backend_engineer', 'outcome': {
+            'status': 'completed', 'revision': 'b'*40, 'evidence': ['implementation observed'],
+            'errors': [], 'remaining_work': []}}
+        state = {'messages': [{'role': 'user', 'content': 'Verify the implementation'}],
+                 'outcome': {'status': 'partial'}, 'completed_delegations': {'a'*16: child}}
+        _, state, bodies = self.run_sequence([{'content': 'bad JSON'}, self.result()], state=state,
+            role={'name': 'planner', '_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(state['outcome']['reason'], 'workflow_validation_missing')
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertIn('code_reviewer, qa_engineer', ' '.join(state['outcome']['remaining_work']))
+        self.assertNotIn('tools', bodies[-1])
+
     def test_invalid_forced_final_also_gets_one_format_repair(self):
         clock = [0]
         def first():

@@ -29,7 +29,7 @@ from .delegation_policy import (available_roles, delegation_instructions,
 from .verification import (observed_revision, acceptance_revision, requested_pull_request,
                            verified_roles, latest_verification, unresolved_findings, verification_failed)
 from .turn_memory import TurnMemory, parse_summary
-from .final_result import evidence_transcript, parse_result, retained_receipts
+from .final_result import evidence_transcript, parse_result, retained_receipts, without_format_repairs
 from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA as REVIEW_SCHEMA
 
 
@@ -280,7 +280,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if not any(m.get('role') == 'user' and m.get('content') == text for m in user_context):
             user_context.append({'role': 'user', 'content': text})
     if resuming:
-        messages = [*state['messages'], messages[-1]]
+        messages = [*without_format_repairs(state['messages']), messages[-1]]
     extra_tools = dict(extra_tools or {})
     if 'delegate_task' in extra_tools:
         # This scope controls the HTTP parent's lifecycle, not the child's task API.
@@ -371,7 +371,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     if 'cognee' in mcp_servers:
         messages.insert(0, {'role': 'system', 'content':
             render_prompt('memory/lifecycle') +
-            (memory.dataset if memory.enabled else
+            (memory.dataset if memory.dataset else
              render_prompt('memory/unknown_project'))})
     context = memory.context(min(RUNTIME["timeouts"]["memory_recall_seconds"], remaining_seconds()))
     if context:
@@ -408,6 +408,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     forced_final = False
     model_failure = None
     final_validation_error = None
+    format_error = None
     invalid_results = 0
     input_errors = {}
     structural_blocker = None
@@ -786,8 +787,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if final:
             # End the tool conversation. Some providers keep emitting calls from
             # its history even with tool_choice=none; retain that history as data.
-            request_messages = [{'role': 'system', 'content':
-                render_prompt('reporting/final', result_contract=result_contract if state is not None else "")},
+            final_instructions = render_prompt('reporting/final',
+                result_contract=result_contract if state is not None else "")
+            if invalid_results:
+                final_instructions = render_prompt('reporting/repair', reason=format_error,
+                    result_contract='') + '\n\n' + final_instructions
+            request_messages = [{'role': 'system', 'content': final_instructions},
                 {'role': 'user', 'content': json.dumps(
                     evidence_transcript(messages, context=user_context), ensure_ascii=False)}]
         if {'read_file', 'bash'} & set(allowed):
@@ -1058,7 +1063,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                                      'and side=LEFT or RIGHT. Verify the position against the actual diff.')
                         if selected['server'] == 'cognee':
                             if not memory.enabled:
-                                raise ToolInputError('Memory needs one repository URL or [project: slug].')
+                                raise mcp_client.MCPToolError(
+                                    'Project memory is unavailable; continue using current sources and tools.'
+                                    if memory.dataset else
+                                    'Project memory is skipped without an unambiguous project; '
+                                    'continue using current sources and tools.')
                             if arguments.get('dataset_name', memory.dataset) != memory.dataset:
                                 raise ToolInputError('Memory is scoped to this task project: ' + memory.dataset)
                             arguments['dataset_name'] = memory.dataset
@@ -1157,6 +1166,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             except ValueError as exc:
                 invalid_results += 1
                 reason = str(exc)
+                format_error = reason
                 _trace('final_result_invalid', round=round_number, attempt=invalid_results,
                        reason=reason, content_chars=len(answer) if isinstance(answer, str) else 0,
                        finish_reason=finish_reason if finish_reason in
@@ -1166,8 +1176,6 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 final_validation_error = 'model returned an invalid final result: ' + reason
                 if invalid_results >= 2 or deadline - time.monotonic() <= 0:
                     return partial_answer()
-                messages.append({'role': 'system', 'content':
-                    render_prompt('reporting/repair', reason=reason, result_contract=result_contract)})
                 continue
             if invalid_results:
                 final_validation_error = None

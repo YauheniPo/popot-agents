@@ -292,12 +292,61 @@ The gateway exposes `run_task`, `send_message`, `list_chats` and `get_chat`.
 
 ### Run a task with curl
 
-Run this as **one line** in Bash or Zsh. The script prints the complete `curl`
-command, streams progress, then reports the task outcome:
+The script prints the complete `curl` command, streams progress, then reports the
+task outcome. For multiline requests in Bash or Zsh, the quoted heredoc below
+fills `TASK` with the pasted text. Quotes, Markdown and `$()` in the request are
+passed literally:
 
 ```bash
-TASK='https://github.com/YauheniPo/popot-agents/pull/58 исправь все и подготовь к merge и sonarqube 100% и 0 issues и все комментриии должны быть порезолвлены и подтяни main' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
+TASK="$(cat <<'TASK_TEXT'
+[P2] Реальный таймаут всё ещё может оборвать ход агента без сохранения состояния.
+В http_harness.py:711 (https://github.com/YauheniPo/popot-agents/blob/ee38d42fe128968ebd2c03a78e56b10730071984/popot_agents/worker/http_harness.py#L711) вспомогательное чтение получает весь остаток времени.
+
+При допустимом бюджете 3 секунды медленное чтение расходует его полностью. TimeoutExpired перехватывается, затем возникает RuntimeError: turn deadline exceeded, который выходит наружу.
+
+Воспроизведено настоящим subprocess timeout:
+
+elapsed: 3.009s
+model_calls: 0
+state: {}
+RuntimeError: turn deadline exceeded
+
+Новые тесты выбрасывают таймаут мгновенно и пропускают этот сценарий. Перед merge нужно сохранить резерв времени либо направить истечение дедлайна в partial с checkpoint и добавить соответствующий тест.
+TASK_TEXT
+)" ROLE='' SESSION_ID='379f6f72a6ba47ad' bash ax_local/run-mcp-task.sh
 ```
+
+The closing `TASK_TEXT` marker must stand alone, without indentation, and must not
+occur as a separate line inside the request. Command substitution (`$(...)`)
+removes trailing newlines; the remaining text is preserved.
+
+For interactive pasting through stdin, run the following command, paste the
+request, then press **Ctrl+D on an empty line** to send it. Here `TASK` stays empty
+and the script reads stdin, preserving trailing newlines too:
+
+```bash
+TASK='' ROLE='' SESSION_ID='379f6f72a6ba47ad' bash ax_local/run-mcp-task.sh
+```
+
+An empty or unset `TASK` reads the request from stdin. A nonempty `TASK` takes
+precedence, so existing one-line commands also work:
+
+```bash
+TASK='проверь систему и найди что можно улучшить и исправить' ROLE='project_operator' SESSION_ID='' bash ax_local/run-mcp-task.sh
+```
+
+`TASK` is always one plain-text user message: JSON, XML, Markdown, code, quotes,
+Unicode, backslashes and line endings are preserved. Its contents are not parsed
+as MCP parameters or evaluated as shell commands. The script JSON-encodes the
+message and streams the request body into `curl` rather than putting it in
+command-line arguments. The printed retry command uses a quoted heredoc too.
+
+The shell still parses an inline `TASK=...` assignment before starting the script.
+For arbitrary pasted text, use the quoted heredoc or interactive input above;
+Python-style `TASK='''...'''` does not quote arbitrary shell text safely. Input
+must be nonempty UTF-8 text without NUL characters; invalid input is rejected
+before sending, without dropping or replacing characters. The API's configured
+message length limit still applies (`limits.message_chars`, currently 30000).
 
 `TASK` is the request. Empty `ROLE` uses `config/runtime.json → mcp.default_role`;
 set a role such as `backend_engineer` to select it explicitly. Empty `SESSION_ID`
@@ -820,9 +869,13 @@ An explicit structured partial result ends the turn without forcing another chil
 execution. Invalid final JSON or a premature completion claim gets one correction;
 repeated invalid output returns a partial checkpoint instead of consuming all rounds.
 The correction is tool-free even when the first invalid answer was already a final
-request; both attempts share the original deadline. Empty content and truncated
-responses are invalid. Before requesting a correction, the parser normalizes a
-leading BOM, a single JSON Markdown fence (including CRLF), literal newlines/tabs
+request; both attempts share the original deadline.
+The format-only restriction applies to that correction request, not later work
+turns. It is not saved as an active instruction; continuations also remove the
+runtime repair directive from older checkpoints, while keeping user text and
+verification requirements. Unfinished review/QA can use tools in the next turn.
+Empty content and truncated responses are invalid. Before requesting a correction,
+the parser normalizes a leading BOM, a single JSON Markdown fence (including CRLF), literal newlines/tabs
 inside strings and trailing commas outside strings. Text, fields and status are
 preserved; missing values, broken quotes, truncated objects and schema errors
 still require correction. Formatting normalization does not execute tools or

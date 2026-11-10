@@ -649,7 +649,8 @@ class AxChat:
             if phase == 'Suspended':
                 self._suspend_pending = False
                 return
-            if phase == 'Running' or (phase == 'Failed' and reason == 'ActorSuspendFailed'):
+            if phase == 'Running' or (phase == 'Failed' and reason in {
+                    'ActorSuspendFailed', 'AtespaceCreationFailed'}):
                 if time.monotonic() >= retry_at:
                     # Substrate resumes the same in-progress snapshot on a retry.
                     # Repeating suspend never starts a model turn or replays tools.

@@ -4,8 +4,18 @@ import json
 import re
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.prompts import render_prompt
 from .turn_memory import scrub
 from .verification import validate_findings
+
+
+def without_format_repairs(messages):
+    """Retire request-only system instructions saved by older workers."""
+    marker = 'FORMAT_ERROR_REASON'
+    prefix, suffix = render_prompt('reporting/repair', reason=marker, result_contract='').split(marker, 1)
+    return [message for message in messages if not (
+        message.get('role') == 'system' and isinstance(message.get('content'), str)
+        and message['content'].startswith(prefix) and suffix in message['content'][len(prefix):])]
 
 
 def evidence_transcript(messages, context=()):

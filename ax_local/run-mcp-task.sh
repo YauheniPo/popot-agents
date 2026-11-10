@@ -1,18 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${TASK:?Set TASK to the request text}"
 ROLE="${ROLE:-}"
 SESSION_ID="${SESSION_ID:-}"
 DISABLE_DELEGATION="${DISABLE_DELEGATION:-}"
 CALL_ID="${CALL_ID:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}"
 PROGRESS_TOKEN="${PROGRESS_TOKEN:-$CALL_ID}"
 
-PAYLOAD="$(python3 - "$TASK" "$ROLE" "$SESSION_ID" "$CALL_ID" "$PROGRESS_TOKEN" "$DISABLE_DELEGATION" <<'PY'
+PAYLOAD="$(python3 - "$ROLE" "$SESSION_ID" "$CALL_ID" "$PROGRESS_TOKEN" "$DISABLE_DELEGATION" 3<&0 <<'PY'
 import json
+import os
 import sys
 
-task, role, session_id, call_id, progress_token, disable_delegation = sys.argv[1:]
+role, session_id, call_id, progress_token, disable_delegation = sys.argv[1:]
+try:
+    task = os.environb.get(b'TASK', b'').decode('utf-8')
+    if not task:
+        with os.fdopen(3, encoding='utf-8', newline='') as source:
+            if source.isatty():
+                print('Paste the task text, then press Ctrl+D on an empty line:', file=sys.stderr)
+            task = source.read()
+    task.encode('utf-8')
+except UnicodeError:
+    sys.exit('TASK must be valid UTF-8 text; no request was sent')
+if not task.strip():
+    sys.exit('Set TASK or provide the request text on stdin; it must contain non-whitespace text')
+if '\x00' in task:
+    sys.exit('TASK cannot contain NUL characters; no request was sent')
 arguments = {'sessionId': session_id, 'task': task}
 if not session_id and role:
     arguments['role'] = role
@@ -27,7 +41,7 @@ print(json.dumps({
         'name': 'run_task',
         'arguments': arguments,
     },
-}, ensure_ascii=False))
+}))
 PY
 )"
 
@@ -36,19 +50,25 @@ CURL_ARGS=(
   -H 'Content-Type: application/json'
   -H 'Accept: application/json, text/event-stream'
   -H 'MCP-Protocol-Version: 2025-11-25'
-  --data-binary "$PAYLOAD"
+  --data-binary @-
 )
-python3 - curl "${CURL_ARGS[@]}" <<'PY'
+python3 - curl "${CURL_ARGS[@]}" 3<<<"$PAYLOAD" <<'PY'
+import json
+import os
 import shlex
 import sys
 
+sys.stdout.reconfigure(encoding='utf-8')
 print('Command to execute:')
-print(' '.join(shlex.quote(arg) for arg in sys.argv[1:]))
+print(' '.join(shlex.quote(arg) for arg in sys.argv[1:]) + " <<'POPOT_MCP_REQUEST'")
+with os.fdopen(3, encoding='ascii') as source:
+    print(json.dumps(json.load(source), ensure_ascii=False))
+print('POPOT_MCP_REQUEST')
 PY
 
 RESPONSE_FILE="$(mktemp)"
 trap 'rm -f "$RESPONSE_FILE"' EXIT
-if curl "${CURL_ARGS[@]}" | tee "$RESPONSE_FILE"; then
+if printf '%s' "$PAYLOAD" | curl "${CURL_ARGS[@]}" | tee "$RESPONSE_FILE"; then
   :
 else
   status=$?
@@ -62,7 +82,8 @@ from pathlib import Path
 import sys
 
 result = None
-for line in Path(sys.argv[1]).read_text().splitlines():
+# SSE lines use LF; Unicode separators inside JSON belong to the message.
+for line in Path(sys.argv[1]).read_text(encoding='utf-8').split('\n'):
     if not line.startswith('data: '):
         continue
     try:
