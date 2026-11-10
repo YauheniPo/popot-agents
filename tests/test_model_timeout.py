@@ -165,18 +165,18 @@ class ModelTimeoutTests(unittest.TestCase):
         def respond(call, timeout):
             return io.BytesIO(json.dumps({'choices': [{'message': {'tool_calls': [
                 {'id': 'read', 'function': {'name': 'utc_time', 'arguments': '{}'}}]}}]}).encode())
-        def trace(event, **fields):
-            if event == 'tool_call':
-                now[0] = 60.0
+        def hold_deadline(*args, **kwargs):
+            now[0] = 60.0
         with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1',
              'HARNESS_MODEL': 'example', 'HARNESS_TURN_TIMEOUT_SECONDS': '60'}, clear=True), \
              patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
-             patch('popot_agents.worker.http_harness._trace', side_effect=trace), \
-             patch('popot_agents.worker.http_harness.execute_tool', return_value='ok') as tool, \
+             patch('popot_agents.worker.http_harness.check_publication_owner',
+                   side_effect=hold_deadline), \
+             patch('popot_agents.worker.http_harness.execute_tool') as tool, \
              redirect_stderr(io.StringIO()):
             answer = run_http('task', {'tools': ['utc_time']}, state=state)
-        self.assertEqual(tool.call_args.kwargs['timeout_seconds'], 0.0)
+        self.assertFalse(tool.called)
         self.assertTrue(answer.startswith('Partial result:'))
         self.assertEqual(state['outcome']['status'], 'partial')
 

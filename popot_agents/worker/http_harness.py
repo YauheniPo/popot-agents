@@ -846,12 +846,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     if not isinstance(arguments, dict):
                         raise ToolInputError("tool arguments must be an object")
                     check_publication_owner(name, arguments, run_context)
-                    remaining = remaining_or_none()
-                    if remaining is None:
-                        _trace('turn_partial', reason='turn_deadline_exhausted',
-                               round=round_number)
-                        return partial_answer()
-                    if remaining <= final_reserve:
+                    if tool_seconds() <= 0:
                         raise ToolInputError('Tool not executed: time reserved for the final answer.')
                     _trace("tool_call", round=round_number, name=name,
                            call_id=tool_call["id"],
