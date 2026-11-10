@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {mkdtempSync, writeFileSync, mkdirSync, readFileSync} from 'node:fs';
+import {mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {after, test} from 'node:test';
@@ -17,8 +17,9 @@ const realWarn = console.warn;
 console.warn = (...args) => warnings.push(args.join(' '));
 after(() => { console.warn = realWarn; });
 
-function fixtureRoot() {
+function fixtureRoot(t) {
   const root = mkdtempSync(join(tmpdir(), 'popot-omniroute-'));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
   mkdirSync(join(root, 'server', 'chunks'), {recursive: true});
   const pageDir = join(root, 'static', 'chunks', 'app', '(dashboard)', 'dashboard', 'conversations');
   mkdirSync(pageDir, {recursive: true});
@@ -150,11 +151,12 @@ test('axIndexFrom preserves failure reasons for conversation status', () => {
   }
 });
 
-test('installConversationStatus patches the pinned bundles and manifests', () => {
-  const root = fixtureRoot();
+test('installConversationStatus patches the pinned bundles and manifests', t => {
+  const root = fixtureRoot(t);
   const pageDir = join(root, 'static', 'chunks', 'app', '(dashboard)', 'dashboard', 'conversations');
   const before = readFileSync(join(pageDir, 'page.js'), 'utf8');
-  installConversationStatus(root);
+  const hooks = installConversationStatus(root, {fetchStatus: async () => ({chats: []})});
+  t.after(() => hooks.deregister());
   const page = readFileSync(join(pageDir, 'page.js'), 'utf8');
   assert.notEqual(page, before);
   assert.match(page, /data-popot':'popot-continuation-badge'/);
@@ -164,17 +166,42 @@ test('installConversationStatus patches the pinned bundles and manifests', () =>
     'page_client-reference-manifest.js'), 'utf8'), /page\.js\?popot-status=1/);
 });
 
-test('installConversationStatus exposes a status reader that tolerates missing artifacts', () => {
-  const root = fixtureRoot();
-  installConversationStatus(root);
+test('installConversationStatus exposes a status reader that tolerates missing artifacts', t => {
+  const root = fixtureRoot(t);
+  const hooks = installConversationStatus(root, {fetchStatus: async () => ({chats: []})});
+  t.after(() => hooks.deregister());
   const missing = globalThis.__popotConversationStatus({artifactRelPath: 'absent.json', isActive: false});
   assert.equal(missing.isStalled, false);
   const escaping = globalThis.__popotConversationStatus({artifactRelPath: '../../etc/passwd', isActive: false});
   assert.equal(escaping.isStalled, false);
 });
 
-test('installConversationStatus refuses unexpected bundles', () => {
-  const root = fixtureRoot();
+test('installConversationStatus polls the injected status source and stops on deregistration', async t => {
+  t.mock.timers.enable({apis: ['setInterval']});
+  let calls = 0, resolveFirst;
+  const fetchStatus = () => {
+    calls++;
+    return calls === 1 ? new Promise(resolve => {resolveFirst = resolve;}) : Promise.resolve({chats: []});
+  };
+  const hooks = installConversationStatus(fixtureRoot(t), {fetchStatus});
+  t.after(() => hooks.deregister());
+  assert.equal(calls, 1);
+  t.mock.timers.tick(5000);
+  assert.equal(calls, 1, 'an unfinished refresh must not overlap the next poll');
+  resolveFirst({chats: []});
+  await Promise.resolve();
+  t.mock.timers.tick(5000);
+  assert.equal(calls, 2);
+  hooks.deregister();
+  await Promise.resolve();
+  t.mock.timers.tick(15000);
+  assert.equal(calls, 2, 'deregistering must stop all subsequent polls');
+});
+
+test('installConversationStatus refuses unexpected bundles without starting a poll', t => {
+  const root = fixtureRoot(t);
   writeFileSync(join(root, 'server', 'chunks', 'route.js'), 'const a={};');
-  assert.throws(() => installConversationStatus(root), /Unsupported pinned OmniRoute conversation bundles/);
+  const fetchStatus = t.mock.fn(async () => ({chats: []}));
+  assert.throws(() => installConversationStatus(root, {fetchStatus}), /Unsupported pinned OmniRoute conversation bundles/);
+  assert.equal(fetchStatus.mock.callCount(), 0);
 });

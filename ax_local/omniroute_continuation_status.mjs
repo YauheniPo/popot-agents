@@ -134,12 +134,12 @@ export function axIndexFrom(body) {
   return next;
 }
 
-export function installConversationStatus(root='/app/.build/next') {
+export function installConversationStatus(root='/app/.build/next', {fetchStatus=requestAxStatus}={}) {
   const ax=new Map();let fetchedAt=0, refreshing=false, unavailable=false;
   async function refresh() {
     if(refreshing)return;refreshing=true;
     try {
-      const next=axIndexFrom(await requestAxStatus());
+      const next=axIndexFrom(await fetchStatus());
       ax.clear();for(const [k,v]of next)ax.set(k,v);fetchedAt=Date.now();
       unavailable=false;
     } catch(error) {
@@ -147,7 +147,6 @@ export function installConversationStatus(root='/app/.build/next') {
       unavailable=true;
     } finally {refreshing=false;}
   }
-  void refresh();const timer=setInterval(()=>void refresh(),5000);timer.unref();
   const artifacts=new Map(),dataRoot=resolve('/app/data/call_logs');
   globalThis.__popotConversationStatus=args=>{
     let artifact=null;
@@ -187,13 +186,17 @@ export function installConversationStatus(root='/app/.build/next') {
       if(text!==changed)writeFileSync(manifest,changed);
     }
   }
-  return registerHooks({
+  const hooks=registerHooks({
     load(url,context,next) {
       const result=next(url,context),patch=transforms.get(url);
       if(!patch)return result;
       return {...result,source:patch(result.source==null?readFileSync(new URL(url),'utf8'):Buffer.from(result.source).toString('utf8'))};
     }
   });
+  // Poll only after installation succeeds; callers can release the timer with
+  // the load hook. Tests supply an isolated status source instead of Docker DNS.
+  void refresh();const timer=setInterval(()=>void refresh(),5000);timer.unref();
+  return {deregister() {clearInterval(timer);hooks.deregister();}};
 }
 
 if(process.env.POPOT_OMNIROUTE_CONVERSATION_FALLBACK==='1') {

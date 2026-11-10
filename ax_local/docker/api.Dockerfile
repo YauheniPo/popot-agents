@@ -1,6 +1,6 @@
 # Named build contexts cannot carry a tag, so the pinned Go image is also
 # passed as an argument to keep every FROM reference versioned.
-ARG GO_IMAGE=golang:1.27.1-bookworm
+ARG GO_IMAGE=golang:1.27.3-bookworm
 FROM --platform=$BUILDPLATFORM python-base AS build-versions
 WORKDIR /build
 COPY pyproject.toml ./
@@ -47,7 +47,7 @@ RUN . /build-versions.env \
     && rm /tmp/kubectl.sha256
 WORKDIR /app
 COPY pyproject.toml ./
-RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.2 \
+RUN python -m pip install --no-cache-dir --only-binary=:all: --upgrade pip==26.3 \
     && python -m pip install --no-cache-dir --only-binary=:all: --group build --group orchestrator --group ax
 COPY --from=ax-cli /ax /usr/local/bin/ax
 COPY --from=substrate-cli /kubectl-ate /usr/local/bin/kubectl-ate

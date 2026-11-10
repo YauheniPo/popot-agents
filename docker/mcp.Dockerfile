@@ -3,7 +3,7 @@ LABEL com.popot.project="popot-agents"
 
 WORKDIR /app
 COPY pyproject.toml ./
-RUN python -m pip install --no-cache-dir --upgrade pip \
+RUN python -m pip install --no-cache-dir --upgrade pip==26.3 \
     && python -m pip install --no-cache-dir --group build --group mcp
 
 RUN useradd --create-home --uid 10001 mcp

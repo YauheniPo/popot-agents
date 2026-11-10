@@ -10,6 +10,7 @@ from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib import error, request
 
 from ax_local.api.cron import CronScheduler, cron_matches, validate_cron
 from ax_local.api.ax_runner import AxAgentRunner, AxChat
@@ -228,6 +229,70 @@ class CronTests(unittest.TestCase):
                 release.set()
                 scheduler.wait_for_jobs()
                 scheduler.close()
+
+    def test_message_cannot_replace_an_active_cron_session(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class Chat(FakeChat):
+            container_name = 'cron-fixture'
+            def send(self, task, **kwargs):
+                if task == 'report':
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError('test did not release cron')
+                return {'answer': 'done: ' + task, 'outcome': {'status': 'completed',
+                    'reason': 'verified', 'evidence': ['receipt'], 'errors': [], 'remaining_work': []}}
+            def restore(self, messages): pass
+            def is_alive(self): return True
+
+        class Runner(FakeRunner):
+            def start_chat(self, sid, config, **kwargs):
+                self.calls.append(sid)
+                return Chat()
+
+        runner = Runner()
+        roles = {'analyst': {'agent': 'test', 'instructions': '', 'tools': [],
+                            'cron': [{'schedule': '* * * * *', 'task': 'report'}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            server = create_server({'test': runner}, roles=roles, session_dir=directory,
+                                   host='127.0.0.1', port=0)
+            scheduler = CronScheduler(roles, {'test': runner}, server.store)
+            server.cron = scheduler
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+
+            def send(sid):
+                call = request.Request(f'http://127.0.0.1:{server.server_port}/messages',
+                    data=json.dumps({'sessionId': sid, 'message': 'add details'}).encode(),
+                    headers={'Content-Type': 'application/json'})
+                try:
+                    response = request.urlopen(call, timeout=3)
+                except error.HTTPError as exc:
+                    response = exc
+                with response:
+                    return response.status, json.load(response)
+
+            try:
+                scheduler.run_due(datetime.now(timezone.utc))
+                self.assertTrue(entered.wait(2))
+                sid = server.store.list_chats()[0]['sessionId']
+                self.assertEqual(send(sid)[0], 409)
+                self.assertEqual(runner.calls, [sid])
+                self.assertTrue(scheduler.is_active(sid))
+                release.set()
+                scheduler.wait_for_jobs()
+                self.assertEqual(send(sid)[0], 200)
+                saved = server.store.get(sid)
+                self.assertEqual(saved['roleConfig']['_ax_cron']['state'], 'TASK_STATE_COMPLETED')
+                self.assertEqual([message['content'] for message in saved['messages']],
+                                 ['report', 'done: report', 'add details', 'done: add details'])
+            finally:
+                release.set()
+                scheduler.wait_for_jobs()
+                scheduler.close()
+                server.shutdown()
+                thread.join()
+                server.server_close()
 
 
 if __name__ == "__main__":

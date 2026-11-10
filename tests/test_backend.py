@@ -184,11 +184,12 @@ class BackendRoleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(harness_tools, "WORKSPACE_ROOT", Path(directory)):
                 with patch("popot_agents.tools.os.geteuid", return_value=0):
-                    with patch("popot_agents.tools.subprocess.run") as run:
-                        run.return_value.returncode = 0
+                    with patch("popot_agents.tools.subprocess.Popen") as start, \
+                         patch("popot_agents.tools._file_action", return_value=".tool-results/test.txt"):
+                        start.return_value.__enter__.return_value.returncode = 0
                         execute_tool("bash", {"command": "pwd"}, ["bash"])
-                self.assertEqual(run.call_args.kwargs["user"], 10001)
-                self.assertEqual(run.call_args.kwargs["group"], 10001)
+                self.assertEqual(start.call_args.kwargs["user"], 10001)
+                self.assertEqual(start.call_args.kwargs["group"], 10001)
 
     def test_file_write_also_runs_as_unprivileged_workspace_user(self):
         with tempfile.TemporaryDirectory() as directory:

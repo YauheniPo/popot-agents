@@ -330,6 +330,8 @@ shows `interventions` with `queued` or `delivered` status. `delivered` means the
 worker included the comment in a model request and the resulting turn was saved;
 it does not mean the requested change was completed. If the task finishes before
 its next model request, the comment remains queued for a later turn.
+Active cron sessions reject messages with HTTP 409; continue their conversation
+after the scheduled task finishes.
 
 MCP accepts any configured `role` (or explicit agent profile). When omitted,
 `config/runtime.json → mcp.default_role` selects the role (`planner` by default).
@@ -504,6 +506,21 @@ if its worker has stopped, loads those skills from the new worker image. Start a
 new session to use a changed role selection. The imported upstream version and
 file checksums are recorded in `skills/upstream.json`.
 
+HTTP workers with `read_file` or `bash` also receive repository guidance from
+their own workspace before each model request. The workspace itself must be a
+Git checkout, or contain exactly one immediate child checkout. With multiple
+checkouts, the worker receives their names and must select the task's target
+before reading its guidance; documents from different checkouts are not merged.
+The context includes bounded previews of root `AGENTS.md`, `CLAUDE.md`,
+`GLOSSARY.md`, `GLOSSARY-MAP.md`, and `docs/agents/domain.md`, plus paths of root
+ADRs. Truncated previews include offsets for reading the remainder with existing
+tools. Relevant linked documents, ADR contents, and nested instructions are read
+on demand. Files pointing outside the selected checkout are excluded.
+This context is refreshed after cloning and on continuation, and is not saved
+into harness checkpoints. Repository guidance stays subordinate to the user's
+task and role permissions; the service repository's documents are not imported
+into unrelated workspaces.
+
 The feature team roles are:
 
 | Role | Responsibility | Built-in tools |
@@ -675,7 +692,7 @@ After changing versions, rebuild the worker and MCP images
 For local SDK development, run from the repository root with Python 3.10+:
 
 ```bash
-python -m pip install --upgrade 'pip>=25.1'
+python -m pip install --upgrade 'pip==26.3'
 python -m pip install --group mcp
 ```
 
@@ -954,15 +971,8 @@ MCP SDK group from `pyproject.toml`; keep the legacy Fetch/Git servers in a sepa
 virtual environment as described above.
 
 ```bash
-python -m pip install --upgrade 'pip>=25.1'
-python -m pip install --group mcp
-python - <<'PYTHON'
-import subprocess, sys, tomllib
-with open('pyproject.toml', 'rb') as source:
-    project = tomllib.load(source)['project']
-subprocess.run([sys.executable, '-m', 'pip', 'install',
-                *project['dependencies'], *project['optional-dependencies']['ax']], check=True)
-PYTHON
+python -m pip install --upgrade 'pip==26.3'
+python -m pip install --group ci
 python -m unittest discover -s tests -p 'test_*.py'
 python -m unittest discover -s ax_local/tests -p 'test_*.py'
 ```
