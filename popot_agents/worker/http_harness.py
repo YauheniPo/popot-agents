@@ -706,7 +706,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 render_prompt('reporting/final', result_contract=result_contract if state is not None else "")},
                 {'role': 'user', 'content': json.dumps(
                     evidence_transcript(messages, context=user_context), ensure_ascii=False)}]
-        if {'read_file', 'bash'} & set(allowed):
+        if ({'read_file', 'bash'} & set(allowed)
+                and remaining_seconds() > RUNTIME['timeouts']['min_turn_seconds']):
             context = read_repository_context(timeout_seconds=remaining_seconds())
             if context:
                 request_messages = [*request_messages, {'role': 'system', 'content':

@@ -206,8 +206,12 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
 def read_repository_context(timeout_seconds=None):
     if not WORKSPACE_ROOT.is_dir():
         return ''
-    context = _file_action('repository_context', {}, timeout_seconds)
-    return context if json.loads(context) else ''
+    # Guidance is auxiliary: a slow or broken checkout must never fail the turn.
+    try:
+        context = _file_action('repository_context', {}, timeout_seconds)
+        return context if json.loads(context) else ''
+    except (OSError, ValueError, subprocess.TimeoutExpired, ToolExecutionError):
+        return ''
 
 
 def export_artifacts(timeout_seconds=None):

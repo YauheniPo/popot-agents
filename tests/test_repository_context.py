@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,7 +29,7 @@ class RepositoryContextTests(unittest.TestCase):
             path.write_text(content, encoding='utf-8')
         return root
 
-    def run_turn(self, responses=None, *, allowed=None, state=None):
+    def run_turn(self, responses=None, *, allowed=None, state=None, timeout_seconds=None):
         if responses is None:
             responses = [{'content': 'done'}]
         responses = iter(responses)
@@ -44,7 +45,7 @@ class RepositoryContextTests(unittest.TestCase):
             return run_http('work on the repository', {
                 'instructions': 'Keep the role permissions.',
                 'tools': ['read_file'] if allowed is None else allowed,
-                'max_tool_rounds': 3}, state=state)
+                'max_tool_rounds': 3}, state=state, timeout_seconds=timeout_seconds)
 
     @staticmethod
     def context(request):
@@ -199,3 +200,23 @@ class RepositoryContextTests(unittest.TestCase):
         self.repository(**{'AGENTS.md': 'FILE_READER_ONLY'})
         self.run_turn(allowed=['calculate'])
         self.assertNotIn('FILE_READER_ONLY', self.context(self.requests[0]))
+
+    def test_guidance_read_timeout_does_not_fail_the_turn(self):
+        self.repository(**{'AGENTS.md': 'UNREACHABLE_GUIDANCE'})
+        timeout = subprocess.TimeoutExpired('file_worker.py', 0.001)
+        with patch.object(tools, '_file_action', side_effect=timeout) as guidance:
+            self.assertEqual(self.run_turn(), 'done')
+        self.assertEqual(len(self.requests), 1)
+        guidance.assert_called_once()
+        context = self.context(self.requests[0])
+        self.assertNotIn('UNREACHABLE_GUIDANCE', context)
+        self.assertIn('Keep the role permissions.', context)
+
+    def test_near_deadline_turn_returns_partial_answer_without_reading_guidance(self):
+        self.repository(**{'AGENTS.md': 'LATE_GUIDANCE'})
+        timeout = subprocess.TimeoutExpired('file_worker.py', 0.001)
+        with patch.object(tools, '_file_action', side_effect=timeout) as guidance:
+            answer = self.run_turn(timeout_seconds=2)
+        self.assertTrue(answer.startswith('Partial result: the model request failed'), answer)
+        guidance.assert_not_called()
+        self.assertEqual(self.requests, [])
