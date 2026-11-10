@@ -48,6 +48,18 @@ class WorkStatusTests(unittest.TestCase):
         # Reading the same persisted data after a restart needs no live worker.
         self.assertEqual(result, build_work_status(json.loads(json.dumps(root)), [child, root, foreign]))
 
+    def test_failure_details_survive_without_child_sessions(self):
+        from popot_agents.orchestrator.work_status import build_work_status
+        root = {'sessionId':'a'*16,'role':'planner','updatedAt':'2026-11-01T00:00:00Z',
+                'roleConfig':{'_workflow':{'state':'failed','phase':'finished','outcome':{
+                    'status':'failed','evidence':[],'remaining_work':[],'errors':[],
+                    'failure':{'code':'deadline_expired','deadlineExpired':True,'errno':13}}}}}
+        failure = build_work_status(root, [root])['tasks'][0]['failure']
+        self.assertEqual(failure['code'], 'deadline_expired')
+        self.assertTrue(failure['deadlineExpired'])
+        self.assertEqual(failure['errno'], 13)
+        self.assertNotIn('childSessionIds', failure)
+
     def test_reports_are_bounded_redacted_and_truncation_is_explicit(self):
         from popot_agents.orchestrator.work_status import build_work_status
         root = {'sessionId':'a'*16,'role':'planner','updatedAt':'2026-10-31T20:00:00Z','roleConfig':{}}

@@ -203,6 +203,7 @@ class HttpRecoveryLoopTests(unittest.TestCase):
             return io.BytesIO(json.dumps({'choices': [{'message': messages.pop(0)}]}).encode())
         with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1', 'HARNESS_MODEL': 'fake'}, clear=True), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=reply), \
+             patch('popot_agents.worker.http_harness.read_repository_context', return_value=''), \
              redirect_stderr(io.StringIO()):
             return run_http('task', {'tools': allowed, 'max_tool_rounds': 4})
 
