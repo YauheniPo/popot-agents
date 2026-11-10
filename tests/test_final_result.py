@@ -130,6 +130,51 @@ class FinalResultTests(unittest.TestCase):
         self.assertEqual(state['outcome']['status'], 'completed')
         self.assertEqual(len(bodies), 1)
 
+    def test_multiline_report_is_normalized_without_a_model_repair(self):
+        answer = 'Проверено:\n| check | result |\n| tests | PASS |\r\n\tExit 0'
+        report = self.result(answer=answer)['content']
+        report = report.replace('\\n', '\n').replace('\\r', '\r').replace('\\t', '\t')
+        with patch('popot_agents.worker.http_harness._trace') as trace:
+            actual, state, bodies = self.run_sequence([{'content': report}, self.result(answer=answer)])
+        self.assertEqual(actual, answer)
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual(len(bodies), 1, 'Formatting alone must not spend another model request')
+        self.assertFalse(any(c.args[0] == 'final_result_invalid' for c in trace.call_args_list))
+
+    def test_trailing_separators_preserve_report_data_without_a_model_repair(self):
+        from popot_agents.worker.final_result import parse_result
+        report = {'status': 'partial', 'answer': 'Keep ,} and ,] and \\"quoted\\" text',
+                  'evidence': ['stdout: ok'], 'remaining_work': ['QA'], 'errors': [],
+                  'findings': [{'description': 'verify', 'scope': 'in_scope', 'status': 'open'}]}
+        text = json.dumps(report, ensure_ascii=False).replace('"stdout: ok"]', '"stdout: ok",]')
+        text = text.replace('"status": "open"}', '"status": "open",}').removesuffix('}') + ',}'
+        self.assertEqual(parse_result(text), report)
+
+    def test_transport_wrappers_accept_bom_and_crlf_without_extracting_prose(self):
+        from popot_agents.worker.final_result import parse_result
+        report = self.result()['content']
+        for text in ('\ufeff' + report, '```json\r\n' + report + '\r\n```',
+                     '```JSON \n' + report + '\n```'):
+            with self.subTest(text=text[:12]):
+                self.assertEqual(parse_result(text), json.loads(report))
+
+    def test_normalization_does_not_guess_missing_data_or_accept_invalid_schema(self):
+        from popot_agents.worker.final_result import parse_result
+        valid = self.result()['content']
+        for text in (valid[:-1], valid + valid, 'prefix ' + valid, valid + '\nDone',
+                     valid.replace('Result verified', 'broken "quote'),
+                     valid.replace('Result verified', 'bad\\q'),
+                     valid.replace('Result verified', 'bad\x00control'),
+                     valid.replace('"errors": []', '"errors": [,]'),
+                     valid.replace('"errors": []', '"errors": [1,,]'),
+                     valid.replace('"errors": []', '"errors": {,}'),
+                     '{"status":"completed","answer":"text",}',
+                     valid.replace('"errors": []', '"errors": "none"')):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_result(text)
+        with self.assertRaisesRegex(ValueError, 'truncated_result'):
+            parse_result(valid.replace('Result verified', 'line\nbreak'), 'length')
+
     def test_cloud_format_repair_disables_thinking_without_changing_work_requests(self):
         parameters = {'reasoning': {'enabled': True}}
         _, _, bodies = self.run_sequence([{'content': 'bad'}, self.result()], env={
