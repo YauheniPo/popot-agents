@@ -233,20 +233,26 @@ class ModelTimeoutTests(unittest.TestCase):
                     run_http('task')
                 self.assertEqual(call.call_count, expected)
 
-    def test_no_retry_after_turn_deadline(self):
+    def test_no_retry_after_turn_deadline_keeps_a_partial_answer(self):
         now = [0.0]
         def timeout(*args, **kwargs):
             now[0] = 300.0
             raise TimeoutError()
+        state = {}
         with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1',
                                      'HARNESS_MODEL': 'example', 'HARNESS_TURN_TIMEOUT_SECONDS': '300'}, clear=True), \
              patch.dict(RUNTIME['model'], {'request_retries': 1}), \
              patch('popot_agents.worker.http_harness.time.monotonic', side_effect=lambda: now[0]), \
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=timeout) as call, \
              redirect_stderr(io.StringIO()):
-            with self.assertRaises(RuntimeError):
-                run_http('task')
+            answer = run_http('task', state=state)
+            # The retry is not attempted, and the spent coordination turn becomes a saved partial answer.
             call.assert_called_once()
+        self.assertTrue(answer.startswith('Partial result:'), answer)
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertEqual(state['outcome']['reason'], 'model_request_failed')
+        self.assertIn('turn deadline exceeded', state['outcome']['errors'])
+        self.assertTrue(state['messages'])
 
     def test_timeout_reading_response_is_also_identified(self):
         with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://model/v1', 'HARNESS_MODEL': 'example'},

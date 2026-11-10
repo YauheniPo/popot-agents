@@ -35,6 +35,8 @@ _GITHUB_HOSTS = {'github.com', 'www.github.com'}
 # The guard trusts TLS links only, matching the previous https-only predicate.
 _URL_SCHEMES = ('https://',)
 _URL_TRAILING = '>)]}*`,;!.\'"}<>'
+# Guidance must leave the model request its minimum plus room for the request handshake.
+_GUIDANCE_HANDSHAKE_SECONDS = 1.0
 
 
 def _mentions_github_url(messages) -> bool:
@@ -412,6 +414,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             raise _FinalAnswerRequired()
         return budget
 
+    def guidance_seconds():
+        """Time auxiliary guidance may spend without touching the model-call reserve."""
+        reserved = (final_reserve + RUNTIME['timeouts']['min_turn_seconds']
+                    + _GUIDANCE_HANDSHAKE_SECONDS)
+        return max(0.0, min(deadline - time.monotonic() - reserved,
+                            RUNTIME['timeouts']['file_action_seconds']))
+
     def capture_memory(answer, status):
         if memory.enabled and status in {'completed', 'partial', 'blocked'}:
             phase = 'summary'
@@ -706,12 +715,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 render_prompt('reporting/final', result_contract=result_contract if state is not None else "")},
                 {'role': 'user', 'content': json.dumps(
                     evidence_transcript(messages, context=user_context), ensure_ascii=False)}]
-        if ({'read_file', 'bash'} & set(allowed)
-                and remaining_seconds() > RUNTIME['timeouts']['min_turn_seconds']):
-            context = read_repository_context(timeout_seconds=remaining_seconds())
-            if context:
-                request_messages = [*request_messages, {'role': 'system', 'content':
-                    render_prompt('tools/repository_context', context=context)}]
+        if {'read_file', 'bash'} & set(allowed):
+            guidance_timeout = guidance_seconds()
+            if guidance_timeout > 0:
+                context = read_repository_context(timeout_seconds=guidance_timeout)
+                if context:
+                    request_messages = [*request_messages, {'role': 'system', 'content':
+                        render_prompt('tools/repository_context', context=context)}]
         body = {"model": model, "messages": request_messages, **model_parameters}
         selected_schemas = [] if final else schemas
         if checkpoint_only and not final:
@@ -752,16 +762,19 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 forced_final = True
                 result = completion(round_number, True)
         except RuntimeError as exc:
-            if forced_final and (isinstance(exc, _ModelRequestError) and exc.retryable
-                                 or 'timed out' in str(exc) or 'deadline exceeded' in str(exc)):
-                _trace('turn_partial', reason='final_model_timeout', round=round_number)
+            deadline_exhausted = 'deadline exceeded' in str(exc)
+            retryable_final_failure = forced_final and (
+                isinstance(exc, _ModelRequestError) and exc.retryable or 'timed out' in str(exc))
+            if deadline_exhausted or retryable_final_failure:
+                _trace('turn_partial', round=round_number,
+                       reason='turn_deadline_exhausted' if deadline_exhausted else 'final_model_timeout')
                 model_failure = str(exc)
                 return partial_answer()
             raise
         memory.record_usage(result)
-        if forced_final and time.monotonic() >= deadline:
+        if time.monotonic() >= deadline:
+            _trace('turn_partial', reason='turn_deadline_exhausted', round=round_number)
             return partial_answer()
-        remaining_seconds()
         try:
             message = result["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
