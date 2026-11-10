@@ -30,62 +30,95 @@ def _atomic_write(path, chunks) -> None:
             os.unlink(temporary)
 
 
-def repository_context() -> dict:
+GUIDANCE_DOCUMENTS = ('AGENTS.md', 'CLAUDE.md', 'GLOSSARY.md', 'GLOSSARY-MAP.md', 'docs/agents/domain.md')
+MAX_REPOSITORIES = 32
+MAX_DISCOVERY_ERRORS = 32
+
+
+def _discover_repositories(root: Path) -> tuple[list[Path], dict, bool]:
+    """List the checkouts under root, recording bounded discovery errors."""
+    if (root / '.git').exists():
+        return [root], {}, False
+    repositories = []
     errors = {}
-    errors_truncated = False
+    truncated = False
+    for path in root.iterdir():
+        try:
+            if not path.is_symlink() and path.is_dir() and (path / '.git').exists():
+                repositories.append(path)
+        except (OSError, RuntimeError) as exc:
+            if len(errors) < MAX_DISCOVERY_ERRORS:
+                errors[str(path.relative_to(root))] = type(exc).__name__
+            else:
+                truncated = True
+    return sorted(repositories), errors, truncated
+
+
+def _read_document(repository: Path, path: Path, limit: int) -> dict:
+    """Read one guidance document that must resolve inside the checkout."""
+    try:
+        if not path.resolve().is_relative_to(repository):
+            return {'error': 'document points outside the repository'}
+        if not path.is_file():
+            return {}
+        with path.open(encoding='utf-8', newline='') as source:
+            content = source.read(limit + 1)
+    except (OSError, UnicodeError, RuntimeError) as exc:
+        return {'error': type(exc).__name__}
+    truncated = len(content) > limit
+    return {'content': content[:limit], 'truncated': truncated,
+            'next_offset': limit if truncated else None}
+
+
+def _read_documents(repository: Path, root: Path) -> dict:
+    """Read every guidance document of a single checkout."""
+    limit = MAX_TOOL_OUTPUT // len(GUIDANCE_DOCUMENTS)
+    documents = {}
+    for name in GUIDANCE_DOCUMENTS:
+        path = repository / name
+        document = _read_document(repository, path, limit)
+        if document:
+            documents[str(path.relative_to(root))] = document
+    return documents
+
+
+def _read_adrs(repository: Path, root: Path) -> tuple[list, dict]:
+    """List the ADR files that resolve inside the checkout."""
+    directory = repository / 'docs/adr'
+    try:
+        if directory.resolve().is_relative_to(repository) and directory.is_dir():
+            adrs = sorted(str(path.relative_to(root)) for path in directory.glob('*.md')
+                          if path.is_file() and path.resolve().is_relative_to(repository))
+            return adrs, {}
+    except (OSError, RuntimeError) as exc:
+        return [], {str(directory.relative_to(root)): {'error': type(exc).__name__}}
+    return [], {}
+
+
+def repository_context() -> dict:
+    """Return the guidance of the checkout the worker is running in."""
     try:
         root = WORKSPACE_ROOT.resolve()
         if not root.is_dir():
             return {}
-        repositories = [root] if (root / '.git').exists() else []
-        if not repositories:
-            for path in root.iterdir():
-                try:
-                    if not path.is_symlink() and path.is_dir() and (path / '.git').exists():
-                        repositories.append(path)
-                except (OSError, RuntimeError) as exc:
-                    if len(errors) < 32:
-                        errors[str(path.relative_to(root))] = type(exc).__name__
-                    else:
-                        errors_truncated = True
-            repositories.sort()
+        repositories, errors, errors_truncated = _discover_repositories(root)
     except (OSError, RuntimeError) as exc:
         return {'discovery_errors': {'.': type(exc).__name__}}
     discovery = {'discovery_errors': errors, 'discovery_errors_truncated': errors_truncated} if errors else {}
     if not repositories:
         return discovery
     if len(repositories) != 1:
-        return {**discovery, 'repositories': [str(path.relative_to(root)) for path in repositories[:32]],
-                'selection_required': True, 'truncated': len(repositories) > 32}
+        listed = [str(path.relative_to(root)) for path in repositories[:MAX_REPOSITORIES]]
+        return {**discovery, 'repositories': listed, 'selection_required': True,
+                'truncated': len(repositories) > MAX_REPOSITORIES}
     repository = repositories[0]
-    names = ('AGENTS.md', 'CLAUDE.md', 'GLOSSARY.md', 'GLOSSARY-MAP.md', 'docs/agents/domain.md')
-    limit = MAX_TOOL_OUTPUT // len(names)
-    documents = {}
-    for name in names:
-        path = repository / name
-        key = str(path.relative_to(root))
-        try:
-            if not path.resolve().is_relative_to(repository):
-                documents[key] = {'error': 'document points outside the repository'}
-            elif path.is_file():
-                with path.open(encoding='utf-8', newline='') as source:
-                    content = source.read(limit + 1)
-                documents[key] = {'content': content[:limit], 'truncated': len(content) > limit,
-                                  'next_offset': limit if len(content) > limit else None}
-        except (OSError, UnicodeError, RuntimeError) as exc:
-            documents[key] = {'error': type(exc).__name__}
-    directory = repository / 'docs/adr'
-    adrs = []
-    try:
-        if directory.resolve().is_relative_to(repository) and directory.is_dir():
-            adrs = sorted(str(path.relative_to(root)) for path in directory.glob('*.md')
-                          if path.is_file() and path.resolve().is_relative_to(repository))
-    except (OSError, RuntimeError) as exc:
-        documents[str(directory.relative_to(root))] = {'error': type(exc).__name__}
+    documents = _read_documents(repository, root)
+    adrs, adr_errors = _read_adrs(repository, root)
+    documents.update(adr_errors)
     if not documents and not adrs:
         return discovery
     return {**discovery, 'repository': str(repository.relative_to(root)), 'documents': documents,
-            'adrs': adrs[:32], 'adrs_truncated': len(adrs) > 32}
+            'adrs': adrs[:MAX_REPOSITORIES], 'adrs_truncated': len(adrs) > MAX_REPOSITORIES}
 
 
 def main() -> None:

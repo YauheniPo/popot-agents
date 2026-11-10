@@ -128,8 +128,8 @@ class GatewayTests(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=self.urlopen):
             client.run_task("work alone", role="backend_engineer", disable_delegation=True)
             client.run_task("continue", session_id="abc123", disable_delegation=True)
-        self.assertEqual(self.calls[0][2]["disableDelegation"], True)
-        self.assertEqual(self.calls[1][2]["disableDelegation"], True)
+        self.assertIs(self.calls[0][2]["disableDelegation"], True)
+        self.assertIs(self.calls[1][2]["disableDelegation"], True)
 
     def test_tool_errors_keep_orchestrator_status_and_message(self):
         from popot_agents.mcp_server import OrchestratorClient
@@ -229,11 +229,14 @@ class GatewayTests(unittest.TestCase):
             with patch('popot_agents.mcp_server.stream_call', new_callable=AsyncMock) as streamed:
                 streamed.return_value = {'sessionId': 'solo123', 'answer': 'done'}
                 solo = FakeMCPServer.instance.tools["run_task"](
-                    "work alone", role="backend_engineer", disableDelegation=True, ctx=context)
+                    "work alone", role="backend_engineer", disable_delegation=True, ctx=context)
                 self.assertEqual(solo['sessionId'], 'solo123')
                 self.assertEqual(streamed.call_args.args[1:3], ('/tasks', {
                     'task': 'work alone', 'requestId': 'solo-call',
                     'role': 'backend_engineer', 'disableDelegation': True}))
+                FakeMCPServer.instance.tools["run_task"](
+                    "work alone", role="backend_engineer", ctx=context)
+                self.assertNotIn('disableDelegation', streamed.call_args.args[2])
             continued = FakeMCPServer.instance.tools["run_task"](
                 "что еще добавишь?", role="planner",
                 sessionId="d7ed630a2ce24092")

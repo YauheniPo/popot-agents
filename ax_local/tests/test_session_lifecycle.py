@@ -226,6 +226,19 @@ class SessionLifecycleTests(unittest.TestCase):
         self.assertEqual(self.chats[0].resume_count, 0)
 
 
+class RecordingWorkerPool:
+    def __init__(self, error=None):
+        self.acquired, self.released, self.error = [], [], error
+
+    def acquire(self, name, **options):
+        if self.error:
+            raise self.error
+        self.acquired.append(name)
+
+    def release(self, name):
+        self.released.append(name)
+
+
 class AxLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.runner = AxAgentRunner(
@@ -234,6 +247,29 @@ class AxLifecycleTests(unittest.TestCase):
         )
         self.chat = AxChat(self.runner, 'popot-chat-0123456789abcdef', 12)
         self.runner.snapshot_mode = 'full'
+
+    def test_pool_failure_while_acquiring_releases_the_queue_reservation(self):
+        self.runner.worker_pool = RecordingWorkerPool(error=RuntimeError('pool down'))
+        deadline = time.monotonic() + 5
+        with self.assertRaisesRegex(RuntimeError, 'pool down'):
+            self.runner.start_chat('0123456789abcdef', deadline=deadline)
+        self.assertEqual(self.runner.worker_queue.status()['active'], 0)
+
+    def test_failed_workspace_start_releases_the_pooled_worker(self):
+        self.runner.worker_pool = RecordingWorkerPool()
+        deadline = time.monotonic() + 5
+        with patch.object(self.runner, '_start_reserved_chat',
+                          side_effect=RuntimeError('workspace failed')):
+            with self.assertRaisesRegex(RuntimeError, 'workspace failed'):
+                self.runner.start_chat('0123456789abcdef', deadline=deadline)
+        self.assertEqual(self.runner.worker_pool.released,
+                         ['popot-chat-0123456789abcdef'])
+
+    def test_releasing_a_worker_frees_its_pooled_slot(self):
+        self.runner.worker_pool = RecordingWorkerPool()
+        lease = self.runner.worker_queue.acquire('pooled')
+        self.runner._release_worker('pooled', lease)
+        self.assertEqual(self.runner.worker_pool.released, ['pooled'])
 
     def test_data_resume_restores_conversation_before_the_next_model_turn(self):
         self.runner.snapshot_mode = 'data'
@@ -283,6 +319,7 @@ class AxLifecycleTests(unittest.TestCase):
         self.assertNotIn('message', [call.args[1]['action'] for call in remote.call_args_list])
 
     def test_suspend_waits_for_confirmed_phase_and_probe_does_not_wake_worker(self):
+        self.runner.worker_pool = RecordingWorkerPool()
         with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
              patch.object(self.runner, 'task_status', side_effect=[('Running', None), ('Suspended', None)]), \
              patch('ax_local.api.ax_runner.time.sleep'), \
@@ -291,9 +328,21 @@ class AxLifecycleTests(unittest.TestCase):
             self.assertEqual(self.chat.status, 'suspended')
             self.assertTrue(self.chat.is_alive())
         remote.assert_not_called()
+        self.assertEqual(self.runner.worker_pool.released, [self.chat.container_name])
+
+    def test_suspend_without_a_worker_pool_keeps_the_task_available(self):
+        self.assertIsNone(self.runner.worker_pool)
+        with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'task_status', return_value=('Suspended', None)), \
+             patch.object(self.runner, 'remote') as remote:
+            self.chat.after_turn()
+        self.assertEqual(self.chat.status, 'suspended')
+        self.assertTrue(self.chat.is_alive())
+        remote.assert_not_called()
 
     def test_next_message_resumes_then_waits_for_worker_before_sending(self):
         self.chat.suspended = True
+        self.runner.worker_pool = RecordingWorkerPool()
         with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)) as run, \
              patch.object(self.runner, 'remote', side_effect=[{'status': 'ok'}, {'answer': 'continued'}]) as remote:
             self.assertEqual(self.chat.send('continue'), {'answer': 'continued'})
@@ -301,6 +350,7 @@ class AxLifecycleTests(unittest.TestCase):
                          ('resume', 'task', self.chat.container_name))
         self.assertEqual(remote.call_args_list[0].args[1], {'action': 'ping'})
         self.assertEqual(remote.call_args_list[1].args[1]['message'], 'continue')
+        self.assertEqual(self.runner.worker_pool.acquired, [self.chat.container_name])
 
     def test_suspend_failure_keeps_worker_and_answer_and_checks_it_on_next_message(self):
         with patch.object(self.runner, '_run', side_effect=[

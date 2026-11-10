@@ -166,37 +166,45 @@ def execute_operation(service, token, body):
     raise ValueError('unknown operator method')
 
 
+
+async def _interventions_handler(service, call):
+    authorization = call.headers.get('authorization', '')
+    token = authorization[7:] if authorization.startswith('Bearer ') else ''
+    try:
+        items = await asyncio.to_thread(service.pending_interventions, token)
+        return JSONResponse({'interventions': items})
+    except A2AError:
+        return JSONResponse({}, status_code=403)
+    except OSError:
+        return JSONResponse({}, status_code=502)
+
+async def _operations_handler(service, call):
+    from .project_operator import safe_result
+    authorization = call.headers.get('authorization', '')
+    token = authorization[7:] if authorization.startswith('Bearer ') else ''
+
+    try:
+        result = safe_result(await asyncio.to_thread(execute_operation, service, token, await call.json()))
+        encoded = json.dumps(result, ensure_ascii=False)
+        if len(encoded) > RUNTIME['limits']['tool_output_chars']:
+            result = {'truncated':True,'preview':encoded[:RUNTIME['limits']['tool_output_chars']-300],
+                      'message':'Narrow the request or query to inspect the omitted data.'}
+        return JSONResponse(result)
+    except A2AError:
+        return JSONResponse({'isError':True,'error':'operator capability expired'},status_code=403)
+    except ValueError as exc:
+        return JSONResponse({'isError':True,'error':str(exc)[:300]},status_code=400)
+    except Exception as exc:
+        return JSONResponse({'isError':True,'error_type':type(exc).__name__,
+                             'error':'Project operation failed; inspect service health'},status_code=502)
+
+
 def create_a2a_app(service):
     async def interventions(call):
-        authorization = call.headers.get('authorization', '')
-        token = authorization[7:] if authorization.startswith('Bearer ') else ''
-        try:
-            items = await asyncio.to_thread(service.pending_interventions, token)
-            return JSONResponse({'interventions': items})
-        except A2AError:
-            return JSONResponse({}, status_code=403)
-        except OSError:
-            return JSONResponse({}, status_code=502)
+        return await _interventions_handler(service, call)
 
     async def operations(call):
-        from .project_operator import safe_result
-        authorization = call.headers.get('authorization', '')
-        token = authorization[7:] if authorization.startswith('Bearer ') else ''
-
-        try:
-            result = safe_result(await asyncio.to_thread(execute_operation, service, token, await call.json()))
-            encoded = json.dumps(result, ensure_ascii=False)
-            if len(encoded) > RUNTIME['limits']['tool_output_chars']:
-                result = {'truncated':True,'preview':encoded[:RUNTIME['limits']['tool_output_chars']-300],
-                          'message':'Narrow the request or query to inspect the omitted data.'}
-            return JSONResponse(result)
-        except A2AError:
-            return JSONResponse({'isError':True,'error':'operator capability expired'},status_code=403)
-        except ValueError as exc:
-            return JSONResponse({'isError':True,'error':str(exc)[:300]},status_code=400)
-        except Exception as exc:
-            return JSONResponse({'isError':True,'error_type':type(exc).__name__,
-                                 'error':'Project operation failed; inspect service health'},status_code=502)
+        return await _operations_handler(service, call)
 
     routes = [Route('/operations', operations, methods=['POST']),
               Route('/interventions', interventions, methods=['POST'])]

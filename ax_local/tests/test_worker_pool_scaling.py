@@ -112,6 +112,39 @@ class WorkerPoolScalingTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(errors), 2)
 
+    def test_releasing_an_unknown_worker_is_a_no_op(self):
+        self.pool.release('never-admitted')
+        self.assertEqual(self.pool.status()['active'], 0)
+
+    def test_close_without_start_does_not_join_a_thread(self):
+        pool = WorkerPoolController(self.backend, warm_workers=3, max_workers=30,
+                                    idle_seconds=60, poll_seconds=.01, clock=lambda: 0.0)
+        pool.close()
+        self.assertTrue(pool.closed)
+
+    def test_repeated_demand_for_an_admitted_worker_is_idempotent(self):
+        self.acquire('a')
+        self.acquire('a')
+        self.assertEqual(self.pool.status()['active'], 1)
+
+    def test_duplicate_demand_for_a_waiting_worker_is_rejected(self):
+        self.backend.ready = 0
+        with self.pool.condition:
+            self.pool.ready = 0
+        def acquire_same():
+            try:
+                self.pool.acquire('same', deadline=2)
+            except TimeoutError:
+                pass
+        thread = threading.Thread(target=acquire_same)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        wait_for(lambda: self.pool.status()['pending'] == 1)
+        with self.assertRaisesRegex(RuntimeError, 'duplicate AX worker demand'):
+            self.acquire('same')
+        self.now[0] = 3
+        thread.join(2)
+
 
 if __name__ == '__main__':
     unittest.main()

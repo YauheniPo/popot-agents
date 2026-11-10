@@ -107,6 +107,15 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(metrics['POPOT_RESOURCE_METRICS_AGENT'],'omniroute_cloud')
         self.assertNotIn('_ax_metrics_call_id',json.loads(env['HARNESS_ROLE_JSON']))
 
+    def test_invalid_delegated_root_session_falls_back_to_the_task_session(self):
+        role={'_ax_role':'code_reviewer',
+              '_ax_delegation':{'root_session_id':'not-a-session','root_call_id':'call-root'}}
+        env={item['name']:item['value'] for item in
+             self.runner.task_manifest('b'*16,role)['spec']['env']}
+        metrics = json.loads(env['AX_CAPABILITIES_JSON'])
+        self.assertEqual(metrics['POPOT_RESOURCE_METRICS_ROOT_SESSION_ID'],'b'*16)
+        self.assertEqual(metrics['POPOT_RESOURCE_METRICS_CALL_ID'],'call-root')
+
     def test_backend_task_with_delegation_fits_ax_environment_limit(self):
         role = json.loads((Path(__file__).resolve().parents[2] /
                            'config/roles/backend_engineer.json').read_text())

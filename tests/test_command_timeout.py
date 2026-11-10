@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from popot_agents import tools
 
@@ -85,6 +85,17 @@ class CommandTimeoutTests(unittest.TestCase):
                     # The child has a bounded socket read and exits when the peer
                     # closes, including when this regression fails on old code.
                     thread.join(6)
+
+    def test_process_group_gone_at_the_deadline_still_reports_the_timeout(self):
+        process = MagicMock()
+        process.pid = 12345
+        process.__enter__.return_value = process
+        process.returncode = -9
+        process.wait.side_effect = tools.subprocess.TimeoutExpired('cmd', 1)
+        with patch.object(tools.subprocess, 'Popen', return_value=process), \
+                patch.object(tools.os, 'killpg', side_effect=ProcessLookupError):
+            with self.assertRaises(tools.ToolExecutionError):
+                tools._run_command(['true'], timeout=1)
 
     def test_timeout_stops_child_before_another_command_can_write(self):
         self.run_child()

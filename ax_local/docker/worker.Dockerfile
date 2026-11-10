@@ -16,8 +16,6 @@ WORKDIR /src/ax
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath -o /ax-task-runner ./cmd/ax-task-runner
 
-FROM go-base AS worker-go
-
 FROM python-base
 LABEL com.popot.project="popot-agents"
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -32,7 +30,7 @@ COPY --from=node-worker /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-worker /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-COPY --from=worker-go /usr/local/go /usr/local/go
+COPY --from=go-base /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN python -m playwright install --with-deps chromium \

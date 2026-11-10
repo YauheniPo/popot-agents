@@ -2,6 +2,7 @@
 import json
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import contextmanager
 from urllib import request, error
@@ -325,6 +326,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(data['outcome']['status'], 'completed')
         self.assertEqual(accepted[0]['sessionId'], 'c' * 16)
 
+    def test_message_with_conflicting_request_id_does_not_start_a_new_turn(self):
+        def clash(first):
+            url = f'http://127.0.0.1:{self.server.server_port}/messages'
+            body = json.dumps({'role': 'planner', 'sessionId': first['sessionId'],
+                               'message': 'something else', 'requestId': 'same-operation'}).encode()
+            call = request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+            with self.assertRaises(error.HTTPError) as caught:
+                request.urlopen(call, timeout=.5)
+            self.assertEqual(caught.exception.code, 409)
+            self.assertIn('requestId belongs to another task or role',
+                          caught.exception.read().decode())
+        calls, _, _ = self.run_workflow([result('completed')], after=clash, request_id='same-operation')
+        self.assertEqual(len(calls), 1)
+
     def test_repeated_completed_request_returns_saved_result_without_new_execution(self):
         def repeat(first):
             url=f'http://127.0.0.1:{self.server.server_port}/tasks'
@@ -498,3 +513,32 @@ class RecoveryTests(unittest.TestCase):
                     server.shutdown()
                     thread.join()
                     server.server_close()
+
+
+class WorkflowRecoveryBudgetTests(unittest.TestCase):
+    def test_recovery_stops_a_running_workflow_whose_turn_budget_is_spent(self):
+        from popot_agents.orchestrator.workflow import recover_workflows
+
+        class Runner:
+            def start_chat(self, *args, **kwargs):
+                raise AssertionError('a spent workflow must not start another turn')
+
+        with tempfile.TemporaryDirectory() as directory:
+            server = create_server({'test': Runner()}, roles={'planner': {'agent': 'test'}},
+                                   session_dir=directory, host='127.0.0.1', port=0,
+                                   workflow_policy=POLICY)
+            try:
+                sid = 'c' * 16
+                meta = {'state': 'running', 'phase': 'checkpoint', 'checkpoint': {},
+                        'turns': POLICY['max_turns'],
+                        'deadlineAt': time.time() + POLICY['total_seconds'],
+                        'original_task': 'implement', 'run_id': 'recovery-run'}
+                server.store.save(sid, 'test', [{'role': 'tool', 'content': 'receipt'}], 'planner',
+                                  {'coordination': {}, '_workflow': meta})
+                recover_workflows(server, POLICY, 'recovery-token')
+                saved = server.store.get(sid)
+                self.assertEqual(saved['roleConfig']['_workflow']['outcome']['reason'],
+                                 'workflow_budget_exhausted')
+                self.assertEqual(saved['roleConfig']['_workflow']['state'], 'blocked')
+            finally:
+                server.server_close()
