@@ -11,7 +11,7 @@ import unittest
 from contextlib import redirect_stderr
 from email.message import Message
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ax_local.api.delegation import A2AError, DelegationService, start_a2a_server
 from ax_local.api.ax_runner import AxAgentRunner, AxChat
@@ -676,9 +676,9 @@ class DelegationTests(unittest.TestCase):
             with request.urlopen(call, timeout=2) as response:
                 received.extend(json.load(response)['interventions'])
             self.assertEqual(received[0]['id'], own['id'])
+            unauthenticated = request.Request(self.service.base_url + '/interventions', data=b'{}')
             with self.assertRaises(error.HTTPError) as denied:
-                request.urlopen(request.Request(self.service.base_url + '/interventions', data=b'{}'),
-                                timeout=2)
+                request.urlopen(unauthenticated, timeout=2)
             self.assertEqual(denied.exception.code, 403)
             return {'answer': 'child result', 'interventionIds': [own['id']]}
         self.runner.callback = callback
@@ -1832,9 +1832,55 @@ if __name__ == "__main__":
 
 
 class WorkerFailureMappingTests(unittest.TestCase):
+    def test_worker_detail_without_exit_code_keeps_generic_code_and_diagnostic(self):
+        from ax_local.api.delegation import _worker_failure
+        from popot_agents.orchestrator.main import AgentRunError
+        exc = AgentRunError('AX command failed')
+        exc.diagnostic = {'command': ['ax', 'run'], 'stderr': 'boom'}
+        reason, payload = _worker_failure(exc, 'start')
+        self.assertEqual(payload['code'], 'worker_failed')
+        self.assertEqual(payload['diagnostic'], {'command': ['ax', 'run'], 'stderr': 'boom'})
+        self.assertNotIn('boom', reason)
+
     def test_unmatched_worker_detail_keeps_the_generic_code(self):
         from ax_local.api.delegation import _worker_failure
         from popot_agents.orchestrator.main import AgentRunError
         reason, payload = _worker_failure(AgentRunError('AX task lookup failed unexpectedly'), 'start')
         self.assertEqual(payload['code'], 'worker_failed')
         self.assertNotIn('unexpectedly', reason)
+
+
+class RestartRecoveryTests(unittest.TestCase):
+    """Restart recovery must only flatten children that lost their sandbox."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.runner = FakeRunner()
+        self.roles = {name: {"agent": "test", "instructions": name, "tools": [], "_ax_role": name}
+                      for name in ("tech_lead", "backend_engineer")}
+        self.policy = {"enabled": True, "port": 8005, "max_depth": 2, "max_calls_per_turn": 4,
+                       "turn_timeout_seconds": 300, "poll_interval_seconds": 0.01}
+        self.store = SessionStore(self.temporary.name)
+        self.service = DelegationService(self.roles, self.policy, {"test": self.runner}, self.store,
+                                         "http://127.0.0.1:8005")
+        self.runner.delegation = self.service
+        self.addCleanup(self.service.close)
+
+    def test_retained_child_stays_resumable_while_orphan_child_is_flattened(self):
+        retained_id, orphan_id = 'a' * 16, 'b' * 16
+        for session_id in (retained_id, orphan_id):
+            self.store.save(session_id, 'test', [{'role': 'user', 'content': 'do'}], 'backend_engineer',
+                            {'_ax_delegation': {'state': 'TASK_STATE_COMPLETED', 'resumable': True,
+                                                'outcome': {'status': 'partial',
+                                                            'remaining_work': ['finish']}}})
+        self.service.retained[retained_id] = (Mock(), time.monotonic())
+        self.service.recover_interrupted()
+        kept = self.store.get(retained_id)['roleConfig']['_ax_delegation']
+        self.assertTrue(kept['resumable'])
+        self.assertEqual(kept['outcome']['remaining_work'], ['finish'])
+        orphan = self.store.get(orphan_id)['roleConfig']['_ax_delegation']
+        self.assertFalse(orphan['resumable'])
+        self.assertIn('Continuation sandbox unavailable after API restart',
+                      orphan['outcome']['errors'])
+        self.assertEqual(self.runner.recovered, [])

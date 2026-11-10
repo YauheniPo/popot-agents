@@ -444,7 +444,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     summary_deadline = time.monotonic() + min(
                         RUNTIME["timeouts"]["memory_summary_seconds"],
                         budget - RUNTIME["timeouts"]["memory_capture_margin_seconds"])
-                    for transport_attempt in range(2):
+                    transport_attempt = 0
+                    while True:
                         try:
                             with request.urlopen(summary_call,
                                     timeout=max(.1, summary_deadline - time.monotonic())) as response:
@@ -457,6 +458,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             _trace('memory_summary_retry', dataset=memory.dataset,
                                    reason='connection_reset')
                             time.sleep(min(.5, remaining / 4))
+                            transport_attempt = 1
                     memory.record_usage(extraction)
                     retry_reason = 'invalid_summary_shape'
                     try:
@@ -740,13 +742,17 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                   'Partial result: work budget exhausted. '
                   'Task completeness is unverified. External actions may have persisted; '
                   'inspect their results before retrying.')
+        reason = 'work_budget_exhausted'
+        for flag, candidate in ((blocked_child, 'delegated_task_blocked'),
+                                (recoverable, 'child_recovery_required'),
+                                (invalid_results, 'invalid_final_result'),
+                                (model_failure, 'model_request_failed'),
+                                (incomplete_child, 'delegated_task_incomplete')):
+            if flag:
+                reason = candidate
+                break
         return save_result(status + ('\n\n' + answer.strip() if answer else ''),
-                           'blocked' if blocked_child else 'partial',
-                           'delegated_task_blocked' if blocked_child else
-                           'child_recovery_required' if recoverable else
-                           'invalid_final_result' if invalid_results else
-                           'model_request_failed' if model_failure else
-                           'delegated_task_incomplete' if incomplete_child else 'work_budget_exhausted', report)
+                           'blocked' if blocked_child else 'partial', reason, report)
 
     def completion(round_number, final):
         for item in _pending_interventions():

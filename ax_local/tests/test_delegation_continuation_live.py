@@ -107,7 +107,7 @@ class LiveDelegationContinuationTests(unittest.TestCase):
                 expected = [{'name': 'fix.patch', 'content': 'unpublished patch',
                     'sha256': hashlib.sha256(b'unpublished patch').hexdigest()}]
                 self.assertEqual(result['outcome']['artifacts'], expected)
-                self.assertEqual(runner.task_status('popot-chat-' + result['sessionId'])[0], None)
+                self.assertIsNone(runner.task_status('popot-chat-' + result['sessionId'])[0])
                 service.close()
                 script = '''
 import json,sys,threading

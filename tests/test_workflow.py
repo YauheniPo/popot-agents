@@ -325,6 +325,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(data['outcome']['status'], 'completed')
         self.assertEqual(accepted[0]['sessionId'], 'c' * 16)
 
+    def test_message_with_conflicting_request_id_does_not_start_a_new_turn(self):
+        def clash(first):
+            url = f'http://127.0.0.1:{self.server.server_port}/messages'
+            body = json.dumps({'role': 'planner', 'sessionId': first['sessionId'],
+                               'message': 'something else', 'requestId': 'same-operation'}).encode()
+            call = request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+            with self.assertRaises(error.HTTPError) as caught:
+                request.urlopen(call, timeout=.5)
+            self.assertEqual(caught.exception.code, 409)
+            self.assertIn('requestId belongs to another task or role',
+                          caught.exception.read().decode())
+        calls, _, _ = self.run_workflow([result('completed')], after=clash, request_id='same-operation')
+        self.assertEqual(len(calls), 1)
+
     def test_repeated_completed_request_returns_saved_result_without_new_execution(self):
         def repeat(first):
             url=f'http://127.0.0.1:{self.server.server_port}/tasks'

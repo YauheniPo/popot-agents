@@ -317,13 +317,28 @@ class AxAgentRunner:
                     reason = fields[2]
         return phase, reason
 
+    def _reject_ungranted_delegation(self, chat_id: str, role_config: dict | None) -> None:
+        if (role_config or {}).get('_ax_delegation') and self.delegation \
+                and chat_id not in self.delegation.jobs:
+            raise AgentRunError('Delegated sessions must continue through delegate_task with role and session_id')
+
+    def _release_failed_start(self, task_name: str, lease, exc: Exception) -> None:
+        # If cleanup was not confirmed, maintenance still owns this lease.
+        if isinstance(exc, AgentRunError):
+            exc.diagnostic = {**getattr(exc, 'diagnostic', {}), 'task': task_name}
+        with self._cleanup_lock:
+            pending = task_name in self._cleanup_pending
+        if pending:
+            return
+        self.worker_queue.release(task_name, lease)
+        if self.worker_pool is not None:
+            self.worker_pool.release(task_name)
+
     def start_chat(self, chat_id: str, role_config: dict | None = None,
                    *, deadline: float | None = None, cancel_event=None) -> AxChat:
         if not re.fullmatch(r"[0-9a-f]{16}", chat_id):
             raise ValueError("invalid session ID")
-        if (role_config or {}).get('_ax_delegation') and self.delegation \
-                and chat_id not in self.delegation.jobs:
-            raise AgentRunError('Delegated sessions must continue through delegate_task with role and session_id')
+        self._reject_ungranted_delegation(chat_id, role_config)
         task_name = f"popot-chat-{chat_id}"
         emit_progress('waiting_for_worker')
         reservation = (role_config or {}).get('_ax_delegation', {}).get('pool_reservation')
@@ -342,15 +357,7 @@ class AxAgentRunner:
             return self._start_reserved_chat(chat_id, role_config, lease,
                                              deadline=deadline, cancel_event=cancel_event)
         except Exception as exc:
-            # If cleanup was not confirmed, maintenance still owns this lease.
-            if isinstance(exc, AgentRunError):
-                exc.diagnostic = {**getattr(exc, 'diagnostic', {}), 'task': task_name}
-            with self._cleanup_lock:
-                pending = task_name in self._cleanup_pending
-            if not pending:
-                self.worker_queue.release(task_name, lease)
-                if self.worker_pool is not None:
-                    self.worker_pool.release(task_name)
+            self._release_failed_start(task_name, lease, exc)
             raise
 
     def _start_reserved_chat(self, chat_id, role_config, lease,
