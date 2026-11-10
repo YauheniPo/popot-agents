@@ -173,16 +173,25 @@ class ProjectOperations:
         namespace = params.get('namespace', AX_CONFIG['atespace'])
         if namespace not in self.namespaces:
             raise ValueError('namespace is outside the local project')
+        pod = params.get('pod')
+        if pod is not None and (not isinstance(pod, str) or not re.fullmatch(
+                r'[a-z0-9][a-z0-9.-]{0,252}', pod)):
+            raise ValueError('valid pod name is required')
         if kind == 'logs':
             pod, container = params.get('pod', ''), params.get('container', '')
             if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,252}', pod) or not re.fullmatch(
                     r'[a-z0-9][a-z0-9-]{0,62}', container):
                 raise ValueError('valid pod and container names are required')
-            args = ['-n',namespace,'logs',pod,'-c',container,'--tail=200','--since=30m','--timestamps=true']
+            args = ['-n',namespace,'logs',pod,'-c',container,'--tail=200','--since=30m',
+                    '--timestamps=true','--limit-bytes=8192']
             if params.get('previous') is True:
                 args.append('--previous')
             return {'logs': redact_text(self._kube(*args))}
-        rows = json.loads(self._kube('-n',namespace,'get',kind,'-o','json'))['items']
+        args = ['-n',namespace,'get',kind,'-o','json']
+        if pod is not None:
+            field = 'involvedObject.name' if kind == 'events' else 'metadata.name'
+            args.append('--field-selector=' + field + '=' + pod)
+        rows = json.loads(self._kube(*args))['items']
         if kind == 'events':
             return safe_result([{'time': r.get('lastTimestamp'), 'type': r.get('type'),
                 'reason': r.get('reason'), 'object': r.get('involvedObject', {}).get('name'),
