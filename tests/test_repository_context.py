@@ -201,7 +201,7 @@ class RepositoryContextTests(unittest.TestCase):
         self.run_turn(allowed=['calculate'])
         self.assertNotIn('FILE_READER_ONLY', self.context(self.requests[0]))
 
-    def test_guidance_read_timeout_does_not_fail_the_turn(self):
+    def test_guidance_read_timeout_does_not_fail_the_coordination_turn(self):
         self.repository(**{'AGENTS.md': 'UNREACHABLE_GUIDANCE'})
         timeout = subprocess.TimeoutExpired('file_worker.py', 0.001)
         with patch.object(tools, '_file_action', side_effect=timeout) as guidance:
@@ -212,7 +212,7 @@ class RepositoryContextTests(unittest.TestCase):
         self.assertNotIn('UNREACHABLE_GUIDANCE', context)
         self.assertIn('Keep the role permissions.', context)
 
-    def test_near_deadline_turn_returns_partial_answer_without_reading_guidance(self):
+    def test_near_deadline_coordination_turn_returns_partial_answer_without_guidance_read(self):
         self.repository(**{'AGENTS.md': 'LATE_GUIDANCE'})
         timeout = subprocess.TimeoutExpired('file_worker.py', 0.001)
         with patch.object(tools, '_file_action', side_effect=timeout) as guidance:
