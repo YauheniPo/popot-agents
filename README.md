@@ -821,7 +821,12 @@ execution. Invalid final JSON or a premature completion claim gets one correctio
 repeated invalid output returns a partial checkpoint instead of consuming all rounds.
 The correction is tool-free even when the first invalid answer was already a final
 request; both attempts share the original deadline. Empty content and truncated
-responses are invalid, and JSON wrapped in a single Markdown code fence is accepted.
+responses are invalid. Before requesting a correction, the parser normalizes a
+leading BOM, a single JSON Markdown fence (including CRLF), literal newlines/tabs
+inside strings and trailing commas outside strings. Text, fields and status are
+preserved; missing values, broken quotes, truncated objects and schema errors
+still require correction. Formatting normalization does not execute tools or
+spend another model request.
 Ollama Cloud final requests disable thinking, as memory extraction already does,
 without changing the work requests. `final_result_invalid` reports the validation
 reason, finish reason and content length; `final_result_recovered` confirms recovery.
