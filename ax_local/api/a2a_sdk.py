@@ -100,8 +100,9 @@ class DelegationBoundary:
         if scope["type"] != "http" or scope["method"] != "POST":
             return await self.app(scope, receive, send)
         operator = scope['path'] == '/operations'
+        interventions = scope['path'] == '/interventions'
         role = scope["path"].removeprefix("/a2a/")
-        if not operator and (scope["path"] != f"/a2a/{role}" or role not in self.service.roles):
+        if not operator and not interventions and (scope["path"] != f"/a2a/{role}" or role not in self.service.roles):
             return await JSONResponse({}, status_code=404)(scope, receive, send)
         headers = dict(scope["headers"])
         authorization = headers.get(b"authorization", b"").decode("latin-1")
@@ -109,6 +110,8 @@ class DelegationBoundary:
         try:
             if operator:
                 self.service.authorized_operator(token)
+            elif interventions:
+                self.service.authorized_interventions(token)
             else:
                 self.service._authorized(token, role)
         except A2AError:
@@ -163,28 +166,48 @@ def execute_operation(service, token, body):
     raise ValueError('unknown operator method')
 
 
+
+async def _interventions_handler(service, call):
+    authorization = call.headers.get('authorization', '')
+    token = authorization[7:] if authorization.startswith('Bearer ') else ''
+    try:
+        items = await asyncio.to_thread(service.pending_interventions, token)
+        return JSONResponse({'interventions': items})
+    except A2AError:
+        return JSONResponse({}, status_code=403)
+    except OSError:
+        return JSONResponse({}, status_code=502)
+
+async def _operations_handler(service, call):
+    from .project_operator import safe_result
+    authorization = call.headers.get('authorization', '')
+    token = authorization[7:] if authorization.startswith('Bearer ') else ''
+
+    try:
+        result = safe_result(await asyncio.to_thread(execute_operation, service, token, await call.json()))
+        encoded = json.dumps(result, ensure_ascii=False)
+        if len(encoded) > RUNTIME['limits']['tool_output_chars']:
+            result = {'truncated':True,'preview':encoded[:RUNTIME['limits']['tool_output_chars']-300],
+                      'message':'Narrow the request or query to inspect the omitted data.'}
+        return JSONResponse(result)
+    except A2AError:
+        return JSONResponse({'isError':True,'error':'operator capability expired'},status_code=403)
+    except ValueError as exc:
+        return JSONResponse({'isError':True,'error':str(exc)[:300]},status_code=400)
+    except Exception as exc:
+        return JSONResponse({'isError':True,'error_type':type(exc).__name__,
+                             'error':'Project operation failed; inspect service health'},status_code=502)
+
+
 def create_a2a_app(service):
+    async def interventions(call):
+        return await _interventions_handler(service, call)
+
     async def operations(call):
-        from .project_operator import safe_result
-        authorization = call.headers.get('authorization', '')
-        token = authorization[7:] if authorization.startswith('Bearer ') else ''
+        return await _operations_handler(service, call)
 
-        try:
-            result = safe_result(await asyncio.to_thread(execute_operation, service, token, await call.json()))
-            encoded = json.dumps(result, ensure_ascii=False)
-            if len(encoded) > RUNTIME['limits']['tool_output_chars']:
-                result = {'truncated':True,'preview':encoded[:RUNTIME['limits']['tool_output_chars']-300],
-                          'message':'Narrow the request or query to inspect the omitted data.'}
-            return JSONResponse(result)
-        except A2AError:
-            return JSONResponse({'isError':True,'error':'operator capability expired'},status_code=403)
-        except ValueError as exc:
-            return JSONResponse({'isError':True,'error':str(exc)[:300]},status_code=400)
-        except Exception as exc:
-            return JSONResponse({'isError':True,'error_type':type(exc).__name__,
-                                 'error':'Project operation failed; inspect service health'},status_code=502)
-
-    routes = [Route('/operations', operations, methods=['POST'])]
+    routes = [Route('/operations', operations, methods=['POST']),
+              Route('/interventions', interventions, methods=['POST'])]
     for role in service.roles:
         prefix = f"/a2a/{role}"
         card = ParseDict(service.card(role), types.AgentCard())

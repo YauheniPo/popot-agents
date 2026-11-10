@@ -41,7 +41,7 @@
     "total_seconds": 3600,
     "turn_seconds": 900,
     "max_no_progress": 2,
-    "max_concurrent": 10
+    "max_concurrent": 4
   },
   "limits": {
     "request_bytes": 262144,
@@ -60,7 +60,8 @@
     "context_tool_budget_chars": 48000,
     "context_recent_tool_results": 6,
     "default_max_tool_rounds": 40,
-    "request_retries": 0,
+    "request_retries": 8,
+    "request_retry_window_seconds": 180,
     "temperature": null,
     "max_tokens": null,
     "final_answer_reserve_seconds": 120,

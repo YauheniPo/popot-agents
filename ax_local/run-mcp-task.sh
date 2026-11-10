@@ -4,17 +4,22 @@ set -euo pipefail
 : "${TASK:?Set TASK to the request text}"
 ROLE="${ROLE:-}"
 SESSION_ID="${SESSION_ID:-}"
+DISABLE_DELEGATION="${DISABLE_DELEGATION:-}"
 CALL_ID="${CALL_ID:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}"
 PROGRESS_TOKEN="${PROGRESS_TOKEN:-$CALL_ID}"
 
-PAYLOAD="$(python3 - "$TASK" "$ROLE" "$SESSION_ID" "$CALL_ID" "$PROGRESS_TOKEN" <<'PY'
+PAYLOAD="$(python3 - "$TASK" "$ROLE" "$SESSION_ID" "$CALL_ID" "$PROGRESS_TOKEN" "$DISABLE_DELEGATION" <<'PY'
 import json
 import sys
 
-task, role, session_id, call_id, progress_token = sys.argv[1:]
+task, role, session_id, call_id, progress_token, disable_delegation = sys.argv[1:]
 arguments = {'sessionId': session_id, 'task': task}
 if not session_id and role:
     arguments['role'] = role
+if disable_delegation:
+    if disable_delegation not in {'true', 'false'}:
+        sys.exit('DISABLE_DELEGATION must be true or false')
+    arguments['disableDelegation'] = disable_delegation == 'true'
 print(json.dumps({
     'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
     'params': {
@@ -71,6 +76,7 @@ if result is None:
 if result.get('error') or result.get('result', {}).get('isError'):
     sys.exit('MCP tool returned an error; see the response above')
 task_result = None
+queued = None
 for item in result.get('result', {}).get('content', []):
     if item.get('type') != 'text':
         continue
@@ -81,6 +87,12 @@ for item in result.get('result', {}).get('content', []):
     if isinstance(parsed, dict) and isinstance(parsed.get('outcome'), dict):
         task_result = parsed
         break
+    if isinstance(parsed, dict) and parsed.get('status') in {'queued', 'delivered'}:
+        queued = parsed
+if queued is not None:
+    print(f"Comment {queued.get('sessionId', '?')}: {queued['status']} "
+          f"(interventionId={queued.get('interventionId', '?')})", file=sys.stderr)
+    sys.exit(0)
 if task_result is None:
     sys.exit('MCP returned no task outcome')
 status = task_result['outcome'].get('status')

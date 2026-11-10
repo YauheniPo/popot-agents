@@ -413,6 +413,48 @@ class ChatApiTests(unittest.TestCase):
         self.assertNotEqual(second["sessionId"], first["sessionId"])
         self.assertEqual(len(self.runner.chats), 2)
 
+    def test_disable_delegation_persists_and_cannot_be_added_to_existing_session(self):
+        started = []
+        start_chat = self.runner.start_chat
+        def record_config(chat_id, role_config=None, **kwargs):
+            started.append(role_config)
+            return start_chat(chat_id, role_config, **kwargs)
+        self.runner.start_chat = record_config
+        status, invalid = self.request("POST", "/tasks", {
+            "agent": "test_agent", "task": "work", "disableDelegation": "true"})
+        self.assertEqual(status, 400)
+        self.assertIn("disableDelegation", invalid["error"])
+
+        status, first = self.request("POST", "/tasks", {
+            "agent": "test_agent", "task": "work", "disableDelegation": True})
+        self.assertEqual(status, 200)
+        session_id = first["sessionId"]
+        saved = self.server.store.get(session_id)
+        self.assertTrue(saved["roleConfig"]["_disable_delegation"])
+        self.assertEqual(started[0]["allowed_roles"], [])
+        self.assertIn("Delegation is disabled", started[0]["instructions"])
+        status, _ = self.request("POST", "/messages", {
+            "sessionId": session_id, "message": "continue"})
+        self.assertEqual(status, 200)
+        self.assertTrue(self.server.store.get(session_id)["roleConfig"]["_disable_delegation"])
+
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+        self.server = create_server({"test_agent": self.runner}, port=0, session_dir=self.directory.name)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        status, _ = self.request("POST", "/messages", {
+            "sessionId": session_id, "message": "continue after restart"})
+        self.assertEqual(status, 200)
+        self.assertTrue(started[-1]["_disable_delegation"])
+
+        _, ordinary = self.request("POST", "/tasks", {"agent": "test_agent", "task": "work"})
+        status, conflict = self.request("POST", "/messages", {
+            "sessionId": ordinary["sessionId"], "message": "continue", "disableDelegation": True})
+        self.assertEqual(status, 409)
+        self.assertIn("disableDelegation", conflict["error"])
+
     def test_unknown_session_id_does_not_start_a_worker(self):
         status, response = self.request("POST", "/messages", {"sessionId": "missing", "message": "hello"})
         self.assertEqual(status, 404)

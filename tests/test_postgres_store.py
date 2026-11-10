@@ -9,6 +9,18 @@ from pathlib import Path
 
 @unittest.skipUnless(os.getenv("AGENT_TEST_POSTGRES"), "requires a PostgreSQL test database")
 class PostgresSessionStoreTests(unittest.TestCase):
+    def test_unpublished_artifact_survives_database_reconnection(self):
+        import hashlib
+        from popot_agents.orchestrator.postgres_session_store import PostgresSessionStore
+        content = 'diff --git a/a.py b/a.py\r\n+print("проверка")\r\n'
+        artifact = {'name': 'fix.patch', 'content': content,
+                    'sha256': hashlib.sha256(content.encode()).hexdigest()}
+        self.store.save(self.session_id, 'test', [], 'backend_engineer', {'_ax_delegation': {
+            'state': 'TASK_STATE_COMPLETED', 'outcome': {'status': 'completed', 'artifacts': [artifact]}}})
+        stored = PostgresSessionStore().get(self.session_id)['roleConfig']['_ax_delegation']['outcome']['artifacts']
+        self.assertEqual(stored, [artifact])
+        self.assertEqual(hashlib.sha256(stored[0]['content'].encode()).hexdigest(), artifact['sha256'])
+
     def setUp(self):
         from popot_agents.orchestrator.postgres_session_store import PostgresSessionStore
 
@@ -32,6 +44,20 @@ class PostgresSessionStoreTests(unittest.TestCase):
         self.assertEqual(restored["role"], "analyst")
         self.assertEqual(restored["roleConfig"], role)
         self.assertEqual(restored["createdAt"], created_at)
+
+    def test_intervention_survives_reconnection_and_is_acknowledged(self):
+        from popot_agents.orchestrator.postgres_session_store import PostgresSessionStore
+
+        self.store.save(self.session_id, 'test_agent', [], 'planner', {})
+        item = self.store.enqueue_intervention(self.session_id, 'Use the new API', 'comment-1')
+        self.assertEqual(self.store.enqueue_intervention(self.session_id, 'Use the new API', 'comment-1')['id'],
+                         item['id'])
+        self.store.save(self.session_id, 'test_agent', [{'role': 'user', 'content': 'task'}], 'planner', {})
+        reopened = PostgresSessionStore()
+        self.assertEqual(reopened.pending_interventions(self.session_id)[0]['id'], item['id'])
+        reopened.acknowledge_interventions(self.session_id, [item['id']])
+        self.assertEqual(reopened.pending_interventions(self.session_id), [])
+        self.assertEqual(reopened.recent_interventions(self.session_id)[0]['status'], 'delivered')
 
     def test_work_evidence_survives_stale_role_config_and_concurrent_updates(self):
         from concurrent.futures import ThreadPoolExecutor

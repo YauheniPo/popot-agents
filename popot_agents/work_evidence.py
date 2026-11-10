@@ -9,6 +9,25 @@ from datetime import datetime, timezone
 from popot_agents.progress import redact_text
 
 MAX_RECEIPTS = 16
+
+
+def child_resolution(previous, child, revision=None, *, require_evidence=True):
+    """Record acceptance of this failed subtask, never another child's success."""
+    outcome = child.get('outcome') or {}
+    evidence = outcome.get('evidence', [])
+    if (child.get('role') != previous.get('role') or outcome and (outcome.get('status') != 'completed'
+            or outcome.get('errors') or outcome.get('remaining_work'))):
+        raise RuntimeError('Recovered child still has unresolved work')
+    if require_evidence and (not isinstance(evidence, list) or not any(isinstance(item, str) and item.strip() for item in evidence)):
+        raise RuntimeError('Recovered child must provide evidence before resolving its prior failure')
+    if revision and outcome.get('revision') != revision.lower():
+        raise RuntimeError('Recovered child verified a different revision; prior failure remains open')
+    return {'session_id': previous.get('session_id'), 'resolved_by': child['sessionId'],
+            'role': child['role'], 'previous_reason': previous.get('outcome', {}).get('reason'),
+            'revision': outcome.get('revision'), 'evidence': evidence,
+            'resolved_at': datetime.now(timezone.utc).isoformat()}
+
+
 _SHA = r'[a-fA-F0-9]{40}'
 _NAME = r'[A-Za-z0-9_.-]+'
 _PULL_REQUEST_URL = re.compile(r'github\.com/(?:repos/)?(' + _NAME + r')/(' + _NAME + r')/(?:pull|pulls)/(\d+)')

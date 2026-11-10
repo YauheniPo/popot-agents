@@ -146,7 +146,9 @@ class FinalResultTests(unittest.TestCase):
             raise TimeoutError('provider timeout')
         call = {'tool_calls': [{'id': 'calc', 'function': {'name': 'calculate',
             'arguments': '{"expression":"2+2"}'}}]}
-        answer, state, bodies = self.run_sequence([call, {'content': 'bad'}, timeout])
+        from popot_agents.runtime_config import RUNTIME
+        with patch.dict(RUNTIME['model'], {'request_retries': 0}):
+            answer, state, bodies = self.run_sequence([call, {'content': 'bad'}, timeout])
         self.assertEqual(len(bodies), 3)
         self.assertEqual(state['outcome']['status'], 'partial')
         self.assertIn('calculate', answer)

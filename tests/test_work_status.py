@@ -6,6 +6,16 @@ from unittest.mock import patch
 
 
 class WorkStatusTests(unittest.TestCase):
+    def test_artifact_manifest_names_source_without_exporting_body_to_every_observer(self):
+        from popot_agents.orchestrator.work_status import build_work_status
+        saved = {'sessionId': 'a'*16, 'role': 'backend_engineer', 'roleConfig': {
+            '_ax_delegation': {'state': 'TASK_STATE_COMPLETED', 'outcome': {
+                'status': 'completed', 'artifacts': [{'name': 'fix.patch', 'content': 'PRIVATE_PAYLOAD',
+                    'sha256': 'b'*64}]}}}}
+        report = build_work_status(saved, [saved])['tasks'][0]
+        self.assertEqual(report['artifacts'], [{'name': 'fix.patch', 'sha256': 'b'*64}])
+        self.assertNotIn('PRIVATE_PAYLOAD', json.dumps(report))
+
     def test_failed_parent_does_not_hide_completed_child_or_export_payloads(self):
         from popot_agents.orchestrator.work_status import build_work_status
         root = {'sessionId': 'a'*16, 'role':'planner', 'updatedAt':'2026-10-31T20:00:00Z',

@@ -28,11 +28,12 @@ from .session_store import SessionStore
 from .work_status import build_work_status
 from popot_agents.work_evidence import evidence_event
 from popot_agents.workflow_config import role_policy
-from .workflow import POLICY, WorkflowRun, public_workflow, public_outcome_reason, validate_policy, recover_workflows, run_history
+from .workflow import POLICY, WorkflowRun, public_workflow, public_outcome_reason, validate_policy, recover_workflows, run_history, include_interventions
 
 
 MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
 MAX_TASK_LENGTH = RUNTIME["limits"]["message_chars"]
+WORKFLOW_RUNNING_ERROR = "workflow is already running; read get_chat instead"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOG_SECRET_FIELDS = {"api_key", "apikey", "authorization", "cookie", "password",
                      "secret", "token", "access_token", "refresh_token"}
@@ -559,6 +560,10 @@ def create_server(
                                if k in {'run_id','started_at','finished_at','deadlineAt','state','turns'}}]
                              if (saved.get('roleConfig') or {}).get('_workflow') else []),
                     "work": build_work_status(saved, self.server.store.list_chats()),
+                    "artifacts": ((saved.get('roleConfig') or {}).get('_ax_delegation', {}).get('outcome')
+                                  or (saved.get('roleConfig') or {}).get('_workflow', {}).get('outcome')
+                                  or {}).get('artifacts', []),
+                    "interventions": self.server.store.recent_interventions(session_id),
                     "container": live.worker.container_name if live else None,
                     "workspace": self._workspace(saved, live),
                     "turns": len(saved["messages"]) // 2,
@@ -614,6 +619,8 @@ def create_server(
                 return
             if hasattr(agents[agent], "start_chat"):
                 self._message({"agent": agent, "role": role, "message": task.strip(),
+                               **({'disableDelegation': payload['disableDelegation']}
+                                  if 'disableDelegation' in payload else {}),
                                **({'requestId': payload['requestId']} if 'requestId' in payload else {})})
                 return
             result = agents[agent](task.strip(), role_config) if role_config else agents[agent](task.strip())
@@ -622,6 +629,9 @@ def create_server(
             self._reply(200, result)
 
         def _message(self, payload: dict) -> None:
+            if 'disableDelegation' in payload and type(payload['disableDelegation']) is not bool:
+                self._reply(400, {'error': 'disableDelegation must be a boolean'})
+                return
             session_id = payload.get("sessionId")
             if session_id is None:
                 if (isinstance(payload.get('role'), str)
@@ -633,14 +643,50 @@ def create_server(
                     self._coordinated_message(payload, new_session_id)
             elif isinstance(session_id, str):
                 saved = self.server.store.get(session_id)
+                if saved and 'disableDelegation' in payload and payload['disableDelegation'] != bool(
+                        (saved.get('roleConfig') or {}).get('_disable_delegation')):
+                    self._reply(409, {'error': 'disableDelegation cannot change for an existing session'})
+                    return
                 meta = (saved.get('roleConfig') or {}).get('_workflow') if saved else None
+                child = (saved.get('roleConfig') or {}).get('_ax_delegation', {}) if saved else {}
                 recovering = secrets.compare_digest(self.headers.get('X-Popot-Workflow-Recovery', ''), workflow_token)
-                if meta and not recovering:
-                    if not self._workflow_request(payload, payload.get('message'), saved):
+                if not recovering and (meta and meta.get('state') == 'running' or
+                        child.get('state') in {'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'}):
+                    message = payload.get('message')
+                    request_id = payload.get('requestId')
+                    if not isinstance(message, str) or not message.strip() or len(message) > MAX_TASK_LENGTH:
+                        self._reply(400, {'error': f'message must be a nonempty string up to {MAX_TASK_LENGTH} characters'})
                         return
-                    if meta.get('state') == 'running':
-                        self._reply(409, {'error': 'workflow is already running; read get_chat instead',
+                    if request_id is not None and (not isinstance(request_id, str)
+                            or not request_id.strip() or len(request_id) > 256):
+                        self._reply(400, {'error': 'requestId must be a nonempty string up to 256 characters'})
+                        return
+                    if meta and request_id is not None and request_id == meta.get('request_id'):
+                        self._reply(409, {'error': WORKFLOW_RUNNING_ERROR,
                                           'sessionId': session_id})
+                        return
+                    if (payload.get('role') not in (None, saved['role']) or
+                            payload.get('agent') not in (None, saved['agent'])):
+                        self._reply(409, {'error': 'sessionId belongs to another role or agent'})
+                        return
+                    try:
+                        item = self.server.store.enqueue_intervention(session_id, message.strip(), request_id)
+                    except ValueError as exc:
+                        self._reply(409, {'error': str(exc)})
+                        return
+                    except OverflowError:
+                        self._reply(429, {'error': 'too many pending comments'})
+                        return
+                    if item is None:
+                        self._reply(404, {'error': 'unknown sessionId'})
+                        return
+                    self._reply(202, {'sessionId': session_id, 'interventionId': item['id'],
+                                      'status': item['status']})
+                    return
+                if meta and not recovering:
+                    # A running session was answered from the queue above, so this
+                    # path only reconciles ids for a session that is not running.
+                    if not self._workflow_request(payload, payload.get('message'), saved):
                         return
                 with self.server.session_lock(session_id):
                     self._coordinated_message(payload)
@@ -659,11 +705,14 @@ def create_server(
                 meta = (item.get('roleConfig') or {}).get('_workflow', {})
                 if meta.get('request_id') != request_id:
                     continue
-                if meta.get('original_task') != message or (payload.get('role') is not None
+                if ('disableDelegation' in payload and payload['disableDelegation'] != bool(
+                        (item.get('roleConfig') or {}).get('_disable_delegation'))):
+                    self._reply(409, {'error': 'requestId belongs to another delegation setting'})
+                elif meta.get('original_task') != message or (payload.get('role') is not None
                         and payload['role'] != item.get('role')):
                     self._reply(409, {'error': 'requestId belongs to another task or role'})
                 elif meta.get('state') == 'running':
-                    self._reply(409, {'error': 'workflow is already running; read get_chat instead',
+                    self._reply(409, {'error': WORKFLOW_RUNNING_ERROR,
                                       'sessionId': item['sessionId']})
                 else:
                     result = public_workflow(item, include_result=True)['result']
@@ -697,8 +746,10 @@ def create_server(
                     self._workflow.meta['authorization'] = authority
                 if payload.get('requestId'):
                     self._workflow.meta['request_id'] = payload['requestId']
-                if isinstance(previous.get('checkpoint'), dict):
-                    self._workflow.meta['checkpoint'] = previous['checkpoint']
+                if recovering and isinstance(previous.get('checkpoint'), dict):
+                    checkpoint = dict(previous['checkpoint'])
+                    checkpoint.setdefault('run_id', self._workflow.meta['run_id'])
+                    self._workflow.meta['checkpoint'] = checkpoint
                 self._message_locked(payload, new_session_id)
             finally:
                 workflow_slots.release()
@@ -726,6 +777,11 @@ def create_server(
                     self._reply(404, {"error": "unknown agent"})
                     return
                 session_id = new_session_id
+                if payload.get('disableDelegation'):
+                    role_config = {**(role_config or {}), '_disable_delegation': True,
+                                   'allowed_roles': [],
+                                   'instructions': (role_config or {}).get('instructions', '') +
+                                   '\n\nDelegation is disabled for this session. Complete the task with your own tools and skills.'}
                 if getattr(agents[agent], "retain_session_history", False):
                     role_config = {**(role_config or {}), "_retain_history": True}
                 if getattr(self, '_workflow', None):
@@ -882,8 +938,11 @@ def create_server(
                     result = (record.worker.send(message.strip(), timeout_seconds=min(
                         workflow.policy['turn_seconds'], workflow.remaining())) if workflow
                         else record.worker.send(message.strip()))
+                    intervention_ids = result.get('interventionIds', [])
                     terminal = result
                     if workflow:
+                        workflow.meta['authorization'] = include_interventions(workflow.meta['authorization'],
+                            self.server.store.recent_interventions(session_id), intervention_ids)
                         stage = 'record_result'
                         checkpoint = record.worker.get_checkpoint() if hasattr(record.worker, 'get_checkpoint') else None
                         terminal = workflow.record(result, checkpoint)
@@ -897,6 +956,8 @@ def create_server(
                     emit_progress('saving')
                     stage = 'save_result'
                     self.server.store.save(session_id, record.agent, history, record.role, role_config)
+                    self.server.store.acknowledge_interventions(session_id,
+                        intervention_ids)
                     record.messages, record.role_config = history, role_config
                     record.last_used = time.monotonic()
                     if terminal is not None:

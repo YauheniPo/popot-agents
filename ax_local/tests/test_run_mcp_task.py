@@ -28,18 +28,23 @@ if mode == 'transport_error':
 if mode == 'mcp_error':
     result = {'content': [{'type': 'text', 'text': 'orchestrator HTTP 502'}], 'isError': True}
 else:
-    task = {'sessionId': 'new-session', 'outcome': {'status': mode, 'reason': 'workflow_turn_limit'}}
+    task = ({'sessionId': 'new-session', 'status': 'queued', 'interventionId': 'comment-id'}
+            if mode == 'queued' else
+            {'sessionId': 'new-session', 'outcome': {'status': mode, 'reason': 'workflow_turn_limit'}})
     result = {'content': [{'type': 'text', 'text': json.dumps(task)}], 'isError': False}
 print('event: message')
 print('data: ' + json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': result}))
 ''')
             fake_curl.chmod(0o755)
-            for mode, expected, role, session in [
-                ('completed', 0, '', ''),
-                ('blocked', 1, 'backend_engineer', ''),
-                ('mcp_error', 1, 'backend_engineer', ''),
-                ('transport_error', 7, 'backend_engineer', ''),
-                ('completed', 0, 'backend_engineer', 'existing-session'),
+            for mode, expected, role, session, disable in [
+                ('completed', 0, '', '', ''),
+                ('blocked', 1, 'backend_engineer', '', ''),
+                ('mcp_error', 1, 'backend_engineer', '', ''),
+                ('transport_error', 7, 'backend_engineer', '', ''),
+                ('completed', 0, 'backend_engineer', 'existing-session', ''),
+                ('queued', 0, '', 'existing-session', ''),
+                ('completed', 0, 'backend_engineer', '', 'true'),
+                ('completed', 0, 'backend_engineer', '', 'false'),
             ]:
                 with self.subTest(mode=mode, session=session):
                     capture = Path(directory) / 'request.json'
@@ -47,6 +52,7 @@ print('data: ' + json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': result}))
                                    'TASK': 'prepare PR #92', 'ROLE': role,
                                    'SESSION_ID': session, 'CALL_ID': 'stable-call',
                                    'PROGRESS_TOKEN': 'progress-token', 'MOCK_MCP_MODE': mode,
+                                   'DISABLE_DELEGATION': disable,
                                    'REQUEST_CAPTURE': str(capture)}
                     run = subprocess.run(['bash', str(SCRIPT)], cwd=ROOT, env=environment,
                                          text=True, capture_output=True)
@@ -57,12 +63,16 @@ print('data: ' + json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': result}))
                     self.assertEqual(payload['params']['arguments'].get('role'),
                                      'backend_engineer' if role and not session else None)
                     self.assertEqual(payload['params']['arguments']['sessionId'], session)
+                    self.assertEqual(payload['params']['arguments'].get('disableDelegation'),
+                                     None if not disable else disable == 'true')
                     self.assertEqual(payload['params']['_meta'],
                                      {'callId': 'stable-call', 'progressToken': 'progress-token'})
                     if mode == 'blocked':
                         self.assertIn('Task new-session: blocked (workflow_turn_limit)', run.stderr)
                     if mode == 'completed':
                         self.assertIn('Task new-session: completed', run.stderr)
+                    if mode == 'queued':
+                        self.assertIn('Comment new-session: queued (interventionId=comment-id)', run.stderr)
 
     def test_printed_command_keeps_unicode_task_with_c_locale(self):
         with tempfile.TemporaryDirectory() as directory:

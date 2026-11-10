@@ -11,6 +11,7 @@ from ax_local.api.ax_runner import AxAgentRunner
 from ax_local.api.worker_queue import WorkerCapacityTimeout, WorkerQueue
 from ax_local.config import AX_CONFIG
 from popot_agents.orchestrator.main import AgentRunError, ChatServer, create_server
+from popot_agents.runtime_config import RUNTIME
 from tests.test_chat import FakeRunner
 from tests import test_chat as chat_tests
 
@@ -380,9 +381,12 @@ class AxWorkerCapacityTests(unittest.TestCase):
             finally:
                 server.server_close()
 
-    def test_queue_supports_ten_workflows_with_three_warm_workers(self):
-        self.assertEqual(AX_CONFIG['max_workers'], 30)
+    def test_queue_supports_four_workflows_with_three_warm_workers(self):
+        self.assertEqual(AX_CONFIG['max_workers'], 14)
         self.assertEqual(AX_CONFIG['warm_workers'], 3)
+        self.assertEqual(RUNTIME['workflow']['max_concurrent'], 4)
+        self.assertGreaterEqual(AX_CONFIG['max_workers'],
+            RUNTIME['workflow']['max_concurrent'] * (AX_CONFIG['delegation']['max_depth'] + 1))
         self.assertEqual(AX_CONFIG['worker_queue_timeout_seconds'], 3600)
 
 

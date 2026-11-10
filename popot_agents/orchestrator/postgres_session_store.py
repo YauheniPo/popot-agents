@@ -2,6 +2,7 @@
 
 import json
 import re
+import secrets
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,18 @@ class PostgresSessionStore:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS agent_session_legacy_imports (
                     session_id text PRIMARY KEY
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS agent_interventions (
+                    sequence bigserial UNIQUE,
+                    id text PRIMARY KEY CHECK (id ~ '^[0-9a-f]{32}$'),
+                    session_id text NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE,
+                    request_id text,
+                    message text NOT NULL,
+                    status text NOT NULL CHECK (status IN ('queued', 'delivered')),
+                    created_at timestamptz NOT NULL DEFAULT now(),
+                    UNIQUE (session_id, request_id)
                 )
             """)
 
@@ -115,6 +128,70 @@ class PostgresSessionStore:
             connection.execute("""UPDATE agent_sessions SET role_config = jsonb_set(
                 COALESCE(role_config, '{}'::jsonb), '{_work_evidence}', %s), updated_at=now()
                 WHERE session_id=%s""", (Jsonb(evidence), session_id))
+
+    @staticmethod
+    def _intervention(row):
+        return {'id': row[0], 'message': row[1], 'status': row[2],
+                'requestId': row[3], 'createdAt': row[4].isoformat()}
+
+    def enqueue_intervention(self, session_id, message, request_id=None):
+        if not self._valid_id(session_id):
+            return None
+        with self._connect() as connection:
+            if connection.execute('SELECT 1 FROM agent_sessions WHERE session_id=%s FOR UPDATE',
+                                  (session_id,)).fetchone() is None:
+                return None
+            if request_id is not None:
+                prior = connection.execute('''SELECT id,message,status,request_id,created_at
+                    FROM agent_interventions WHERE session_id=%s AND request_id=%s''',
+                    (session_id, request_id)).fetchone()
+                if prior is not None:
+                    if prior[1] != message:
+                        raise ValueError('requestId belongs to another comment')
+                    return self._intervention(prior)
+            count, size = connection.execute('''SELECT count(*),COALESCE(sum(octet_length(message)),0)
+                FROM agent_interventions WHERE session_id=%s AND status='queued' ''',
+                (session_id,)).fetchone()
+            if count >= 32:
+                raise OverflowError('too many pending comments')
+            if size + len(message.encode('utf-8')) > RUNTIME['limits']['history_bytes'] // 4:
+                raise OverflowError('pending comments exceed the context budget')
+            row = connection.execute('''INSERT INTO agent_interventions
+                (id,session_id,request_id,message,status) VALUES (%s,%s,%s,%s,'queued')
+                RETURNING id,message,status,request_id,created_at''',
+                (secrets.token_hex(16), session_id, request_id, message)).fetchone()
+            return self._intervention(row)
+
+    def pending_interventions(self, session_id):
+        if not self._valid_id(session_id):
+            return []
+        with self._connect() as connection:
+            rows = connection.execute('''SELECT id,message,status,request_id,created_at
+                FROM agent_interventions WHERE session_id=%s AND status='queued'
+                ORDER BY sequence LIMIT 32''', (session_id,)).fetchall()
+        return [self._intervention(row) for row in rows]
+
+    def recent_interventions(self, session_id):
+        if not self._valid_id(session_id):
+            return []
+        with self._connect() as connection:
+            rows = connection.execute('''SELECT id,message,status,request_id,created_at
+                FROM agent_interventions WHERE session_id=%s
+                AND (status='queued' OR id IN (
+                    SELECT id FROM agent_interventions WHERE session_id=%s AND status='delivered'
+                    ORDER BY sequence DESC LIMIT 100))
+                ORDER BY sequence DESC''', (session_id, session_id)).fetchall()
+        return [self._intervention(row) for row in reversed(rows)]
+
+    def acknowledge_interventions(self, session_id, ids):
+        if not self._valid_id(session_id) or not ids:
+            return
+        with self._connect() as connection:
+            connection.execute('''UPDATE agent_interventions SET status='delivered'
+                WHERE session_id=%s AND id=ANY(%s) AND status='queued' ''', (session_id, list(ids)))
+            connection.execute('''DELETE FROM agent_interventions WHERE session_id=%s AND id IN (
+                SELECT id FROM agent_interventions WHERE session_id=%s AND status='delivered'
+                ORDER BY sequence DESC OFFSET 100)''', (session_id, session_id))
 
     def prune_expired(self) -> set[str]:
         with self._connect() as connection:

@@ -18,6 +18,39 @@ def result(status, evidence=('receipt',), remaining=(), errors=()):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_get_chat_reads_durable_artifact_after_worker_finished(self):
+        artifact = {'name': 'fix.patch', 'content': 'patch bytes', 'sha256': 'a' * 64}
+        report = result('completed')
+        report['outcome']['artifacts'] = [artifact]
+        def after(data):
+            fresh = create_server({'test': object()}, roles={},
+                session_dir=self.server.store.directory, host='127.0.0.1', port=0, workflow_policy=POLICY)
+            thread = threading.Thread(target=fresh.serve_forever)
+            thread.start()
+            try:
+                url = f'http://127.0.0.1:{fresh.server_port}/chats/{data["sessionId"]}'
+                with request.urlopen(url) as response:
+                    self.assertEqual(json.load(response)['artifacts'], [artifact])
+            finally:
+                fresh.shutdown(); thread.join(); fresh.server_close()
+        self.run_workflow([report], after=after)
+
+    def test_consumed_comment_becomes_authoritative_scope_before_continuation(self):
+        message = 'Require 100% coverage and zero issues'
+        def first():
+            sid = self.server.store.list_chats()[0]['sessionId']
+            included = self.server.store.enqueue_intervention(sid, message)
+            self.server.store.enqueue_intervention(sid, 'Still queued')
+            return {**result('partial', remaining=('verify',)),
+                    'interventionIds': [included['id'], 'unknown-id']}
+        def second():
+            sid = self.server.store.list_chats()[0]['sessionId']
+            self.assertEqual(self.server.store.get(sid)['roleConfig']['_workflow']['authorization'],
+                             ['implement', message])
+            return result('completed')
+        _, _, saved = self.run_workflow([first, second])
+        self.assertEqual(saved['roleConfig']['_workflow']['authorization'], ['implement', message])
+
     def test_list_summary_exposes_bounded_redacted_terminal_reason(self):
         from unittest.mock import patch
         saved={'roleConfig':{'_workflow':{'state':'blocked','phase':'finished','turns':4,
@@ -29,7 +62,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertLessEqual(len(reason),240)
 
     def run_workflow(self, results, *, allow_error=False, after=None, request_id=None, role="planner", coordination=None,
-                     checkpoint=None, delegation=None, started_configs=None):
+                     checkpoint=None, delegation=None, started_configs=None, disable_delegation=None):
         class Chat:
             container_name='test-coordinator'
             def __init__(self):self.calls=[]
@@ -55,6 +88,7 @@ class WorkflowTests(unittest.TestCase):
             try:
                 payload={'role':role,'task':'implement'}
                 if request_id:payload['requestId']=request_id
+                if disable_delegation is not None:payload['disableDelegation']=disable_delegation
                 call=request.Request(f'http://127.0.0.1:{server.server_port}/tasks',
                     data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
                 try:
@@ -79,6 +113,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(saved['roleConfig']['_workflow']['turns'],2)
         self.assertLessEqual(calls[0][1],900)
 
+    def test_new_user_run_does_not_inherit_terminal_workflow_checkpoint(self):
+        observed = {}
+        def second_run():
+            current = self.server.store.get(observed['session_id'])
+            observed['checkpoint'] = current['roleConfig']['_workflow'].get('checkpoint')
+            return result('completed')
+        def after(first):
+            observed['session_id'] = first['sessionId']
+            call = request.Request(f'http://127.0.0.1:{self.server.server_port}/messages',
+                data=json.dumps({'sessionId': first['sessionId'], 'message': 'Verify the new head'}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with request.urlopen(call, timeout=3) as response:
+                self.assertEqual(json.load(response)['outcome']['status'], 'completed')
+        old_checkpoint = {'messages': [{'role': 'tool', 'content': 'old error'}],
+                          'failed_delegations': [[['backend_engineer', 'old task'], {
+                              'session_id': 'a' * 16, 'pending': False, 'error': 'old error'}]]}
+        _, _, saved = self.run_workflow([result('blocked', errors=('old error',)), second_run],
+                                       checkpoint=old_checkpoint, after=after)
+        self.assertIsNone(observed['checkpoint'])
+        self.assertEqual(saved['roleConfig']['_workflow']['state'], 'completed')
+
     def test_explicit_backend_role_can_coordinate_with_its_own_turn_limit(self):
         calls, data, saved = self.run_workflow(
             [result('partial', remaining=('review',)), result('completed')],
@@ -92,6 +147,22 @@ class WorkflowTests(unittest.TestCase):
         configs=[]
         self.run_workflow([result('completed')],request_id='call-root',started_configs=configs)
         self.assertEqual(configs[0]['_ax_metrics_call_id'],'call-root')
+
+    def test_request_id_cannot_reuse_a_task_with_different_delegation_setting(self):
+        configs = []
+        def retry(_first):
+            call = request.Request(f'http://127.0.0.1:{self.server.server_port}/tasks',
+                data=json.dumps({'role': 'planner', 'task': 'implement', 'requestId': 'call-solo',
+                                 'disableDelegation': False}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with self.assertRaises(error.HTTPError) as caught:
+                request.urlopen(call, timeout=3)
+            self.assertEqual(caught.exception.code, 409)
+        _, _, saved = self.run_workflow([result('completed')], request_id='call-solo',
+            disable_delegation=True, started_configs=configs, after=retry)
+        self.assertTrue(configs[0]['_disable_delegation'])
+        self.assertEqual(configs[0]['allowed_roles'], [])
+        self.assertTrue(saved['roleConfig']['_disable_delegation'])
 
     def test_role_without_coordination_settings_uses_shared_defaults(self):
         calls, data, saved = self.run_workflow([result('partial', remaining=('review',)), result('completed')],
@@ -203,6 +274,67 @@ class WorkflowTests(unittest.TestCase):
         calls,_,_=self.run_workflow([while_running])
         self.assertEqual(len(calls),1)
 
+    def test_comment_to_running_workflow_is_queued_without_starting_another_turn(self):
+        accepted = []
+        def while_running():
+            sid = self.server.store.list_chats()[0]['sessionId']
+            call = request.Request(f'http://127.0.0.1:{self.server.server_port}/messages',
+                data=json.dumps({'sessionId': sid, 'message': 'Use the new API contract',
+                                 'requestId': 'comment-1'}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with request.urlopen(call, timeout=.5) as response:
+                self.assertEqual(response.status, 202)
+                receipt = json.load(response)
+            self.assertEqual(receipt['sessionId'], sid)
+            self.assertEqual(receipt['status'], 'queued')
+            with request.urlopen(call, timeout=.5) as response:
+                self.assertEqual(json.load(response)['interventionId'], receipt['interventionId'])
+            self.assertEqual(self.server.store.pending_interventions(sid)[0]['message'],
+                             'Use the new API contract')
+            with request.urlopen(f'http://127.0.0.1:{self.server.server_port}/chats/{sid}',
+                                 timeout=.5) as response:
+                self.assertEqual(json.load(response)['interventions'][0]['status'], 'queued')
+            accepted.append(receipt)
+            return {**result('completed'), 'interventionIds': [receipt['interventionId']]}
+        calls, data, saved = self.run_workflow([while_running])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(data['outcome']['status'], 'completed')
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(saved['interventions'][0]['status'], 'delivered')
+
+    def test_comment_can_target_an_active_child_session(self):
+        accepted = []
+        def while_running():
+            sid = 'c' * 16
+            self.server.store.save(sid, 'test', [], 'backend_engineer',
+                {'_ax_delegation': {'state': 'TASK_STATE_WORKING'}})
+            call = request.Request(f'http://127.0.0.1:{self.server.server_port}/messages',
+                data=json.dumps({'sessionId': sid, 'message': 'Use the new API contract'}).encode(),
+                headers={'Content-Type': 'application/json'})
+            with request.urlopen(call, timeout=.5) as response:
+                accepted.append(json.load(response))
+                self.assertEqual(response.status, 202)
+            self.assertEqual(self.server.store.pending_interventions(sid)[0]['message'],
+                             'Use the new API contract')
+            return result('completed')
+        _, data, _ = self.run_workflow([while_running])
+        self.assertEqual(data['outcome']['status'], 'completed')
+        self.assertEqual(accepted[0]['sessionId'], 'c' * 16)
+
+    def test_message_with_conflicting_request_id_does_not_start_a_new_turn(self):
+        def clash(first):
+            url = f'http://127.0.0.1:{self.server.server_port}/messages'
+            body = json.dumps({'role': 'planner', 'sessionId': first['sessionId'],
+                               'message': 'something else', 'requestId': 'same-operation'}).encode()
+            call = request.Request(url, data=body, headers={'Content-Type': 'application/json'})
+            with self.assertRaises(error.HTTPError) as caught:
+                request.urlopen(call, timeout=.5)
+            self.assertEqual(caught.exception.code, 409)
+            self.assertIn('requestId belongs to another task or role',
+                          caught.exception.read().decode())
+        calls, _, _ = self.run_workflow([result('completed')], after=clash, request_id='same-operation')
+        self.assertEqual(len(calls), 1)
+
     def test_repeated_completed_request_returns_saved_result_without_new_execution(self):
         def repeat(first):
             url=f'http://127.0.0.1:{self.server.server_port}/tasks'
@@ -299,7 +431,7 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(len(calls),1)
                 self.assertNotEqual(calls[0],'original authorized task')
                 self.assertIn('Do not repeat',calls[0])
-                self.assertEqual(restored[0][1],checkpoint)
+                self.assertEqual(restored[0][1],{**checkpoint, 'run_id': workflow.meta['run_id']})
             finally:
                 server.shutdown();thread.join();server.server_close()
 

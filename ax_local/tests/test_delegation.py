@@ -11,7 +11,7 @@ import unittest
 from contextlib import redirect_stderr
 from email.message import Message
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ax_local.api.delegation import A2AError, DelegationService, start_a2a_server
 from ax_local.api.ax_runner import AxAgentRunner, AxChat
@@ -63,6 +63,155 @@ class FakeRunner:
 
 
 class DelegationTests(unittest.TestCase):
+    def test_corrupted_artifact_cannot_be_reported_durable_or_delete_the_sandbox(self):
+        self.runner.callback = lambda *_: {'answer': 'Patch prepared', 'outcome': {
+            'status': 'completed', 'evidence': ['tests passed'], 'errors': [], 'remaining_work': [],
+            'artifacts': [{'name': 'fix.patch', 'content': 'corrupted', 'sha256': 'a' * 64}]}}
+        with self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertEqual(task['metadata']['outcome']['status'], 'partial')
+        self.assertEqual(task['metadata']['outcome']['reason'], 'artifact_persistence_failed')
+        self.assertNotIn('artifacts', task['metadata']['outcome'])
+        self.assertTrue(task['metadata']['resumable'])
+        self.assertFalse(self.runner.chats[0].closed)
+
+    def test_cancellation_after_artifact_save_does_not_erase_the_saved_patch(self):
+        import hashlib
+        artifact = {'name': 'fix.patch', 'content': 'patch',
+                    'sha256': hashlib.sha256(b'patch').hexdigest()}
+        self.runner.callback = lambda *_: {'answer': 'Patch prepared', 'outcome': {
+            'status': 'completed', 'evidence': ['tests passed'], 'errors': [], 'remaining_work': [],
+            'artifacts': [artifact]}}
+        original, canceled = self.store.save, []
+        def save(sid, agent, messages, role, config):
+            value = original(sid, agent, messages, role, config)
+            if not canceled and config.get('_ax_delegation', {}).get('outcome', {}).get('artifacts'):
+                canceled.append(True)
+                self.service.jobs[sid].canceled.set()
+            return value
+        with patch.object(self.store, 'save', save), self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertEqual(task['status']['state'], 'TASK_STATE_CANCELED')
+        self.assertEqual(task['metadata']['outcome']['artifacts'], [artifact])
+
+    def test_artifact_store_failure_keeps_the_child_sandbox_for_retry(self):
+        import hashlib
+        artifact = {'name': 'fix.patch', 'content': 'patch',
+                    'sha256': hashlib.sha256(b'patch').hexdigest()}
+        self.runner.callback = lambda *_: {'answer': 'Patch prepared', 'outcome': {
+            'status': 'completed', 'evidence': ['tests passed'], 'errors': [], 'remaining_work': [],
+            'artifacts': [artifact]}}
+        original, failed = self.store.save, []
+        def save(sid, agent, messages, role, config):
+            meta = config.get('_ax_delegation', {})
+            if not failed and meta.get('outcome', {}).get('artifacts'):
+                failed.append(True)
+                raise OSError('test database outage')
+            return original(sid, agent, messages, role, config)
+        with patch.object(self.store, 'save', save), self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertEqual(task['metadata']['outcome']['reason'], 'artifact_persistence_failed')
+        self.assertEqual(task['metadata']['outcome']['status'], 'partial')
+        self.assertTrue(task['metadata']['resumable'])
+        self.assertFalse(self.runner.chats[0].closed)
+        self.assertTrue(self.runner.chats[0].suspended)
+
+    def test_artifacts_are_durable_before_completed_child_is_deleted(self):
+        import hashlib
+        artifact = {'name': 'fix.patch', 'content': 'unpublished patch',
+            'sha256': hashlib.sha256(b'unpublished patch').hexdigest()}
+        self.runner.callback = lambda *_: {'answer': 'Local patch prepared', 'outcome': {
+            'status': 'completed', 'evidence': ['tests passed'], 'errors': [], 'remaining_work': [],
+            'artifacts': [artifact]}}
+        original = FakeChat.close
+        def close(chat):
+            saved = self.store.get(chat.session_id)
+            self.assertEqual(saved['roleConfig']['_ax_delegation']['outcome']['artifacts'], [artifact])
+            original(chat)
+        with patch.object(FakeChat, 'close', close), self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertEqual(task['status']['state'], 'TASK_STATE_COMPLETED')
+        self.assertEqual(task['metadata']['outcome']['artifacts'], [artifact])
+        self.assertTrue(self.runner.chats[0].closed)
+        reopened = SessionStore(self.temporary.name)
+        self.assertEqual(reopened.get(task['id'])['roleConfig']['_ax_delegation']['outcome']['artifacts'], [artifact])
+
+    def test_consumed_child_comment_is_preserved_in_server_assignment_on_resume(self):
+        message = 'Require 100% coverage'
+        def first(chat, task):
+            item = self.store.enqueue_intervention(chat.session_id, message)
+            return {'answer': 'Checks pending', 'interventionIds': [item['id']],
+                    'outcome': {'status': 'partial'}}
+        self.runner.callback = first
+        with self.service.workflow(self.parent, time.monotonic() + 5, max_turns=4), self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+            def resumed(chat, task):
+                self.assertIn(message, self.service.turn_context(chat.session_id)['assignments'])
+                return {'answer': 'verified', 'outcome': {'status': 'completed'}}
+            self.runner.callback = resumed
+            self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', {'message': {
+                'messageId': 'continue-comment', 'taskId': task['id'], 'role': 'ROLE_USER',
+                'parts': [{'text': 'Finish the checks'}]}})
+            resumed_task = self.wait_task(task['id'])
+            self.assertEqual(resumed_task['status']['state'], 'TASK_STATE_COMPLETED')
+            self.assertEqual(resumed_task['metadata']['outcome']['status'], 'completed')
+
+    def test_child_revision_observations_reach_task_and_durable_parent(self):
+        with self.service.workflow(self.parent, time.monotonic() + 5, max_turns=4,
+                metadata={'run_id': 'current-run'}):
+            with self.service.turn(self.parent, .1): task = self.send()
+            self.wait_task_internal(task['id'])
+            saved = self.store.get(task['id'])
+            receipt = {'kind': 'revision', 'source': 'tool_result', 'status': 'observed',
+                'revision': 'a' * 40, 'revisionSource': 'pr_head', 'repository': 'example/repo',
+                'pullRequest': 46, 'observedAt': '2026-11-05T22:19:00Z', 'runId': 'current-run',
+                'callId': 'head-read', 'outputSha256': 'b' * 64, 'tool': 'mcp__github__pull_request_read'}
+            saved['roleConfig']['_work_evidence'] = [{**receipt, 'command': 'private command', 'raw_output': 'private'},
+                {**receipt, 'runId': 'old-run'}, {**receipt, 'revisionSource': 'git_head'},
+                {**receipt, 'status': 'failed'}, {**receipt, 'revision': 'not-a-sha'}]
+            self.store.save(task['id'], saved['agent'], saved['messages'], saved['role'], saved['roleConfig'])
+            expected = [{**receipt, 'sourceSessionId': task['id']}]
+            self.assertEqual(self.service._task(self.store.get(task['id']))['metadata'].get('observations'), expected)
+            class Parent:
+                def get_checkpoint(inner):
+                    return {'failed_delegations': [[['backend_engineer', 'implement'],
+                        {'session_id': task['id'], 'pending': True}]]}
+                def restore(inner, history, **options): inner.checkpoint = options['checkpoint']
+            parent = Parent()
+            self.service.await_children(self.parent, parent, [], time.monotonic() + 3)
+            self.assertEqual(parent.checkpoint['completed_delegations'][task['id']]['observations'], expected)
+
+    def test_standalone_implementation_role_keeps_its_verification_ownership(self):
+        root = 'f' * 16
+        env = self.service.worker_environment(root, self.roles['backend_engineer'])
+        token = env['AX_DELEGATION_TOKEN']
+        with self.service.workflow(root, time.monotonic() + 5, max_turns=4), self.service.turn(root, 5):
+            self.assertEqual(self.service.turn_context(root)['verification_owner'], root)
+            task = self.send(token=token, role='qa_engineer')
+            result = self.wait_task(task['id'], token=token, role='qa_engineer')
+            self.assertEqual(result['status']['state'], 'TASK_STATE_COMPLETED')
+
+    def test_root_owns_verification_and_child_cannot_duplicate_it(self):
+        self.roles['backend_engineer']['allowed_roles'] = ['qa_engineer']
+        checked = []
+        def attempt_duplicate(chat, task):
+            environment = self.service.worker_environment(chat.session_id, chat.config)
+            token = environment['AX_DELEGATION_TOKEN']
+            self.assertNotIn('qa_engineer', json.loads(environment.get('AX_DELEGATION_ROLES', '[]')))
+            with self.assertRaisesRegex(A2AError, 'verification owner'):
+                self.send(token=token, role='qa_engineer', message_id='duplicate-check')
+            checked.append(chat.session_id)
+            return {'answer': 'Implementation ready'}
+        self.runner.callback = attempt_duplicate
+        with self.service.workflow(self.parent, time.monotonic() + 5, max_turns=4,
+                metadata={'turns': 1, 'run_id': 'ownership-test'}), self.service.turn(self.parent, 5):
+            context = self.service.turn_context(self.parent)
+            self.assertEqual(context['verification_owner'], self.parent)
+            task = self.send()
+            child_id = task['id']
+            self.wait_task(child_id)
+            self.assertEqual(checked, [child_id])
+
     def test_same_revision_review_and_qa_overlap_with_reserved_capacity(self):
         from ax_local.api.worker_queue import WorkerQueue
         self.policy['max_depth']=5
@@ -299,6 +448,33 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(saved["messages"][-1]["content"], "child result: implement")
         self.assertTrue(self.runner.chats[0].closed)
         self.assertNotIn(self.token, str(saved))
+
+    def test_running_child_can_read_only_its_queued_comments(self):
+        from urllib import request, error
+        self.policy['max_depth'] = 1
+        received = []
+        def callback(chat, _):
+            own = self.store.enqueue_intervention(chat.session_id, 'Change the API contract')
+            environment = self.service.worker_environment(chat.session_id, chat.config)
+            self.assertNotIn('AX_DELEGATION_ROLES', environment)
+            call = request.Request(self.service.base_url + '/interventions', data=b'{}',
+                headers={'Authorization': 'Bearer ' + environment['AX_DELEGATION_TOKEN']})
+            with request.urlopen(call, timeout=2) as response:
+                received.extend(json.load(response)['interventions'])
+            self.assertEqual(received[0]['id'], own['id'])
+            unauthenticated = request.Request(self.service.base_url + '/interventions', data=b'{}')
+            with self.assertRaises(error.HTTPError) as denied:
+                request.urlopen(unauthenticated, timeout=2)
+            self.assertEqual(denied.exception.code, 403)
+            return {'answer': 'child result', 'interventionIds': [own['id']]}
+        self.runner.callback = callback
+        a2a = start_a2a_server(self.service, '127.0.0.1', 0)
+        self.addCleanup(a2a.shutdown)
+        with self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertEqual(task['status']['state'], 'TASK_STATE_COMPLETED')
+        self.assertEqual([item['message'] for item in received], ['Change the API contract'])
+        self.assertEqual(self.store.pending_interventions(task['id']), [])
 
     def test_root_call_id_reaches_delegated_session(self):
         with self.service.workflow(self.parent,time.monotonic()+5,max_turns=4,
@@ -626,6 +802,33 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(failure['status'],'blocked')
             self.assertFalse(failure['pending'])
 
+    def test_durable_recovery_validates_revision_and_records_resolution(self):
+        for observed in ('a' * 40, 'b' * 40):
+            with self.subTest(observed=observed):
+                self.runner.callback = lambda *_: {'answer': 'Read-back complete', 'outcome': {
+                    'status': 'completed', 'revision': observed, 'evidence': ['artifact verified'],
+                    'remaining_work': [], 'errors': []}}
+                with self.service.workflow(self.parent, time.monotonic() + 5, max_turns=4):
+                    with self.service.turn(self.parent, .1):
+                        task = self.send(message_id=observed)
+                    class Parent:
+                        def get_checkpoint(inner):
+                            return {'failed_delegations': [[['backend_engineer', 'implement'], {
+                                'role': 'backend_engineer', 'session_id': task['id'], 'pending': True,
+                                'target_revision': 'b' * 40,
+                                'previous_failure': {'role': 'backend_engineer', 'session_id': task['id'],
+                                    'outcome': {'reason': 'workflow_turn_limit'}}}]]}
+                        def restore(inner, history, **options):
+                            inner.checkpoint = options['checkpoint']
+                    parent = Parent()
+                    self.service.await_children(self.parent, parent, [], time.monotonic() + 3)
+                    if observed == 'b' * 40:
+                        self.assertEqual(parent.checkpoint['failed_delegations'], [])
+                        self.assertEqual(parent.checkpoint['resolved_delegations'][0]['revision'], observed)
+                    else:
+                        self.assertTrue(parent.checkpoint['failed_delegations'])
+                        self.assertNotIn(task['id'], parent.checkpoint['completed_delegations'])
+
     def test_durable_workflow_end_cancels_parallel_children(self):
         entered,release=threading.Event(),threading.Event()
         def callback(chat,task):
@@ -927,7 +1130,10 @@ class DelegationTests(unittest.TestCase):
         self.policy["max_depth"] = 1
         failures = []
         def callback(chat, _):
-            self.assertEqual(self.service.worker_environment(chat.session_id, chat.config), {})
+            environment = self.service.worker_environment(chat.session_id, chat.config)
+            self.assertEqual(environment['AX_DELEGATION_URL'], self.service.base_url)
+            self.assertEqual(environment['AX_DELEGATION_TOKEN'], self.service.grants[chat.session_id].token)
+            self.assertNotIn('AX_DELEGATION_ROLES', environment)
             # Even a caller holding a previously issued capability cannot bypass the depth limit.
             token = self.service.grants[chat.session_id].token
             with self.assertRaisesRegex(A2AError, "depth limit"):
@@ -1011,6 +1217,30 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(replay["status"]["state"], "TASK_STATE_FAILED")
         self.assertEqual(len(self.runner.chats), 1)
 
+    def test_restart_marks_lost_child_checkpoint_non_resumable(self):
+        self.runner.callback = lambda *_: {'answer': 'Patch may be published',
+            'outcome': {'status': 'partial', 'evidence': ['commit abc may exist'],
+                        'errors': [], 'remaining_work': ['check remote head']}}
+        with self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertTrue(task['metadata']['resumable'])
+        self.service.retained.clear()  # A fresh API process has no in-memory chat.
+        self.runner.chats[0].close()
+        self.service.recover_interrupted()
+        saved = self.store.get(task['id'])['roleConfig']['_ax_delegation']
+        self.assertFalse(saved['resumable'])
+        self.assertEqual(saved['outcome']['evidence'], ['commit abc may exist'])
+        self.assertIn('check remote head', saved['outcome']['remaining_work'])
+        self.assertTrue(any('sandbox' in item.lower() for item in saved['outcome']['errors']))
+        with self.service.turn(self.parent, 5):
+            recovered = self.service.dispatch(self.token, 'backend_engineer', 'GetTask', {'id': task['id']})
+            self.assertFalse(recovered['metadata']['resumable'])
+            self.assertEqual(recovered['metadata']['outcome']['evidence'], ['commit abc may exist'])
+            with self.assertRaisesRegex(A2AError, 'reconcile.*replacement'):
+                self.service.dispatch(self.token, 'backend_engineer', 'SendMessage', {
+                    'message': {'messageId': 'after-restart', 'taskId': task['id'],
+                                'role': 'ROLE_USER', 'parts': [{'text': 'Continue'}]}})
+
     def test_parent_turn_end_cancels_a_running_child(self):
         release = threading.Event()
         self.runner.callback = lambda *_: release.wait(1)
@@ -1077,6 +1307,23 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(json.loads(env["AX_DELEGATION_ROLES"]), ["backend_engineer"])
         with self.service.turn(parent, 5), self.assertRaisesRegex(A2AError, "not allowed"):
             self.send(token=env["AX_DELEGATION_TOKEN"], role="qa_engineer")
+
+    def test_disabled_delegation_hides_tool_and_rejects_existing_token(self):
+        from ax_local.worker.delegation import make_tools
+        from unittest.mock import Mock
+
+        config = {**self.roles["tech_lead"], "_disable_delegation": True}
+        env = self.service.worker_environment("2222222222222222", config)
+        self.assertNotIn("AX_DELEGATION_ROLES", env)
+        self.assertNotIn("delegate_task", make_tools(env))
+        self.runner.worker_queue = pool = Mock()
+        with self.service.workflow("2222222222222222", time.monotonic() + 5,
+                max_turns=2, metadata={'run_id': 'solo'}):
+            self.assertFalse(self.service.turn_context("2222222222222222")['can_delegate'])
+        pool.reserve_full.assert_not_called()
+        with self.service.turn("2222222222222222", 5), self.assertRaisesRegex(
+                A2AError, "delegation is disabled"):
+            self.send(token=env["AX_DELEGATION_TOKEN"])
 
     def test_actual_worker_tool_waits_for_a2a_child_result(self):
         from ax_local.worker.delegation import make_tools
@@ -1371,9 +1618,55 @@ if __name__ == "__main__":
 
 
 class WorkerFailureMappingTests(unittest.TestCase):
+    def test_worker_detail_without_exit_code_keeps_generic_code_and_diagnostic(self):
+        from ax_local.api.delegation import _worker_failure
+        from popot_agents.orchestrator.main import AgentRunError
+        exc = AgentRunError('AX command failed')
+        exc.diagnostic = {'command': ['ax', 'run'], 'stderr': 'boom'}
+        reason, payload = _worker_failure(exc, 'start')
+        self.assertEqual(payload['code'], 'worker_failed')
+        self.assertEqual(payload['diagnostic'], {'command': ['ax', 'run'], 'stderr': 'boom'})
+        self.assertNotIn('boom', reason)
+
     def test_unmatched_worker_detail_keeps_the_generic_code(self):
         from ax_local.api.delegation import _worker_failure
         from popot_agents.orchestrator.main import AgentRunError
         reason, payload = _worker_failure(AgentRunError('AX task lookup failed unexpectedly'), 'start')
         self.assertEqual(payload['code'], 'worker_failed')
         self.assertNotIn('unexpectedly', reason)
+
+
+class RestartRecoveryTests(unittest.TestCase):
+    """Restart recovery must only flatten children that lost their sandbox."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.runner = FakeRunner()
+        self.roles = {name: {"agent": "test", "instructions": name, "tools": [], "_ax_role": name}
+                      for name in ("tech_lead", "backend_engineer")}
+        self.policy = {"enabled": True, "port": 8005, "max_depth": 2, "max_calls_per_turn": 4,
+                       "turn_timeout_seconds": 300, "poll_interval_seconds": 0.01}
+        self.store = SessionStore(self.temporary.name)
+        self.service = DelegationService(self.roles, self.policy, {"test": self.runner}, self.store,
+                                         "http://127.0.0.1:8005")
+        self.runner.delegation = self.service
+        self.addCleanup(self.service.close)
+
+    def test_retained_child_stays_resumable_while_orphan_child_is_flattened(self):
+        retained_id, orphan_id = 'a' * 16, 'b' * 16
+        for session_id in (retained_id, orphan_id):
+            self.store.save(session_id, 'test', [{'role': 'user', 'content': 'do'}], 'backend_engineer',
+                            {'_ax_delegation': {'state': 'TASK_STATE_COMPLETED', 'resumable': True,
+                                                'outcome': {'status': 'partial',
+                                                            'remaining_work': ['finish']}}})
+        self.service.retained[retained_id] = (Mock(), time.monotonic())
+        self.service.recover_interrupted()
+        kept = self.store.get(retained_id)['roleConfig']['_ax_delegation']
+        self.assertTrue(kept['resumable'])
+        self.assertEqual(kept['outcome']['remaining_work'], ['finish'])
+        orphan = self.store.get(orphan_id)['roleConfig']['_ax_delegation']
+        self.assertFalse(orphan['resumable'])
+        self.assertIn('Continuation sandbox unavailable after API restart',
+                      orphan['outcome']['errors'])
+        self.assertEqual(self.runner.recovered, [])

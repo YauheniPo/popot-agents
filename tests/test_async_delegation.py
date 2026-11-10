@@ -159,10 +159,10 @@ class AsyncServiceTests(unittest.TestCase):
         self.policy['max_depth']=3
         self.policy['max_calls_per_turn']=8
         self.roles['tech_lead']['allowed_roles']=['backend_engineer','qa_engineer']
-        for name in ('analyst','code_reviewer'):
+        for name in ('analyst','observer'):
             self.roles[name]={'agent':'test','instructions':name,'tools':[],'_ax_role':name}
         for role in ('backend_engineer','qa_engineer'):self.roles[role]['allowed_roles']=['analyst']
-        self.roles['analyst']['allowed_roles']=['code_reviewer']
+        self.roles['analyst']['allowed_roles']=['observer']
         self.runner.worker_queue=pool=WorkerQueue(6,.3)
         root=pool.acquire('root');self.addCleanup(pool.release,'root',root)
         original=self.runner.start_chat
@@ -179,7 +179,7 @@ class AsyncServiceTests(unittest.TestCase):
         self.runner.start_chat=start
         def callback(chat,task):
             role=chat.config['_ax_role']
-            target={'backend_engineer':'analyst','qa_engineer':'analyst','analyst':'code_reviewer'}.get(role)
+            target={'backend_engineer':'analyst','qa_engineer':'analyst','analyst':'observer'}.get(role)
             if target:
                 token=self.service.grants[chat.session_id].token
                 child=self.send(token=token,role=target,message_id=chat.session_id)

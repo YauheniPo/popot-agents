@@ -17,6 +17,12 @@ def public_outcome_reason(outcome):
     return redact_text(reason)[:240] if isinstance(reason, str) and reason.strip() else None
 
 
+def include_interventions(authority, interventions, ids):
+    """Retain only user comments whose server IDs the worker actually included."""
+    return list(dict.fromkeys([*authority, *[item['message'] for item in interventions
+                                            if item['id'] in ids]]))
+
+
 def public_workflow(saved, *, include_result=False):
     meta = (saved.get('roleConfig') or {}).get('_workflow')
     if not meta:
@@ -116,6 +122,10 @@ class WorkflowRun:
             items = outcome.get(key)
             outcome[key] = [item for item in items if isinstance(item, str) and item.strip()] if isinstance(items, list) else []
         outcome['remaining_work'] = outcome['remaining_work'] or ['Workflow needs reconciliation before continuing']
+        if reason == 'workflow_no_progress':
+            outcome['remaining_work'].append(
+                'Reconcile external effects and local work in the same session; give a concrete new instruction '
+                'for the remaining work or report the blocker without repeating the unchanged task')
         self.meta.update(state='blocked', phase='finished', outcome=outcome,
                          finished_at=datetime.now(timezone.utc).isoformat(),
                          outcomeRecordedAt=datetime.now(timezone.utc).isoformat())

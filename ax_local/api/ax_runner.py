@@ -22,9 +22,20 @@ from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunErro
 from popot_agents.role_env import selected_role_env
 from ax_local.config import AX_CONFIG
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
-from popot_agents.progress import is_progress_message, emit_progress, progress_observer
+from popot_agents.progress import is_progress_message, emit_progress, progress_observer, redact_text
 from ..worker.remote_client import RESPONSE_PREFIX, PROGRESS_PREFIX
 from .worker_queue import WorkerQueue
+
+
+class AxCommandError(AgentRunError):
+    def __init__(self, command, result, secrets=()):
+        stderr = redact_text(result.stderr or '')
+        for secret in secrets:
+            if isinstance(secret, str) and len(secret) >= 4:
+                stderr = stderr.replace(secret, '[REDACTED]')
+        stderr = stderr[-2000:]
+        self.diagnostic = {'command': command, 'exit_code': result.returncode, 'stderr': stderr}
+        super().__init__(stderr.splitlines()[-1] if stderr.strip() else 'AX command failed: ' + command)
 
 
 class AxAgentRunner:
@@ -60,6 +71,13 @@ class AxAgentRunner:
         self._cleanup_pending = {}
         self._cleanup_lock = threading.RLock()
 
+    def _command_error(self, command, result):
+        secrets = [self.proxy_token, *self.harness2_environment.values()]
+        if self.delegation:
+            for grant in self.delegation.tokens.copy().values():
+                secrets.extend((grant.token, grant.probe_token))
+        return AxCommandError(command, result, secrets)
+
     def _run(self, *args: str, input: str | None = None,
              timeout: int = AX_CONFIG["cli_timeout_seconds"],
              allow_failure: bool = False) -> subprocess.CompletedProcess:
@@ -72,8 +90,7 @@ class AxAgentRunner:
         except FileNotFoundError as exc:
             raise AgentConfigurationError("AX CLI is not installed") from exc
         if result.returncode and not allow_failure:
-            detail = result.stderr.strip().splitlines()
-            raise AgentRunError(detail[-1] if detail else f"AX command failed: {args[0]}")
+            raise self._command_error(args[0], result)
         return result
 
     @staticmethod
@@ -296,13 +313,28 @@ class AxAgentRunner:
                     reason = fields[2]
         return phase, reason
 
+    def _reject_ungranted_delegation(self, chat_id: str, role_config: dict | None) -> None:
+        if (role_config or {}).get('_ax_delegation') and self.delegation \
+                and chat_id not in self.delegation.jobs:
+            raise AgentRunError('Delegated sessions must continue through delegate_task with role and session_id')
+
+    def _release_failed_start(self, task_name: str, lease, exc: Exception) -> None:
+        # If cleanup was not confirmed, maintenance still owns this lease.
+        if isinstance(exc, AgentRunError):
+            exc.diagnostic = {**getattr(exc, 'diagnostic', {}), 'task': task_name}
+        with self._cleanup_lock:
+            pending = task_name in self._cleanup_pending
+        if pending:
+            return
+        self.worker_queue.release(task_name, lease)
+        if self.worker_pool is not None:
+            self.worker_pool.release(task_name)
+
     def start_chat(self, chat_id: str, role_config: dict | None = None,
                    *, deadline: float | None = None, cancel_event=None) -> AxChat:
         if not re.fullmatch(r"[0-9a-f]{16}", chat_id):
             raise ValueError("invalid session ID")
-        if (role_config or {}).get('_ax_delegation') and self.delegation \
-                and chat_id not in self.delegation.jobs:
-            raise AgentRunError('Delegated sessions must continue through delegate_task with role and session_id')
+        self._reject_ungranted_delegation(chat_id, role_config)
         task_name = f"popot-chat-{chat_id}"
         emit_progress('waiting_for_worker')
         reservation = (role_config or {}).get('_ax_delegation', {}).get('pool_reservation')
@@ -320,14 +352,8 @@ class AxAgentRunner:
             emit_progress('preparing_workspace')
             return self._start_reserved_chat(chat_id, role_config, lease,
                                              deadline=deadline, cancel_event=cancel_event)
-        except Exception:
-            # If cleanup was not confirmed, maintenance still owns this lease.
-            with self._cleanup_lock:
-                pending = task_name in self._cleanup_pending
-            if not pending:
-                self.worker_queue.release(task_name, lease)
-                if self.worker_pool is not None:
-                    self.worker_pool.release(task_name)
+        except Exception as exc:
+            self._release_failed_start(task_name, lease, exc)
             raise
 
     def _start_reserved_chat(self, chat_id, role_config, lease,
@@ -348,7 +374,9 @@ class AxAgentRunner:
         existing = self._run("get", "task", task_name, allow_failure=True,
                              timeout=remaining(AX_CONFIG["cli_timeout_seconds"]))
         if existing.returncode and "NotFound" not in existing.stderr:
-            raise AgentRunError("AX task lookup failed")
+            failure = AgentRunError("AX task lookup failed")
+            failure.diagnostic = self._command_error('get', existing).diagnostic
+            raise failure
         if not existing.returncode:
             # A previous API process may have left a task with an expired proxy token.
             try:
@@ -410,7 +438,10 @@ class AxAgentRunner:
                 detail = f"AX task entered {phase} before chat worker became ready"
                 if reason:
                     detail += f" (reason: {reason})"
-                raise AgentRunError(detail)
+                failure = AgentRunError(detail)
+                failure.diagnostic = {'task': task_name, 'phase': phase, 'reason': reason,
+                                      'probe': chat.probe_issue}
+                raise failure
             if resuming and self.snapshot_mode == 'full' and phase == "Running" \
                     and chat.probe_issue == "AX chat socket unavailable":
                 # A full checkpoint already contains the listening socket. If
@@ -712,7 +743,7 @@ class AxChat:
                 {'role': 'assistant', 'content': result['answer']},
             ]
         self._checkpoint = result.get('checkpoint', {})
-        return {key: result[key] for key in ('answer', 'outcome') if key in result}
+        return {key: result[key] for key in ('answer', 'outcome', 'interventionIds') if key in result}
 
     def close(self) -> None:
         with self._close_lock:

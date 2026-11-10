@@ -22,14 +22,32 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.work_evidence import evidence_event
+from popot_agents.artifacts import validate_artifacts
+from popot_agents.work_evidence import evidence_event, child_resolution, MAX_RECEIPTS
 from ax_local.config import AX_CONFIG
-from popot_agents.orchestrator.workflow import WorkflowRun
+from popot_agents.orchestrator.workflow import WorkflowRun, include_interventions
 from popot_agents.workflow_config import role_policy
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
 from popot_agents.progress import emit_progress, observe_progress, scoped_progress, forward_progress
 
 ACTIVE = {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
+
+
+def _revision_observations(saved):
+    config = saved.get('roleConfig') or {}
+    run_id = config.get('_ax_delegation', {}).get('run_id')
+    fields = {'kind', 'source', 'status', 'revision', 'revisionSource', 'repository',
+              'pullRequest', 'observedAt', 'runId', 'callId', 'outputSha256', 'tool'}
+    return [{**{key: value for key, value in receipt.items() if key in fields},
+             'sourceSessionId': saved['sessionId']}
+            for receipt in config.get('_work_evidence', [])
+            if run_id and receipt.get('runId') == run_id
+            and receipt.get('source') == 'tool_result' and receipt.get('kind') == 'revision'
+            and receipt.get('revisionSource') == 'pr_head' and receipt.get('status') == 'observed'
+            and re.fullmatch(r'[a-f0-9]{40}', receipt.get('revision', ''))
+            and re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', receipt.get('repository', ''))
+            and isinstance(receipt.get('pullRequest'), int) and receipt['pullRequest'] > 0
+            and isinstance(receipt.get('observedAt'), str)][-MAX_RECEIPTS:]
 
 
 def _json_bytes(value) -> int:
@@ -92,6 +110,9 @@ def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
     code, reason = "worker_failed", "delegated AX worker failed; inspect local worker logs"
     if isinstance(exc, subprocess.TimeoutExpired):
         code, reason = "ax_command_timeout", "AX command timed out"
+    elif isinstance(exc, ConnectionResetError):
+        code, reason = "worker_transport_interrupted", (
+            "AX worker connection reset; reconcile external effects before retrying")
     elif isinstance(exc, AgentConfigurationError):
         code, reason = "worker_configuration_failed", "AX worker configuration failed"
     elif isinstance(exc, AgentRunError):
@@ -101,6 +122,9 @@ def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
                        r"(failed|timed out) during discovery(?:$|:)", detail)
         if model_http:
             code, reason = "model_http_error", model_http[0]
+        elif re.fullmatch(r"(?:\[Errno (?:54|104)\] )?Connection reset by peer", detail):
+            code, reason = "worker_transport_interrupted", (
+                "AX worker connection reset; reconcile external effects before retrying")
         elif mcp:
             code = "mcp_discovery_failed"
             reason = f"MCP server {mcp[1]} {mcp[2]} during discovery"
@@ -111,7 +135,14 @@ def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
         elif detail in {"model endpoint is unreachable", "model endpoint returned no answer",
                         "model endpoint returned an empty answer"}:
             code, reason = "model_response_failed", detail
-    return reason, {"stage": stage, "code": code, "error_type": type(exc).__name__}
+    failure = {"stage": stage, "code": code, "error_type": type(exc).__name__}
+    diagnostic = getattr(exc, 'diagnostic', None)
+    if isinstance(diagnostic, dict):
+        failure['diagnostic'] = {key: diagnostic[key] for key in ('command', 'exit_code', 'stderr', 'task', 'phase', 'reason', 'probe')
+                                 if key in diagnostic}
+        if diagnostic.get('exit_code') and code == 'worker_failed':
+            failure['code'] = 'ax_command_failed'
+    return reason, failure
 
 
 class A2AError(ValueError):
@@ -199,6 +230,7 @@ class DelegationService:
                     raise RuntimeError('workflow is already active')
                 metadata = metadata if metadata is not None else {}
                 metadata.setdefault('publication_owner',session_id if grant.role in {'backend_engineer','frontend_engineer'} else None)
+                metadata.setdefault('verification_owner', session_id)
                 yield_run = Run(deadline, persistent=True, calls=metadata.get('delegationCalls', 0),
                                 metadata=metadata, max_turns=max_turns, root_id=session_id,
                                 call_limit=self.policy['max_calls_per_turn'] * max_turns)
@@ -208,7 +240,7 @@ class DelegationService:
                     yield_run.reservation = metadata.get('run_id') or secrets.token_hex(16)
                 grant.run = yield_run
         try:
-            if yield_run and yield_run.pool is not None:
+            if yield_run and yield_run.pool is not None and not grant.config.get('_disable_delegation'):
                 yield_run.reserved_slots = yield_run.pool.reserve_full(
                     yield_run.reservation, self.policy['max_depth'], deadline=deadline)
             yield yield_run
@@ -234,9 +266,11 @@ class DelegationService:
             return {'run_id':run.metadata.get('run_id'), 'root_session_id':run.root_id,
                 'session_id':session_id,'role':grant.role,
                 'publication_owner':run.metadata.get('publication_owner'),
+                'verification_owner':run.metadata.get('verification_owner'),
                 'authorization':run.metadata.get('authorization', [run.metadata.get('original_task','')]),
                 'assignments':meta.get('scope_assignments', []),
-                'target_revision':meta.get('revision'), 'can_delegate':turns < limit,
+                'target_revision':meta.get('revision'),
+                'can_delegate':not grant.config.get('_disable_delegation') and turns < limit,
                 'dependency_results':meta.get('dependency_results',[])}
 
     def wait_state(self, session_id):
@@ -315,6 +349,7 @@ class DelegationService:
                        'outcome':meta.get('outcome', {'status':'failed','reason':'missing outcome'}),
                        'resumable':bool(meta.get('resumable') and sid in self.retained),
                        'answer':meta.get('answer',''), 'truncated':False}
+            receipt['observations'] = _revision_observations(saved)
             if meta.get('outcomeRecordedAt'):
                 receipt['reportedAt'] = meta['outcomeRecordedAt']
             if meta.get('error'):
@@ -329,6 +364,18 @@ class DelegationService:
                 failed.append([key,value]);continue
             if key[0] != receipt['role']:
                 raise AgentRunError('Pending child role mismatch')
+            if receipt['outcome'].get('status') == 'completed' and value.get('previous_failure'):
+                try:
+                    resolution = child_resolution(value['previous_failure'], receipt, value.get('target_revision'))
+                except RuntimeError as exc:
+                    receipt.update(resumable=False, error=str(exc))
+                    receipt['outcome'] = {**receipt['outcome'], 'status': 'failed',
+                        'reason': 'child_reconciliation_invalid', 'errors': [str(exc)],
+                        'remaining_work': ['Verify the required revision and remaining deliverables']}
+                else:
+                    resolutions = updated.setdefault('resolved_delegations', [])
+                    resolutions.append(resolution)
+                    resolutions[:] = resolutions[-16:]
             if receipt['outcome'].get('status') != 'completed':
                 failed.append([key,{**value,'pending':False, 'answer':receipt['answer'],
                     'status':receipt['outcome'].get('status'),
@@ -385,9 +432,22 @@ class DelegationService:
                 # Task deletion is independent of the old provider, which may
                 # no longer be configured after a restart.
                 next(iter(self.runners.values())).close_session(saved["sessionId"])
-                meta.update(state="TASK_STATE_FAILED", error="AX API restarted during delegation")
+                meta.update(state="TASK_STATE_FAILED", error="AX API restarted during delegation",
+                            resumable=False)
                 self.store.save(saved["sessionId"], saved["agent"], saved["messages"],
                                 saved["role"], config)
+            elif meta and meta.get('resumable') and saved['sessionId'] not in self.retained:
+                # A completed child's in-memory AxChat does not survive the API process.
+                # Preserve its evidence while making replacement possible after read-back.
+                outcome = dict(meta.get('outcome') or {})
+                error = 'Continuation sandbox unavailable after API restart'
+                outcome['errors'] = [*outcome.get('errors', []), error]
+                outcome['remaining_work'] = [*outcome.get('remaining_work', []),
+                    'Reconcile external effects and saved child evidence before submitting a replacement child; '
+                    'uncommitted sandbox work may be lost']
+                meta.update(resumable=False, outcome=outcome)
+                self.store.save(saved['sessionId'], saved['agent'], saved['messages'],
+                                saved['role'], config)
 
     def prepare_config(self, session_id: str, config: dict | None) -> dict:
         config = dict(config or {})
@@ -399,7 +459,8 @@ class DelegationService:
             role = saved.get("role") if saved else None
         if role in self.roles:
             config["_ax_role"] = role
-            if self.roles[role].get("allowed_roles") and not config.get("_workflow_coordinator"):
+            if self.roles[role].get("allowed_roles") and not config.get("_workflow_coordinator") \
+                    and not config.get('_disable_delegation'):
                 config["timeout_seconds"] = max(config.get("timeout_seconds", 60),
                                                 self.policy["turn_timeout_seconds"])
         return config
@@ -426,17 +487,21 @@ class DelegationService:
                 environment = {'AX_DELEGATION_URL': self.base_url, 'AX_DELEGATION_TOKEN': grant.token,
                                'AX_DELEGATION_OPERATOR': '1'}
             settings = self.roles[role].get('harness2', {})
-            if settings.get('enabled') and settings.get('mode') == 'execution' \
+            if not config.get('_disable_delegation') and settings.get('enabled') and settings.get('mode') == 'execution' \
                     and config.get('harness2', {}).get('enabled') \
                     and config.get('harness2', {}).get('mode') == 'execution':
                 environment = {'AX_HARNESS2_URL': self.base_url, 'AX_HARNESS2_TOKEN': grant.probe_token,
                                'AX_HARNESS2_ROLE': role}
             allowed = [target for target in self.roles[role].get("allowed_roles", [])
                        if target not in grant.lineage]
-            if len(grant.lineage) > self.policy["max_depth"]:
+            verification_owner = config.get('_ax_delegation', {}).get('verification_owner')
+            if verification_owner and verification_owner != session_id:
+                allowed = [target for target in allowed if target not in {'code_reviewer', 'qa_engineer'}]
+            if config.get('_disable_delegation') or len(grant.lineage) > self.policy["max_depth"]:
                 allowed = []
             if not allowed:
-                return environment
+                return {**environment, 'AX_DELEGATION_URL': self.base_url,
+                        'AX_DELEGATION_TOKEN': grant.token}
             return {**environment, "AX_DELEGATION_URL": self.base_url, "AX_DELEGATION_TOKEN": grant.token,
                     "AX_DELEGATION_ROLES": json.dumps(allowed),
                     "AX_DELEGATION_DESCRIPTIONS": json.dumps({target:
@@ -527,12 +592,26 @@ class DelegationService:
                 raise A2AError('operator capability is expired or invalid')
             return grant
 
+    def authorized_interventions(self, token: str) -> Grant:
+        with self.lock:
+            grant = self.tokens.get(hashlib.sha256(token.encode()).hexdigest())
+            if (self.closed or not grant or not secrets.compare_digest(token, grant.token)
+                    or not grant.active or not grant.run or grant.run.canceled.is_set()
+                    or time.monotonic() >= grant.deadline):
+                raise A2AError('intervention capability is expired or invalid')
+            return grant
+
+    def pending_interventions(self, token: str) -> list[dict]:
+        return self.store.pending_interventions(self.authorized_interventions(token).session_id)
+
     def _authorized(self, token: str, role: str) -> Grant:
         with self.lock:
             grant = self.tokens.get(hashlib.sha256(token.encode()).hexdigest())
             if self.closed or not grant or not grant.active or not grant.run \
                     or grant.run.canceled.is_set() or time.monotonic() >= grant.deadline:
                 raise A2AError("delegation capability is expired or invalid")
+            if grant.config.get('_disable_delegation'):
+                raise A2AError('delegation is disabled for this session')
             if secrets.compare_digest(token, grant.probe_token):
                 settings = self.roles[grant.role].get('harness2', {})
                 if role != grant.role or not settings.get('enabled') or settings.get('mode') != 'execution':
@@ -710,6 +789,9 @@ class DelegationService:
             if existing is not None:
                 return existing
             self._authorized(token, role)
+            verification_owner = (grant.config.get('_ax_delegation') or {}).get('verification_owner') or grant.run.metadata.get('verification_owner')
+            if role in {'code_reviewer', 'qa_engineer'} and verification_owner and verification_owner != grant.session_id:
+                raise A2AError('Review and QA belong to verification owner ' + verification_owner)
             self._check_submission_limits(grant, role, is_probe)
             for sid in dependencies:
                 dependency = self.store.get(sid)
@@ -738,7 +820,8 @@ class DelegationService:
                     raise A2AError('only unfinished checkpointed tasks can continue')
                 retained = self.retained.get(session_id)
                 if not retained or retained[0].closed:
-                    raise A2AError('continuation sandbox is unavailable; refusing to create an empty replacement')
+                    raise A2AError('continuation sandbox is unavailable; refusing to create an empty replacement; '
+                                   'reconcile external effects and saved evidence, then submit an explicit replacement child')
                 config = json.loads(json.dumps(saved['roleConfig']))
                 previous_messages, chat = saved['messages'], retained[0]
                 config['_ax_delegation'].update(message_id=message_id, fingerprint=fingerprint, input=task)
@@ -762,6 +845,7 @@ class DelegationService:
                 *parent_meta.get('scope_assignments', []),
                 *config['_ax_delegation'].get('scope_assignments', []), assignment]))
             config['_ax_delegation']['run_id'] = grant.run.metadata.get('run_id')
+            config['_ax_delegation']['verification_owner'] = verification_owner
             if durable and grant.run.pool is not None:
                 config['_ax_delegation']['pool_reservation'] = grant.run.reservation
             if revision:
@@ -922,6 +1006,8 @@ class DelegationService:
         answer, issue, failure = None, None, None
         workflow = None
         state = "TASK_STATE_FAILED"
+        intervention_ids = []
+        artifacts_saved = True
         stage = "worker_startup"
         try:
             if job.run.persistent and not job.config.get('_ax_harness2_probe'):
@@ -964,6 +1050,10 @@ class DelegationService:
                 emit_progress('turn_started')
                 result = job.chat.send(message, timeout_seconds=min(
                     self._remaining(job), policy['turn_seconds']) if workflow else self._remaining(job))
+                intervention_ids = list(dict.fromkeys([*intervention_ids, *result.get('interventionIds', [])]))
+                meta = job.config['_ax_delegation']
+                meta['scope_assignments'] = include_interventions(meta.get('scope_assignments', []),
+                    self.store.recent_interventions(job.session_id), intervention_ids)
                 if workflow:
                     terminal = workflow.record(result, job.chat.get_checkpoint())
                     job.config['_ax_delegation']['outcome'] = workflow.meta['outcome']
@@ -997,6 +1087,15 @@ class DelegationService:
                 raise AgentRunError('worker returned an invalid task outcome')
             job.config['_ax_delegation']['outcome'] = outcome
             job.config['_ax_delegation']['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
+            if outcome.get('artifacts'):
+                artifacts_saved = False
+                try:
+                    validate_artifacts(outcome['artifacts'])
+                except ValueError:
+                    outcome.pop('artifacts')
+                    raise
+                self._save(job, 'TASK_STATE_WORKING')
+                artifacts_saved = True
             self._remaining(job)
             state = "TASK_STATE_COMPLETED"
         except DependencyBlocked as exc:
@@ -1008,6 +1107,12 @@ class DelegationService:
             state, issue = "TASK_STATE_CANCELED", "delegation canceled or deadline exceeded"
         except Exception as exc:
             issue, failure = _worker_failure(exc, stage)
+            if not artifacts_saved:
+                state = 'TASK_STATE_COMPLETED'
+                outcome = job.config['_ax_delegation']['outcome']
+                outcome.update(status='partial', reason='artifact_persistence_failed')
+                outcome['errors'] = [*outcome.get('errors', []), 'Artifact persistence failed; sandbox retained']
+                outcome['remaining_work'] = [*outcome.get('remaining_work', []), 'Persist and verify the artifacts before completing']
         finally:
             try:
                 resumable = (job.chat is not None and not self.closed and state == 'TASK_STATE_COMPLETED' and
@@ -1027,7 +1132,8 @@ class DelegationService:
                 emit_progress('completed' if state == 'TASK_STATE_COMPLETED' else 'failed')
                 job.config['_ax_delegation']['resumable'] = resumable
                 if state != 'TASK_STATE_COMPLETED':
-                    prior = (workflow.meta.get('outcome') or {}) if workflow else {}
+                    prior = job.config['_ax_delegation'].get('outcome') or (
+                        (workflow.meta.get('outcome') or {}) if workflow else {})
                     outcome = {**prior, 'status': 'failed', 'reason': issue}
                     if prior:
                         outcome['errors'] = [*prior.get('errors', []), issue]
@@ -1052,6 +1158,9 @@ class DelegationService:
                         self.revoke(job.session_id)
                     self._save(job, state, answer if state == "TASK_STATE_COMPLETED" else None,
                                issue, failure)
+                    if job.config['_ax_delegation']['state'] == 'TASK_STATE_COMPLETED':
+                        self.store.acknowledge_interventions(job.session_id,
+                            intervention_ids)
                     self.jobs.pop(job.session_id, None)
             finally:
                 with job.run.lane_condition:
@@ -1117,6 +1226,7 @@ class DelegationService:
                 "metadata": {"sessionId": saved["sessionId"], "role": saved["role"],
                              "parentSessionId": meta["parent_session_id"]}}
         task['metadata']['durable'] = meta.get('durable', False)
+        task['metadata']['observations'] = _revision_observations(saved)
         if meta.get('outcomeRecordedAt'):
             task['metadata']['reportedAt'] = meta['outcomeRecordedAt']
         if meta.get('outcome'):

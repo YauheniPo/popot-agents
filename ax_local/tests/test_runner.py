@@ -15,6 +15,31 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_failed_command_retains_bounded_redacted_diagnostics(self):
+        from ax_local.api.delegation import _worker_failure
+        secret = 'fixture-secret-value'
+        self.runner.proxy_token = 'ephemeral-capability-value'
+        self.runner.delegation = SimpleNamespace(tokens={'hashed-lookup-key': SimpleNamespace(
+            token='child-capability-value', probe_token='probe-capability-value')})
+        result = subprocess.CompletedProcess([], 7, '',
+            'x' * 3000 + '\nconnection refused ' + self.runner.proxy_token +
+            ' child-capability-value probe-capability-value; token=' + secret)
+        with patch.dict(os.environ, {'MODEL_API_KEY': secret}), \
+             patch('ax_local.api.ax_runner.subprocess.run', return_value=result):
+            with self.assertRaises(AgentRunError) as caught:
+                self.runner._run('apply', '-f', '-', input='private task environment')
+        _, failure = _worker_failure(caught.exception, 'worker_startup')
+        self.assertEqual(failure['code'], 'ax_command_failed')
+        self.assertEqual(failure['diagnostic']['exit_code'], 7)
+        self.assertEqual(failure['diagnostic']['command'], 'apply')
+        self.assertIn('connection refused', failure['diagnostic']['stderr'])
+        self.assertLessEqual(len(failure['diagnostic']['stderr']), 2000)
+        self.assertNotIn(secret, json.dumps(failure))
+        self.assertNotIn(self.runner.proxy_token, json.dumps(failure))
+        self.assertNotIn('child-capability-value', json.dumps(failure))
+        self.assertNotIn('probe-capability-value', json.dumps(failure))
+        self.assertNotIn('private task environment', json.dumps(failure))
+
     def test_git_identity_enters_only_pr_publisher_task_environment(self):
         from pathlib import Path
         directory = Path(__file__).resolve().parents[2] / 'config/roles'
@@ -366,8 +391,10 @@ class AxRunnerTests(unittest.TestCase):
              patch("ax_local.api.ax_runner.AxChat.is_alive", return_value=False), \
              patch("ax_local.api.ax_runner.time.monotonic", side_effect=[0, 301, 301, 301]), \
              patch("ax_local.api.ax_runner.time.sleep"):
-            with self.assertRaisesRegex(AgentRunError, "Failed.*ImagePullBackOff"):
+            with self.assertRaisesRegex(AgentRunError, "Failed.*ImagePullBackOff") as caught:
                 self.runner.start_chat("0123456789abcdef")
+        self.assertEqual(caught.exception.diagnostic['phase'], 'Failed')
+        self.assertEqual(caught.exception.diagnostic['reason'], 'ImagePullBackOff')
         self.assertEqual(run.call_args_list[3].args[:3],
                          ("describe", "task", "popot-chat-0123456789abcdef"))
 

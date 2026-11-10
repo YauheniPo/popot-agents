@@ -297,6 +297,81 @@ class TurnMemoryTests(unittest.TestCase):
                 self.assertIn('memory_skipped' if exhausted else 'memory_capture_failed', events)
                 self.assertEqual(model.call_count, 1 if exhausted else 2)
 
+    def test_summary_connection_reset_retries_once_without_repeating_memory_write(self):
+        client = Mock()
+        client.recall.return_value = []
+        report = {'status': 'completed', 'answer': 'Review complete',
+                  'evidence': ['checked'], 'remaining_work': [], 'errors': []}
+        summary = {'memories': [{'kind': 'constraint', 'text': 'Review the PR',
+                                 'source': 'user', 'quote': 'Review https://github.com/Owner/Repo/pull/68'}]}
+        calls = []
+        def respond(*args, **kwargs):
+            calls.append(args[0])
+            if len(calls) == 2:
+                raise ConnectionResetError('model connection reset')
+            content = report if len(calls) == 1 else summary
+            return io.BytesIO(json.dumps({'choices': [{'message': {
+                'content': json.dumps(content)}, 'finish_reason': 'stop'}]}).encode())
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness._trace') as trace:
+            self.assertEqual(run_http(TASK, ROLE, state={}), 'Review complete')
+        self.assertEqual(len(calls), 3)
+        client.remember.assert_called_once()
+        self.assertEqual([call.args[0] for call in trace.call_args_list].count('memory_summary_retry'), 1)
+
+    def test_summary_connection_reset_on_retry_is_raised_without_further_attempts(self):
+        client = Mock()
+        client.recall.return_value = []
+        report = {'status': 'completed', 'answer': 'Review complete',
+                  'evidence': ['checked'], 'remaining_work': [], 'errors': []}
+        calls = []
+        def respond(*args, **kwargs):
+            calls.append(args[0])
+            if len(calls) == 1:
+                return io.BytesIO(json.dumps({'choices': [{'message': {
+                    'content': json.dumps(report)}, 'finish_reason': 'stop'}]}).encode())
+            raise ConnectionResetError('model connection reset')
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness._trace') as trace:
+            self.assertEqual(run_http(TASK, ROLE, state={}), 'Review complete')
+        events = [call.args[0] for call in trace.call_args_list]
+        self.assertEqual(len(calls), 3)
+        client.remember.assert_not_called()
+        self.assertEqual(events.count('memory_summary_retry'), 1)
+        self.assertIn('memory_capture_failed', events)
+
+    def test_memory_write_connection_reset_is_not_replayed(self):
+        client = Mock()
+        client.recall.return_value = []
+        client.remember.side_effect = ConnectionResetError('write outcome unknown')
+        report = {'status': 'completed', 'answer': 'Review complete',
+                  'evidence': ['checked'], 'remaining_work': [], 'errors': []}
+        summary = {'memories': [{'kind': 'constraint', 'text': 'Review the PR',
+                                 'source': 'user', 'quote': 'Review https://github.com/Owner/Repo/pull/68'}]}
+        replies = [report, summary]
+        def respond(*args, **kwargs):
+            content = replies.pop(0)
+            return io.BytesIO(json.dumps({'choices': [{'message': {
+                'content': json.dumps(content)}, 'finish_reason': 'stop'}]}).encode())
+        state = {}
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond), \
+             patch('popot_agents.worker.http_harness._trace') as trace:
+            self.assertEqual(run_http(TASK, ROLE, state=state), 'Review complete')
+        self.assertEqual(state['outcome']['status'], 'completed')
+        client.remember.assert_called_once()
+        failures = [call.kwargs for call in trace.call_args_list
+                    if call.args[0] == 'memory_capture_failed']
+        self.assertEqual(failures[0]['phase'], 'save')
+
     def test_role_default_project_enables_memory_without_a_task_tag(self):
         with patch.dict(os.environ, ENV, clear=True):
             memory = TurnMemory({**ROLE,'memory_project':'popot-agents'},

@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AgentCapacityTests(unittest.TestCase):
-    def test_model_timeout_does_not_repeat_the_gateway_fallback_chain(self):
+    def test_disabled_model_retries_do_not_repeat_the_gateway_fallback_chain(self):
         for remaining, expected in ((500, 500), (1500, 900)):
             with self.subTest(remaining=remaining):
                 timeouts = []
@@ -32,7 +32,8 @@ class AgentCapacityTests(unittest.TestCase):
                     if len(timeouts) == 1:
                         raise TimeoutError()
                     return io.BytesIO(b'{"choices": []}')
-                with patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
+                with patch.dict(RUNTIME['model'], {'request_retries': 0}), \
+                     patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
                     with self.assertRaisesRegex(RuntimeError, 'model request timed out'):
                         _model_request(object(), round_number=1, messages=[], schemas=[],
                                        remaining_seconds=lambda: remaining)
@@ -68,6 +69,14 @@ class AgentCapacityTests(unittest.TestCase):
                  patch.object(Path, 'is_symlink', side_effect=PermissionError()):
                 self.assertEqual(tools.execute_tool('read_tool_output',
                     {'path': path, 'offset': 30000}, ['read_tool_output']), 'TAIL')
+
+    def test_missing_saved_output_explains_workspace_scope(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(tools, 'WORKSPACE_ROOT', Path(directory)):
+            path = '.tool-results/' + 'a' * 32 + '.txt'
+            with self.assertRaises(tools.ToolExecutionError) as caught:
+                tools.execute_tool('read_tool_output', {'path': path}, ['read_tool_output'])
+        self.assertIn('unavailable in this workspace', str(caught.exception))
+        self.assertNotIn(directory, str(caught.exception))
 
     def test_saved_output_reader_rejects_symlinked_file_or_directory(self):
         for directory_link in (False, True):

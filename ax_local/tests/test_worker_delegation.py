@@ -12,6 +12,16 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class WorkerDelegationTests(unittest.TestCase):
+    def test_completed_child_preserves_attributed_observations(self):
+        from a2a.types import a2a_pb2 as types
+        from ax_local.worker.delegation import delegated_result
+        observation = {'kind': 'revision', 'revision': 'a' * 40, 'sourceSessionId': 'b' * 16,
+                       'revisionSource': 'pr_head', 'pullRequest': 46}
+        task = types.Task(id='b' * 16, status=types.TaskStatus(state=types.TASK_STATE_COMPLETED),
+            metadata={'observations': [observation], 'outcome': {'status': 'completed'}},
+            artifacts=[types.Artifact(artifact_id='answer', parts=[types.Part(text='verified')])])
+        self.assertEqual(delegated_result(task, 'qa_engineer', None).get('observations'), [observation])
+
     def test_durable_child_returns_pending_without_polling_or_canceling(self):
         tools=make_tools({'AX_DELEGATION_URL':'http://api:8005','AX_DELEGATION_TOKEN':'cap',
                           'AX_DELEGATION_ROLES':'["qa_engineer"]'})

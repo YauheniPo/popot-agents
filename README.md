@@ -296,22 +296,46 @@ Run this as **one line** in Bash or Zsh. The script prints the complete `curl`
 command, streams progress, then reports the task outcome:
 
 ```bash
-TASK='подготовь https://github.com/YauheniPo/popot-bot-2.0/pull/92 к merge' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
+TASK='в MR не должно быть issues в sonarqube и все комменты решены и закрыты. запомни это на будущее для работы с PR/MR' ROLE='' SESSION_ID='aae54772ab8f4f25' bash ax_local/run-mcp-task.sh
 ```
 
 `TASK` is the request. Empty `ROLE` uses `config/runtime.json → mcp.default_role`;
 set a role such as `backend_engineer` to select it explicitly. Empty `SESSION_ID`
 starts a new session; set it to a returned ID to continue an existing session.
+Set `DISABLE_DELEGATION=true` to make the selected agent work alone with its own
+tools. This is fixed for the session; omit it when continuing that session.
+For example:
+
+```bash
+TASK='Проверь PR #92 самостоятельно' ROLE='backend_engineer' SESSION_ID='' DISABLE_DELEGATION=true bash ax_local/run-mcp-task.sh
+```
+
 The script generates `CALL_ID` and `PROGRESS_TOKEN` for each new request. After
 an uncertain response, reuse the printed `curl` command with the same IDs and
 payload; generating a new `CALL_ID` would start another request. You may also
 set `CALL_ID` and `PROGRESS_TOKEN` in the command's environment. A `blocked` or
 `partial` task, an MCP error, or a failed `curl` returns a nonzero status.
 
+To add a comment while an agent is working, use its `sessionId` (use the child
+agent's ID to address that executor directly):
+
+```bash
+TASK='Учти новый API contract перед правками' ROLE='' SESSION_ID='<active sessionId>' bash ax_local/run-mcp-task.sh
+```
+
+The call returns `202 queued` with an `interventionId` without waiting for the
+running task. The worker reads the comment before its next model request; an
+already running model or tool call is not interrupted. `get_chat(session_id=...)`
+shows `interventions` with `queued` or `delivered` status. `delivered` means the
+worker included the comment in a model request and the resulting turn was saved;
+it does not mean the requested change was completed. If the task finishes before
+its next model request, the comment remains queued for a later turn.
+
 MCP accepts any configured `role` (or explicit agent profile). When omitted,
 `config/runtime.json → mcp.default_role` selects the role (`planner` by default).
-Every role coordinates its task automatically, including delegated child roles.
-Each agent may select other roles from `allowed_roles`, collect their results,
+By default, every role coordinates its task automatically, including delegated child roles.
+Unless `disable_delegation=true`, each agent may select other roles from
+`allowed_roles`, collect their results,
 continue recoverable partial work, and return its accepted result to its parent.
 Each configured role has a team-specific delegation list; cycles are rejected and
 the A2A depth limit still applies. Tools and external-system permissions remain

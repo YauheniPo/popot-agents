@@ -67,6 +67,7 @@ runner.shutdown_worker_queue()
         shared = json.loads((ROOT / 'config/runtime.json').read_text())
         ax = json.loads((ROOT / 'ax_local/config.json').read_text())
         shared['timeouts']['turn_seconds'] = 240
+        shared['timeouts']['turn_response_margin_seconds'] = 40
         ax['task_resources']['limits']['memory'] = '4Gi'
         ax['max_workers'] = 4
         with tempfile.TemporaryDirectory() as directory:

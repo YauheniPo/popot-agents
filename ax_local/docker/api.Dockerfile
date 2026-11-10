@@ -56,6 +56,7 @@ COPY popot_agents/skills.py /app/popot_agents/
 COPY popot_agents/prompts.py /app/popot_agents/
 COPY popot_agents/progress.py /app/popot_agents/
 COPY popot_agents/work_evidence.py /app/popot_agents/
+COPY popot_agents/artifacts.py /app/popot_agents/
 COPY popot_agents/workflow_config.py /app/popot_agents/
 COPY skills /app/skills
 COPY popot_agents/orchestrator /app/popot_agents/orchestrator

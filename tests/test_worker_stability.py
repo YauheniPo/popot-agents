@@ -70,6 +70,20 @@ class StabilityTests(unittest.TestCase):
         self.assertEqual(failure['code'], 'ax_task_lookup_failed')
         self.assertIn('AX task lookup', reason)
 
+    def test_connection_reset_is_reported_as_transport_interruption(self):
+        from ax_local.api.delegation import _worker_failure
+        reason, failure = _worker_failure(ConnectionResetError('private endpoint'), 'worker_message')
+        self.assertEqual(failure['code'], 'worker_transport_interrupted')
+        self.assertIn('reconcile', reason)
+        self.assertNotIn('private endpoint', reason)
+
+    def test_wrapped_worker_connection_reset_keeps_transport_reason(self):
+        from ax_local.api.delegation import _worker_failure
+        from popot_agents.orchestrator.main import AgentRunError
+        reason, failure = _worker_failure(AgentRunError('[Errno 104] Connection reset by peer'), 'worker_message')
+        self.assertEqual(failure['code'], 'worker_transport_interrupted')
+        self.assertIn('reconcile', reason)
+
     def test_memory_capture_records_summary_and_save_timeouts_separately(self):
         from popot_agents.worker.turn_memory import TurnMemory
         for phase in ('summary', 'save'):

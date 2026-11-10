@@ -117,6 +117,7 @@ def serve(*, extra_tools: dict | None = None) -> None:
                         if payload.get('result_details') is True:
                             result['outcome'] = harness_state.get('outcome', {
                                 'status': 'completed', 'reason': 'answer_returned'})
+                            result['interventionIds'] = harness_state.get('intervention_ids', [])
                             if result['outcome']['status'] in {'partial', 'blocked', 'failed'}:
                                 result['checkpoint'] = harness_state
                 elif payload.get("action") == "restore":

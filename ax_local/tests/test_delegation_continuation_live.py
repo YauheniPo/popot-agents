@@ -29,10 +29,22 @@ class ContinuationRunner(AxAgentRunner):
 import io, json
 from popot_agents.worker import http_harness
 from ax_local.worker.entrypoint import main
+http_harness.RUNTIME['model']['request_retries'] = 0
+real_urlopen = http_harness.request.urlopen
 def respond(request, **kwargs):
+    if not request.full_url.endswith('/chat/completions'):
+        return real_urlopen(request, **kwargs)
     body = json.loads(request.data)
     users = [m['content'] for m in body['messages'] if m['role'] == 'user']
-    if users[-1] == 'finish':
+    if users[-1] == 'artifact':
+        if body['messages'][-1].get('tool_call_id') == 'write-artifact':
+            message = {'content': json.dumps({'status': 'completed', 'answer': 'patch prepared',
+                'evidence': ['patch written'], 'remaining_work': [], 'errors': []})}
+        else:
+            message = {'tool_calls': [{'id': 'write-artifact', 'type': 'function', 'function': {
+                'name': 'write_file', 'arguments': json.dumps({'path': 'artifacts/fix.patch',
+                    'content': 'unpublished patch'})}}]}
+    elif users[-1] == 'finish':
         if not any(m.get('tool_call_id') == 'write-proof' for m in body['messages']):
             raise RuntimeError('fixture tool evidence was not restored')
         if body['messages'][-1].get('tool_call_id') == 'read-proof':
@@ -66,7 +78,61 @@ main()
 
 @unittest.skipUnless(os.getenv('AX_TEST_CONTINUATION_LIVE'), 'requires AX container, kubeconfig and new worker image')
 class LiveDelegationContinuationTests(unittest.TestCase):
-    def test_partial_child_restores_same_data_snapshot_and_tool_history(self):
+    def test_completed_child_patch_survives_sandbox_removal_and_service_restart(self):
+        import hashlib
+        import subprocess
+        import sys
+        host = network_address_toward(kind_control_plane_host(AX_CONFIG['context']), 6443)
+        runner = ContinuationRunner(image=os.environ['AX_TEST_WORKER_IMAGE'], model='fixture',
+                                    base_url='http://localhost:1/v1')
+        roles = {name: {'agent': 'fixture', '_ax_role': name, 'instructions': name,
+                        'tools': ['write_file'], 'max_tool_rounds': 2}
+                 for name in ('parent', 'child')}
+        roles['parent']['allowed_roles'] = ['child']
+        policy = {'max_depth': 2, 'max_calls_per_turn': 3, 'turn_timeout_seconds': 180,
+                  'poll_interval_seconds': .1}
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(directory)
+            service = DelegationService(roles, policy, {'fixture': runner}, store, f'http://{host}:0')
+            runner.delegation = service
+            server = start_a2a_server(service, host, 0)
+            environment = service.worker_environment(uuid.uuid4().hex[:16], roles['parent'])
+            delegate = make_tools(environment)['delegate_task']['call']
+            try:
+                parent_id = next(sid for sid, grant in service.grants.items() if grant.role == 'parent')
+                with service.turn(parent_id, 120):
+                    result = json.loads(delegate({'role': 'child', 'task': 'artifact'},
+                        timeout_seconds=90, call_id='live-artifact'))
+                self.assertEqual(result['outcome']['status'], 'completed', result)
+                expected = [{'name': 'fix.patch', 'content': 'unpublished patch',
+                    'sha256': hashlib.sha256(b'unpublished patch').hexdigest()}]
+                self.assertEqual(result['outcome']['artifacts'], expected)
+                self.assertIsNone(runner.task_status('popot-chat-' + result['sessionId'])[0])
+                service.close()
+                script = '''
+import json,sys,threading
+from urllib import request
+from popot_agents.orchestrator.main import create_server
+server=create_server({'fixture':object()},roles={},session_dir=sys.argv[1],host='127.0.0.1',port=0)
+thread=threading.Thread(target=server.serve_forever)
+thread.start()
+try:
+    with request.urlopen(f'http://127.0.0.1:{server.server_port}/chats/{sys.argv[2]}') as response:
+        print(json.dumps(json.load(response)['artifacts']))
+finally:
+    server.shutdown();thread.join();server.server_close()
+'''
+                restored = subprocess.run([sys.executable, '-c', script, directory, result['sessionId']],
+                                          capture_output=True, text=True, timeout=10)
+                self.assertEqual(restored.returncode, 0, restored.stderr)
+                self.assertEqual(json.loads(restored.stdout), expected)
+            finally:
+                service.close()
+                server.server_close()
+                runner.shutdown_worker_queue()
+                runner.maintenance()
+
+    def test_unfinished_child_restores_same_data_snapshot_and_tool_history(self):
         host = network_address_toward(kind_control_plane_host(AX_CONFIG['context']), 6443)
         runner = ContinuationRunner(image=os.environ['AX_TEST_WORKER_IMAGE'], model='fixture',
                                     base_url='http://localhost:1/v1')
@@ -75,6 +141,7 @@ class LiveDelegationContinuationTests(unittest.TestCase):
                         'tools': ['write_file', 'read_file'], 'max_tool_rounds': 2}
                  for name in ('parent', 'child')}
         roles['parent']['allowed_roles'] = ['child']
+        roles['child']['coordination'] = {'max_turns': 1}
         policy = {'max_depth': 2, 'max_calls_per_turn': 3, 'turn_timeout_seconds': 180,
                   'poll_interval_seconds': 0.1}
         parent_id = uuid.uuid4().hex[:16]
@@ -89,7 +156,8 @@ class LiveDelegationContinuationTests(unittest.TestCase):
                 with service.turn(parent_id, 180):
                     first = json.loads(delegate({'role': 'child', 'task': 'start'},
                                                 timeout_seconds=90, call_id='live-start'))
-                    self.assertEqual(first.get('outcome', {}).get('status'), 'partial', first)
+                    self.assertEqual(first.get('outcome', {}).get('status'), 'blocked', first)
+                    self.assertEqual(first['outcome']['reason'], 'workflow_turn_limit')
                     self.assertTrue(first['resumable'])
                     task_name = 'popot-chat-' + first['sessionId']
                     self.assertEqual(runner.task_status(task_name)[0], 'Suspended')

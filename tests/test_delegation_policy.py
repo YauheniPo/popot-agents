@@ -76,7 +76,7 @@ class DelegationRoutingTests(unittest.TestCase):
                 self.assertIn('Verified head at ' + PR, state['outcome']['evidence'])
                 self.assertIn('resolve existing draft', state['outcome']['remaining_work'])
                 self.assertEqual(len(state['failed_delegations']), 1)
-                self.assertEqual(state['outcome']['status'], 'partial' if resume_fails else 'blocked')
+                self.assertEqual(state['outcome']['status'], 'blocked')
                 self.assertEqual(bodies[-1]['tool_choice'], 'none')
 
     def test_wrong_session_or_unresolved_work_cannot_satisfy_continuation(self):
@@ -97,7 +97,8 @@ class DelegationRoutingTests(unittest.TestCase):
             'answer': 'Read the diff; tests remain', 'resumable': True,
             'outcome': {'status': 'partial', 'reason': 'work_budget_exhausted'}}),
             json.dumps({'sessionId': session, 'role': 'code_reviewer', 'state': 'TASK_STATE_COMPLETED',
-                        'answer': 'Tests verified; review complete', 'outcome': {'status': 'completed'}})]
+                        'answer': 'Tests verified; review complete', 'outcome': {'status': 'completed',
+                            'evidence': ['Tests verified against the existing diff'], 'remaining_work': [], 'errors': []}})]
         def call(identifier, args):
             return {'tool_calls': [{'id': identifier, 'type': 'function', 'function': {
                 'name': 'delegate_task', 'arguments': json.dumps(args)}}]}

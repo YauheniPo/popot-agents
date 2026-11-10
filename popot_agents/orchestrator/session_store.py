@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import secrets
 import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
@@ -94,7 +95,8 @@ class SessionStore:
         with self._write_lock:
             self._save(session_id, agent, messages, role, role_config)
 
-    def _save(self, session_id, agent, messages, role, role_config, *, evidence=None):
+    def _save(self, session_id, agent, messages, role, role_config, *, evidence=None,
+              interventions=None):
         path = self._path(session_id)
         if path is None:
             raise ValueError("invalid session ID")
@@ -119,6 +121,7 @@ class SessionStore:
             "messages": messages,
             "createdAt": created_at,
             "updatedAt": now,
+            "interventions": (previous or {}).get('interventions', []) if interventions is None else interventions,
         }
         descriptor, temporary = tempfile.mkstemp(prefix=f".{session_id}-", dir=self.directory)
         try:
@@ -141,6 +144,59 @@ class SessionStore:
             evidence = retain_evidence(config.get('_work_evidence', []), receipt)
             self._save(session_id, saved['agent'], saved['messages'], saved.get('role'), config,
                        evidence=evidence)
+
+    def enqueue_intervention(self, session_id, message, request_id=None):
+        with self._write_lock:
+            saved = self.get(session_id)
+            if saved is None:
+                return None
+            items = saved.get('interventions', [])
+            if request_id is not None:
+                prior = next((item for item in items if item.get('requestId') == request_id), None)
+                if prior is not None:
+                    if prior['message'] != message:
+                        raise ValueError('requestId belongs to another comment')
+                    return prior
+            if sum(item['status'] == 'queued' for item in items) >= 32:
+                raise OverflowError('too many pending comments')
+            if (sum(len(item['message'].encode('utf-8')) for item in items if item['status'] == 'queued')
+                    + len(message.encode('utf-8')) > RUNTIME['limits']['history_bytes'] // 4):
+                raise OverflowError('pending comments exceed the context budget')
+            item = {'id': secrets.token_hex(16), 'message': message, 'status': 'queued',
+                    'requestId': request_id, 'createdAt': datetime.now(timezone.utc).isoformat()}
+            while len(items) >= 100:
+                oldest_delivered = next((index for index, prior in enumerate(items)
+                                         if prior['status'] == 'delivered'), None)
+                if oldest_delivered is None:
+                    break
+                items.pop(oldest_delivered)
+            items.append(item)
+            self._save(session_id, saved['agent'], saved['messages'], saved.get('role'),
+                       saved.get('roleConfig'), interventions=items)
+            return item
+
+    def pending_interventions(self, session_id):
+        saved = self.get(session_id)
+        return [item for item in saved.get('interventions', []) if item['status'] == 'queued'] if saved else []
+
+    def recent_interventions(self, session_id):
+        saved = self.get(session_id)
+        return saved.get('interventions', []) if saved else []
+
+    def acknowledge_interventions(self, session_id, ids):
+        with self._write_lock:
+            saved = self.get(session_id)
+            if saved is None:
+                return
+            items = saved.get('interventions', [])
+            changed = False
+            for item in items:
+                if item['id'] in ids and item['status'] == 'queued':
+                    item['status'] = 'delivered'
+                    changed = True
+            if changed:
+                self._save(session_id, saved['agent'], saved['messages'], saved.get('role'),
+                           saved.get('roleConfig'), interventions=items)
 
     def delete(self, session_id: str) -> None:
         path = self._path(session_id)

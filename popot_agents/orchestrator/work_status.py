@@ -42,6 +42,8 @@ def _report(saved):
                 report['truncated'] = True
     if not isinstance(outcome, dict):
         return report
+    report['artifacts'] = [{key: artifact[key] for key in ('name', 'sha256')}
+                           for artifact in outcome.get('artifacts', [])]
     labels = {key: redact_text(str(outcome[key])) for key in ('status', 'reason') if key in outcome}
     report['outcome'] = {key: text[:200] for key, text in labels.items()}
     report['truncated'] |= any(len(text) > 200 for text in labels.values())

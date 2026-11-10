@@ -41,6 +41,10 @@ def main() -> None:
         sys.stdout.write(str(path.relative_to(WORKSPACE_ROOT.resolve())))
         return
     arguments = json.load(sys.stdin)
+    if action == 'export_artifacts':
+        from popot_agents.artifacts import collect_artifacts
+        sys.stdout.write(json.dumps(collect_artifacts(WORKSPACE_ROOT), ensure_ascii=False))
+        return
     path = workspace_path(arguments["path"])
     if action == 'read_tool_output' and ((WORKSPACE_ROOT / '.tool-results').is_symlink()
             or (WORKSPACE_ROOT / arguments['path']).is_symlink()):
