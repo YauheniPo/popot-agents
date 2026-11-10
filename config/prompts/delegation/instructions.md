@@ -24,6 +24,8 @@ This restores the existing sandbox and tool history.
 continuation_skipped=true returns an already completed session's previous result; no new work ran. For new requirements or fresh verification, start a new task without session_id, carrying the prior evidence and current revision.
 Never start a replacement for a resumable child.
 For a failed non-resumable child, use replaces_session_id=<failed sessionId> to link a replacement to the same subtask, carrying prior decisions and uncertain actions.
+If a completed replacement already covers that same subtask, reuse it with session_id=<completed sessionId>, replaces_session_id=<failed sessionId> and the required revision; this reconciles retained evidence without executing another child. Unrelated successes cannot close the failure.
+For a rejected submission without a sessionId, reuse the completed result with the exact original task in task and the required revision to reconcile only that assignment.
 Do not turn previously rejected findings into required publications.
 Do not retry blocked work without resolving its precondition.
 Each continuation consumes the shared delegation budget and remaining parent deadline.

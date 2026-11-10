@@ -11,6 +11,19 @@ class FinalResultTests(unittest.TestCase):
     result = staticmethod(helpers.AgentReliabilityTests.result)
     delegate_call = staticmethod(helpers.AgentReliabilityTests.delegate_call)
 
+    def test_repaired_format_does_not_mask_an_unresolved_child_failure(self):
+        state = {'messages': [{'role': 'user', 'content': 'Verify the requested work'}],
+                 'outcome': {'status': 'partial'}, 'failed_delegations': [[
+                     ['qa_engineer', 'Verify the artifact'], {'role': 'qa_engineer', 'session_id': None,
+                     'status': 'incomplete', 'resumable': False, 'pending': False,
+                     'error': 'Submission failed', 'outcome': {}}]]}
+        answer, state, bodies = self.run_sequence([{'content': 'bad JSON'}, self.result()], state=state)
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[-1]['tool_choice'], 'none')
+        self.assertEqual(state['outcome']['reason'], 'delegated_task_incomplete')
+        self.assertNotIn('invalid final result', answer)
+        self.assertEqual(state['outcome']['errors'], ['Submission failed'])
+
     def test_final_evidence_separates_tool_results_from_model_claims(self):
         from popot_agents.worker.final_result import evidence_transcript
         messages = [

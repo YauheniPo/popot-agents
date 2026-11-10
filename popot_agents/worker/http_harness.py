@@ -702,7 +702,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         blocked_child = any(value not in recoverable and (value.get('status') == 'blocked' or
                             value.get('status') == 'failed' and not value.get('resumable')
                             ) for value in failed_delegations.values())
-        incomplete_child = failed_delegations and not forced_final and not model_failure
+        incomplete_child = bool(failed_delegations)
         if failed_delegations:
             # Full child answers stay in the checkpoint/tool history. Do not recursively
             # copy nested transcripts into the user-facing answer at every parent level.
@@ -745,7 +745,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         status = ('Partial result: a delegated task is blocked; resolve its reported precondition.'
                   if blocked_child else
                   'Partial result: the model returned an invalid final result; inspect the saved evidence.'
-                  if invalid_results else
+                  if final_validation_error else
                   'Partial result: the model request failed; task completeness is unverified.'
                   if model_failure else
                   'Partial result: a delegated task is incomplete. Inspect its evidence before retrying.'
@@ -756,7 +756,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         reason = 'work_budget_exhausted'
         for flag, candidate in ((blocked_child, 'delegated_task_blocked'),
                                 (recoverable, 'child_recovery_required'),
-                                (invalid_results, 'invalid_final_result'),
+                                (final_validation_error, 'invalid_final_result'),
                                 (model_failure, 'model_request_failed'),
                                 (incomplete_child, 'delegated_task_incomplete')):
             if flag:
@@ -938,6 +938,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 raise ToolInputError('delegate_task requires an available specialist role')
                             if not isinstance(arguments.get('task'), str) or not arguments['task'].strip():
                                 raise ToolInputError('delegate_task requires a nonempty task')
+                            assignment = arguments['task'].strip()
                             revision = arguments.pop('revision', None)
                             if revision is not None:
                                 if not isinstance(revision, str) or len(revision) != 40 or any(c not in '0123456789abcdefABCDEF' for c in revision):
@@ -960,7 +961,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             # Only a successful retry of the same role AND task
                             # can resolve its failure. Another job for that role
                             # (even with a reused model call ID) proves nothing.
-                            delegation_key = (arguments['role'], arguments['task'].strip())
+                            delegation_key = (arguments['role'], assignment)
+                            legacy_key = (arguments['role'], arguments['task'].strip())
+                            if delegation_key not in failed_delegations and legacy_key in failed_delegations:
+                                delegation_key = legacy_key
                             running = failed_delegations.get(delegation_key)
                             if running and running.get('pending'):
                                 delegation_key = None
@@ -981,8 +985,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 replaced = next((key for key, value in failed_delegations.items()
                                     if key[0] == arguments['role'] and value.get('session_id') == replacement), None)
                                 if (not isinstance(replacement, str) or replaced is None
-                                        or arguments.get('session_id')
-                                        or failed_delegations[replaced].get('resumable')):
+                                        or (arguments.get('session_id') and not completed_child)
+                                        or failed_delegations[replaced].get('resumable')
+                                        or failed_delegations[replaced].get('pending')):
                                     delegation_key = None
                                     raise ToolInputError('Replacement requires a known non-resumable failed child '
                                                          'of the same role. Continue resumable work with session_id.')
@@ -1022,7 +1027,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             if revision is not None:
                                 arguments['_scope_revision'] = revision.lower()
                         if completed_child:
-                            delegation_key = None
+                            prior = failed_delegations.get(delegation_key)
+                            if prior and prior.get('resumable') and prior.get('session_id') != session_id:
+                                delegation_key = None
+                                raise ToolInputError('Continue the resumable child with its existing session_id; '
+                                                     'another completed session cannot replace it.')
+                            if prior is None:
+                                delegation_key = None
                             output = json.dumps({**completed_child, 'continuation_skipped': True,
                                 'notice': 'This session already completed; no new work was executed. '
                                           'This is its previous verified result. For a new requirement or '

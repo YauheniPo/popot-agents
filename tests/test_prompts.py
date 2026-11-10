@@ -8,6 +8,14 @@ from unittest.mock import patch
 
 
 class PromptConfigTests(unittest.TestCase):
+    def test_cached_child_reconciliation_requires_an_explicit_assignment_link(self):
+        from popot_agents.prompts import render_prompt
+        instructions = render_prompt('delegation/instructions', role='planner', review_routing='', description='')
+        self.assertIn('completed replacement', instructions)
+        self.assertIn('replaces_session_id', instructions)
+        self.assertIn('exact original task', instructions)
+        self.assertIn('Never start a replacement for a resumable child', instructions)
+
     def test_corrections_are_not_forbidden_by_the_expired_initial_window(self):
         from popot_agents.prompts import render_prompt
         budget = render_prompt('workflow/budget', budget='{}')

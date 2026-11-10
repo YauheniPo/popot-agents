@@ -563,6 +563,48 @@ class AgentReliabilityTests(unittest.TestCase):
         self.assertIn('no new work', reused['notice'])
         self.assertEqual(state['outcome']['status'], 'completed')
 
+    def test_cached_replacement_reconciles_only_an_explicitly_selected_failed_assignment(self):
+        from unittest.mock import Mock
+        old, new, revision = 'a' * 16, 'b' * 16, 'c' * 40
+        task = 'Verify the artifact'
+        for case in ('explicit', 'submission', 'submission_legacy', 'unrelated', 'no_evidence', 'wrong_revision',
+                     'resumable', 'resumable_same_task', 'pending'):
+            with self.subTest(case=case):
+                submission = case.startswith('submission')
+                accepted = case == 'explicit' or submission
+                failure = {'role': 'qa_engineer', 'session_id': None if submission else old,
+                    'pending': case == 'pending', 'resumable': case.startswith('resumable'), 'status': 'incomplete',
+                    'error': 'Earlier attempt did not complete', 'outcome': {}}
+                done = {'sessionId': new, 'role': 'qa_engineer', 'state': 'TASK_STATE_COMPLETED',
+                    'answer': 'Artifact verified', 'outcome': {'status': 'completed',
+                        'revision': 'd' * 40 if case == 'wrong_revision' else revision,
+                        'evidence': [] if case == 'no_evidence' else ['artifact read-back'],
+                        'remaining_work': [], 'errors': []}}
+                state = {'messages': [{'role': 'user', 'content': 'Verify the requested work'}],
+                    'outcome': {'status': 'partial'}, 'completed_delegations': {new: done},
+                    'failed_delegations': [[['qa_engineer', task + '\nTarget revision: ' + revision
+                                            if case == 'submission_legacy' else task], failure]]}
+                arguments = {'role': 'qa_engineer', 'task': task if submission or case == 'resumable_same_task' else 'Reconcile read-back',
+                             'session_id': new, 'revision': revision}
+                if not submission and case not in ('unrelated', 'resumable_same_task'):
+                    arguments['replaces_session_id'] = old
+                call = {'tool_calls': [{'id': 'reconcile', 'function': {'name': 'delegate_task',
+                    'arguments': json.dumps(arguments)}}]}
+                delegate = Mock(side_effect=AssertionError('Cached reconciliation must not execute a child'))
+                _, state, _ = self.run_sequence([call, self.result(
+                    'completed' if accepted else 'partial', remaining=[] if accepted else ['verify remaining work'])],
+                    delegate=delegate, state=state)
+                delegate.assert_not_called()
+                if accepted:
+                    self.assertEqual(state['failed_delegations'], [])
+                    self.assertEqual(state['outcome']['status'], 'completed')
+                    self.assertEqual(state['resolved_delegations'][0]['session_id'], failure['session_id'])
+                    self.assertEqual(state['resolved_delegations'][0]['resolved_by'], new)
+                    self.assertEqual(state['resolved_delegations'][0]['revision'], revision)
+                else:
+                    self.assertEqual(len(state['failed_delegations']), 1)
+                    self.assertNotEqual(state['outcome']['status'], 'completed')
+
     def test_completed_child_result_survives_parent_checkpoint(self):
         from unittest.mock import Mock
         done = {'sessionId': 'a'*16, 'role': 'qa_engineer', 'state': 'TASK_STATE_COMPLETED',

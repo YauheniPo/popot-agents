@@ -313,7 +313,7 @@ RuntimeError: turn deadline exceeded
 
 Новые тесты выбрасывают таймаут мгновенно и пропускают этот сценарий. Перед merge нужно сохранить резерв времени либо направить истечение дедлайна в partial с checkpoint и добавить соответствующий тест.
 TASK_TEXT
-)" ROLE='' SESSION_ID='379f6f72a6ba47ad' bash ax_local/run-mcp-task.sh
+)" ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
 
 The closing `TASK_TEXT` marker must stand alone, without indentation, and must not
@@ -325,7 +325,7 @@ request, then press **Ctrl+D on an empty line** to send it. Here `TASK` stays em
 and the script reads stdin, preserving trailing newlines too:
 
 ```bash
-TASK='' ROLE='' SESSION_ID='379f6f72a6ba47ad' bash ax_local/run-mcp-task.sh
+TASK='' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
 
 An empty or unset `TASK` reads the request from stdin. A nonempty `TASK` takes
