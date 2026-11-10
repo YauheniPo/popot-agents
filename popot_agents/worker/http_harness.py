@@ -176,15 +176,8 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
         time.sleep(delay)
 
 
-def _checkpoint_matches_run(state, run_context):
-    run_id = run_context.get('run_id') if isinstance(run_context, dict) else None
-    return bool(state and state.get('messages') and
-                (not run_id or state.get('run_id') == run_id))
-
-
-def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
-             *, extra_tools: dict | None = None, timeout_seconds: float | None = None,
-             state: dict | None = None, discovery_cache=None, run_context=None) -> str:
+def _turn_budget(timeout_seconds: float | None) -> float:
+    """Validate the turn budget for this request and return it in seconds."""
     turn_timeout = float(os.getenv('HARNESS_TURN_TIMEOUT_SECONDS',
                                   str(RUNTIME['timeouts']['turn_seconds'])))
     if not math.isfinite(turn_timeout) or turn_timeout <= 0:
@@ -195,16 +188,33 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         turn_timeout = min(turn_timeout, timeout_seconds)
     if turn_timeout < RUNTIME['timeouts']['min_turn_seconds']:
         raise ValueError('Insufficient turn budget; no model or memory session started')
+    return turn_timeout
+
+
+def _memory_messages(messages: list, run_context) -> list:
+    """Select the messages that may seed the memory session."""
+    if run_context is None:
+        return messages
+    if not isinstance(run_context, dict) or any(not isinstance(run_context.get(k,[]),list)
+            or any(not isinstance(s,str) for s in run_context.get(k,[])) for k in ('authorization','assignments')):
+        raise ValueError('invalid server run context')
+    # Continuations and delegated assignments contain reported evidence;
+    # only the server's user-authored scope may select a project brain.
+    return [{'role': 'user', 'content': text} for text in run_context.get('authorization', [])]
+
+
+def _checkpoint_matches_run(state, run_context):
+    run_id = run_context.get('run_id') if isinstance(run_context, dict) else None
+    return bool(state and state.get('messages') and
+                (not run_id or state.get('run_id') == run_id))
+
+
+def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
+             *, extra_tools: dict | None = None, timeout_seconds: float | None = None,
+             state: dict | None = None, discovery_cache=None, run_context=None) -> str:
+    turn_timeout = _turn_budget(timeout_seconds)
     messages = [{'role': 'user', 'content': task}] if isinstance(task, str) else list(task)
-    memory_context = messages
-    if run_context is not None:
-        if not isinstance(run_context, dict) or any(not isinstance(run_context.get(k,[]),list)
-                or any(not isinstance(s,str) for s in run_context.get(k,[])) for k in ('authorization','assignments')):
-            raise ValueError('invalid server run context')
-        # Continuations and delegated assignments contain reported evidence;
-        # only the server's user-authored scope may select a project brain.
-        memory_context = [{'role': 'user', 'content': text}
-                          for text in run_context.get('authorization', [])]
+    memory_context = _memory_messages(messages, run_context)
     role_config = prepare_role_config(role_config)
     deadline = None
     if timeout_seconds is not None or role_config.get('harness2', {}).get('enabled'):
