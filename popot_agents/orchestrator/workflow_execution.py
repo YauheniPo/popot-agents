@@ -142,7 +142,7 @@ class _RootExecution:
         diagnostic = getattr(exc, 'diagnostic', None)
         if isinstance(diagnostic, dict):
             failure['diagnostic'] = {key: diagnostic[key] for key in
-                ('task', 'phase', 'reason', 'operation', 'command', 'exit_code') if key in diagnostic}
+                ('task', 'phase', 'reason', 'operation', 'command', 'exit_code', 'probe') if key in diagnostic}
         if isinstance(exc, OSError) and type(exc.errno) is int:
             failure['errno'] = exc.errno
         trace_event('workflow_interrupted', session_id=self.session_id, **failure)

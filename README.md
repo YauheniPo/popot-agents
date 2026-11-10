@@ -296,7 +296,7 @@ Run this as **one line** in Bash or Zsh. The script prints the complete `curl`
 command, streams progress, then reports the task outcome:
 
 ```bash
-TASK='https://github.com/YauheniPo/popot-agents/pull/57 исправь все и подготовь к merge и sonarqube 100% и 0 issues и все комментриии должны быть порезолвлены и подтяни main и учти комменты из https://github.com/YauheniPo/popot-bot-2.0/runs/129098960761' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
+TASK='https://github.com/YauheniPo/popot-agents/pull/58 исправь все и подготовь к merge и sonarqube 100% и 0 issues и все комментриии должны быть порезолвлены и подтяни main' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
 
 `TASK` is the request. Empty `ROLE` uses `config/runtime.json → mcp.default_role`;

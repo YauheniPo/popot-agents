@@ -501,6 +501,27 @@ class AxLifecycleTests(unittest.TestCase):
         self.assertTrue(self.chat.is_alive())  # Listing cannot erase the saved actor.
         remote.assert_not_called()
 
+    def test_resume_readiness_timeout_preserves_phase_and_transport_diagnostic(self):
+        self.chat.suspended = True
+        self.runner.snapshot_mode = 'data'
+        self.chat._checkpoint = {'outcome': {'evidence': ['saved receipt']}}
+        clock = [100.0]
+        with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'remote', side_effect=AgentRunError('private SSH detail')), \
+             patch.object(self.runner, 'task_status', return_value=('Running', 'TaskRunning')), \
+             patch('ax_local.api.ax_runner.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('ax_local.api.ax_runner.time.sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds)):
+            with self.assertRaises(orchestrator.AgentResumeError) as caught:
+                self.chat.send('must not run', timeout_seconds=2)
+        self.assertEqual(clock[0], 102)
+        self.assertEqual(caught.exception.diagnostic['phase'], 'Running')
+        self.assertEqual(caught.exception.diagnostic['reason'], 'TaskRunning')
+        self.assertEqual(caught.exception.diagnostic['operation'], 'wait_for_chat')
+        self.assertEqual(caught.exception.diagnostic['probe'], 'AX ssh failed')
+        self.assertNotIn('private SSH detail', str(caught.exception.diagnostic))
+        self.assertEqual(self.chat._checkpoint['outcome']['evidence'], ['saved receipt'])
+        self.assertEqual(self.chat.status, 'resume_failed')
+
     def test_resumed_task_with_missing_chat_socket_fails_without_full_startup_wait(self):
         self.chat.suspended = True
         with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \

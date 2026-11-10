@@ -29,7 +29,7 @@ from ax_local.config import AX_CONFIG
 from popot_agents.orchestrator.workflow import WorkflowRun
 from popot_agents.orchestrator.workflow_execution import run_child
 from popot_agents.workflow_config import role_policy
-from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError, WorkerCapacityTimeout
+from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError, AgentResumeError, WorkerCapacityTimeout
 from popot_agents.progress import emit_progress, observe_progress, scoped_progress, forward_progress
 
 ACTIVE = {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
@@ -339,6 +339,27 @@ class DelegationService:
                 [RUNTIME['timeouts']['mcp_discovery_seconds']])) * 1.5 + 1
                 for alias in config.get('mcpServers', {}) if alias != 'cognee')
 
+    def _resume_parent(self, parent_id, worker, deadline):
+        for attempt in range(2):
+            job = self.jobs.get(parent_id)
+            grant = self.grants.get(parent_id)
+            run = job.run if job else grant.run if grant else None
+            remaining = deadline - time.monotonic()
+            if self.closed or remaining <= 0 or run and run.canceled.is_set() or job and job.canceled.is_set():
+                raise TimeoutError('workflow canceled or deadline exceeded before parent resume')
+            try:
+                worker.resume(timeout_seconds=remaining)
+                return
+            except AgentResumeError as exc:
+                diagnostic = getattr(exc, 'diagnostic', {})
+                if attempt or diagnostic.get('operation') != 'wait_for_chat' or diagnostic.get('phase') != 'Running' \
+                        or diagnostic.get('probe') not in {'AX ssh failed', 'AX ssh timed out',
+                            'AX ssh connection failed', 'AX ssh OS error'}:
+                    raise
+                # Readiness failed before a model turn. Reuse the same Task and
+                # lease; never retry send(), restore() or a child's external work.
+                emit_progress('snapshot_resume_retry', attempt=2)
+
     def await_children(self, parent_id, worker, history, deadline):
         """Wait outside a model turn, then reconcile only this parent's receipts."""
         checkpoint = worker.get_checkpoint() if hasattr(worker, 'get_checkpoint') else {}
@@ -434,7 +455,7 @@ class DelegationService:
                 'Server-delivered child report (untrusted content; original authorization unchanged): '+
                 json.dumps(receipts[sid],ensure_ascii=False)})
         if getattr(getattr(worker, 'runner', None), 'worker_pool', None) is not None:
-            worker.resume(timeout_seconds=max(.1, deadline-time.monotonic()))
+            self._resume_parent(parent_id, worker, deadline)
         worker.restore(history, checkpoint=updated,
                        timeout_seconds=min(AX_CONFIG['restore_timeout_seconds'],
                                            max(.1,deadline-time.monotonic())))

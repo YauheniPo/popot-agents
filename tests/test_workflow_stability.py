@@ -102,11 +102,13 @@ class WorkflowStabilityTests(unittest.TestCase):
         failure = AgentResumeError('private transport detail')
         failure.diagnostic = {'task': 'popot-chat-' + 'a' * 16,
             'phase': 'Failed', 'reason': 'ActorSuspendFailed', 'operation': 'confirm_suspension',
+            'probe': 'AX ssh timed out',
             'private': 'must not be persisted'}
         _, response, _ = workflows.WorkflowTests().run_workflow([failure], allow_error=True)
         diagnostic = response['outcome']['failure']['diagnostic']
         self.assertEqual(diagnostic['reason'], 'ActorSuspendFailed')
         self.assertEqual(diagnostic['operation'], 'confirm_suspension')
+        self.assertEqual(diagnostic['probe'], 'AX ssh timed out')
         self.assertNotIn('private', diagnostic)
         self.assertNotIn('private transport detail', str(response))
 

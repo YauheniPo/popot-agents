@@ -422,8 +422,11 @@ class AxAgentRunner:
         last_reason = None
         last_report = None
         while True:
-            if chat.is_alive(timeout_seconds=remaining(AX_CONFIG["probe_timeout_seconds"])):
-                return chat
+            try:
+                if chat.is_alive(timeout_seconds=remaining(AX_CONFIG["probe_timeout_seconds"])):
+                    return chat
+            except TimeoutError:
+                break
             try:
                 phase, reason = self.task_status(task_name, timeout=remaining(AX_CONFIG["probe_timeout_seconds"]))
             except (AgentRunError, subprocess.TimeoutExpired, OSError):
@@ -444,7 +447,7 @@ class AxAgentRunner:
                     detail += f" (reason: {reason})"
                 failure = AgentRunError(detail)
                 failure.diagnostic = {'task': task_name, 'phase': phase, 'reason': reason,
-                                      'probe': chat.probe_issue}
+                                      'probe': chat.probe_issue, 'operation': 'wait_for_chat'}
                 raise failure
             if resuming and self.snapshot_mode == 'full' and phase == "Running" \
                     and chat.probe_issue == "AX chat socket unavailable":
@@ -453,7 +456,10 @@ class AxAgentRunner:
                 raise AgentRunError("AX resumed task lost its chat process")
             if time.monotonic() >= deadline:
                 break
-            time.sleep(remaining(AX_CONFIG["startup_probe_interval_seconds"]))
+            try:
+                time.sleep(remaining(AX_CONFIG["startup_probe_interval_seconds"]))
+            except TimeoutError:
+                break
         if not resuming:
             chat.close()
         detail = "AX chat worker did not become ready"
@@ -466,7 +472,10 @@ class AxAgentRunner:
             detail += ")"
         elif chat.probe_issue:
             detail += f" (probe: {chat.probe_issue})"
-        raise AgentRunError(detail)
+        failure = AgentRunError(detail)
+        failure.diagnostic = {'task': task_name, 'phase': last_phase, 'reason': last_reason,
+                              'probe': chat.probe_issue, 'operation': 'wait_for_chat'}
+        raise failure
 
     def close_session(self, session_id: str) -> None:
         if not re.fullmatch(r"[0-9a-f]{16}", session_id):
@@ -675,19 +684,24 @@ class AxChat:
                     raise TimeoutError("AX resume deadline exceeded")
                 return min(limit, budget)
 
+            operation = 'confirm_suspension'
             try:
                 if self._suspend_pending or self._snapshot_issue == 'snapshot_unconfirmed':
                     self._suspend_pending = True
                     self._confirm_suspended(remaining)
                 if self.runner.worker_pool is not None:
+                    operation = 'acquire_worker'
                     self.runner.worker_pool.acquire(self.container_name, deadline=deadline)
+                operation = 'resume_task'
                 self.runner._run("resume", "task", self.container_name,
                                  timeout=remaining(AX_CONFIG["cli_timeout_seconds"]))
                 self.suspended = False
+                operation = 'wait_for_chat'
                 self.runner._wait_for_chat(self, remaining, deadline, resuming=True)
                 if self.runner.snapshot_mode == 'data':
                     # DATA restores the actor's workspace and boots a new chat
                     # process. Replay only the committed dialogue, never a turn.
+                    operation = 'restore_history'
                     self.restore(self._messages, timeout_seconds=remaining(
                         AX_CONFIG['restore_timeout_seconds']))
                 self._snapshot_issue = None
@@ -705,7 +719,8 @@ class AxChat:
                     "AX chat worker could not resume; task and checkpoint retained; "
                     "retry with the same sessionId"
                 )
-                failure.diagnostic = {'task': self.container_name, **getattr(exc, 'diagnostic', {})}
+                failure.diagnostic = {'task': self.container_name, 'operation': operation,
+                                      **getattr(exc, 'diagnostic', {})}
                 raise failure from None
 
     def is_alive(self, timeout_seconds: float = AX_CONFIG["probe_timeout_seconds"]) -> bool:
