@@ -189,9 +189,10 @@ def test_durable_role_mismatch_rejects_the_batch_before_changing_state():
     children = ChildResults(saved)
     before = children.snapshot()
 
+    reports = {SESSION: report(),
+               OTHER_SESSION: report(OTHER_SESSION, role='backend_engineer')}
     with pytest.raises(ValueError, match='Pending child role mismatch'):
-        children.deliver_reports({SESSION: report(),
-                                  OTHER_SESSION: report(OTHER_SESSION, role='backend_engineer')})
+        children.deliver_reports(reports)
 
     assert children.snapshot() == before
 
