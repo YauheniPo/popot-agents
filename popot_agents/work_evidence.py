@@ -855,7 +855,7 @@ def _package_test_check(name, args):
 
 
 _TAP_PREFIX = re.compile(r'^\s*ok \d+ - (.*)$')
-_SPEC_LINE = re.compile(r'^\s*﹣ (.*)\([^)]*\)$')
+_SPEC_PREFIX = '﹣ '
 
 
 def _node_skips(text):
@@ -892,10 +892,14 @@ def _spec_skip(line):
     head, marker, reason = line.rpartition(' # ')
     if not marker:
         return None
-    matched = _SPEC_LINE.match(head)
-    if not matched:
+    head = head.strip()
+    if not head.startswith(_SPEC_PREFIX) or not head.endswith(')'):
         return None
-    return _skip_record(matched[1], None if reason.strip() == 'SKIP' else reason.strip() or None)
+    opening = head.rfind(' (')
+    if opening < 0 or ')' in head[opening + 2:-1]:
+        return None
+    return _skip_record(head[len(_SPEC_PREFIX):opening],
+                        None if reason.strip() == 'SKIP' else reason.strip() or None)
 
 
 def _skip_record(name, reason):
