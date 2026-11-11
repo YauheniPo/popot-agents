@@ -670,25 +670,26 @@ def _command_substitutions(command, *, heredoc=False):
     """Executable substitutions, including double quotes but excluding literal data."""
     quote, index = None, 0
     while index < len(command):
-        char = command[index]
-        if char == '\\' and quote != "'":
-            index += 2
-            continue
-        if not heredoc and _quote_syntax(char, quote):
-            quote = _quote_after(char, quote)
-            index += 1
-            continue
-        if not heredoc and not quote and char == '#' and _comment_start(command, index):
-            newline = command.find('\n', index)
-            index = len(command) if newline < 0 else newline
-            continue
-        opener, closer = _substitution_open(command, index, char, quote, heredoc)
-        end = _substitution_end(command, index + opener, closer) if opener else None
-        if end is None:
-            index += 1
-            continue
-        yield command[index + opener:end]
-        index = end
+        quote, index, found = _substitution_step(command, index, quote, heredoc)
+        if found is not None:
+            yield found
+
+
+def _substitution_step(command, index, quote, heredoc):
+    """Consume one character run; return the quote state, next index and any substitution."""
+    char = command[index]
+    if char == '\\' and quote != "'":
+        return quote, index + 2, None
+    if not heredoc and _quote_syntax(char, quote):
+        return _quote_after(char, quote), index + 1, None
+    if not heredoc and not quote and char == '#' and _comment_start(command, index):
+        newline = command.find('\n', index)
+        return quote, (len(command) if newline < 0 else newline), None
+    opener, closer = _substitution_open(command, index, char, quote, heredoc)
+    end = _substitution_end(command, index + opener, closer) if opener else None
+    if end is None:
+        return quote, index + 1, None
+    return quote, end, command[index + opener:end]
 
 
 def _quote_syntax(char, quote):
@@ -853,8 +854,8 @@ def _package_test_check(name, args):
     return bool(script and re.fullmatch(r'test(?::[\w-]+)?', script[0]))
 
 
-_TAP_SKIP = re.compile(r'^\s*ok \d+ - (.*) # SKIP(?:\s+(.*))?$')
-_SPEC_SKIP = re.compile(r'^\s*﹣ (.*) \([^)]*\) # (.*)$')
+_TAP_PREFIX = re.compile(r'^\s*ok \d+ - (.*)$')
+_SPEC_LINE = re.compile(r'^\s*﹣ (.*)\([^)]*\)$')
 
 
 def _node_skips(text):
@@ -871,14 +872,34 @@ def _node_skips(text):
 
 def _skip_annotation(line):
     """Name and reason of one TAP or spec skip line, or None."""
-    tap = _TAP_SKIP.match(line)
-    spec = _SPEC_SKIP.match(line)
-    if not tap and not spec:
+    tap = _tap_skip(line)
+    return tap if tap is not None else _spec_skip(line)
+
+
+def _tap_skip(line):
+    """Name and reason from a TAP `ok N - name # SKIP reason` line."""
+    head, marker, reason = line.partition('# SKIP')
+    if not marker or not head.endswith((' ', '\t')):
         return None
-    name, reason = (tap or spec).groups()
-    reason = reason.strip() if reason else None
-    if spec and reason == 'SKIP':
-        reason = None
+    matched = _TAP_PREFIX.match(head)
+    if not matched:
+        return None
+    return _skip_record(matched[1], reason.strip() or None)
+
+
+def _spec_skip(line):
+    """Name and reason from a `﹣ name (file) # reason` spec line."""
+    head, marker, reason = line.rpartition(' # ')
+    if not marker:
+        return None
+    matched = _SPEC_LINE.match(head)
+    if not matched:
+        return None
+    return _skip_record(matched[1], None if reason.strip() == 'SKIP' else reason.strip() or None)
+
+
+def _skip_record(name, reason):
+    """One bounded skip record."""
     return {'name': name.strip()[:200], 'reason': reason[:320] if reason else None}
 
 
@@ -941,7 +962,7 @@ def observe_tool_result(name, arguments, output, call_id):
             revision = clone[1].lower()
             exit_code, kind, summary = 0, 'revision', 'Git clone HEAD verified against the requested commit.'
     if name == 'bash':
-        checks = re.search(r'Ran \d+ tests?(?: in [\d.]+s)?|\d+ passed(?:, \d+ failed)?|FAILED \([^\n)]{0,80}\)|(?:#|ℹ) pass \d+', text)
+        checks = _check_summary(text)
         if checks and _runs_checks(command):
             kind, summary = 'checks', checks[0].strip()
             failed_checks = re.search(r'\b[1-9]\d* (?:failed|errors?)\b|FAILED \('
@@ -949,7 +970,7 @@ def observe_tool_result(name, arguments, output, call_id):
                 r'|(?m:^(?:#|ℹ) (?:fail|cancelled) [1-9]\d*\s*$)', text)
             if error or failed_checks:
                 status = 'failed'
-            elif exit_code == 0 and re.search(r'(?m)(?:^OK(?:\s|$))|(?:\d+ passed)|(?:(?:#|ℹ) pass \d+)', text):
+            elif exit_code == 0 and _pass_summary(text):
                 status = 'passed'
         elif exit_code == 0 and re.search(r'\bgit\b[^\n;|&]*\bcommit\b', command) and re.search(r'(?m)^\[[^\]\n]+ [a-f0-9]{7,40}\]', text):
             kind, summary = 'commit', 'Git commit returned successfully; publication is separate.'
@@ -1097,3 +1118,25 @@ def reusable_checks(receipts, revision):
             and r.get('kind') == 'checks' and r.get('status') == 'passed'
             and r.get('revision') == revision.lower() and r.get('exitCode') == 0
             and r.get('workingTreeClean') is not False]
+
+_RAN_TESTS = re.compile(r'Ran \d+ tests?(?: in [\d.]+s)?')
+_TESTS_PASSED = re.compile(r'\d+ passed(?:, \d+ failed)?')
+_FAILED_SUMMARY = re.compile(r'FAILED \([^\n)]{0,80}\)')
+_NODE_PASS = re.compile(r'[#ℹ] pass \d+')
+_OK_SUMMARY = re.compile(r'(?m)^OK(?:\s|$)')
+
+
+def _earliest(text, patterns):
+    """The earliest match among several patterns, keeping their declared order on ties."""
+    matches = [match for match in (pattern.search(text) for pattern in patterns) if match]
+    return min(matches, key=lambda match: match.start()) if matches else None
+
+
+def _check_summary(text):
+    """The first test-summary fragment in a check output, if any."""
+    return _earliest(text, (_RAN_TESTS, _TESTS_PASSED, _FAILED_SUMMARY, _NODE_PASS))
+
+
+def _pass_summary(text):
+    """The first success marker in a check output, if any."""
+    return _earliest(text, (_OK_SUMMARY, _TESTS_PASSED, _NODE_PASS))
