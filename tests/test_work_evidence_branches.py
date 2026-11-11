@@ -20,6 +20,10 @@ class ScanLineTests(unittest.TestCase):
     def test_unterminated_group_closer_finishes_the_line(self):
         self.assertEqual(evidence._scan_line('abc', None, ')'), ([], None, ')'))
 
+    def test_spaces_before_the_delimiter_are_skipped(self):
+        found, _, _ = evidence._scan_line('cat <<   EOF')
+        self.assertEqual(found, [('EOF', False, False)])
+
     def test_numeric_descriptor_prefix_is_not_a_shell_script(self):
         bodies = evidence._heredoc_bodies('cat 3<<EOF\nbody\nEOF\n')
         self.assertEqual(bodies[0]['word'], 'EOF')
@@ -59,6 +63,9 @@ class ShellStdinTests(unittest.TestCase):
     def test_stdin_flag_reads_a_script(self):
         self.assertTrue(evidence._shell_reads_stdin(['bash', '-s']))
 
+    def test_double_dash_ends_option_parsing(self):
+        self.assertFalse(evidence._shell_reads_stdin(['bash', '--', 'script.sh']))
+
     def test_quoted_words_and_operators_end_the_redirection_scan(self):
         self.assertFalse(evidence._stdin_overridden('<<EOF "quoted" | cat'))
 
@@ -85,6 +92,9 @@ class RunsChecksTests(unittest.TestCase):
     def test_coverage_run_module_is_a_check(self):
         self.assertTrue(evidence._runs_checks('coverage run --branch -m pytest'))
         self.assertTrue(evidence._runs_checks('python -m coverage run -m pytest'))
+
+    def test_coverage_without_run_is_not_a_check(self):
+        self.assertFalse(evidence._runs_checks('coverage report'))
 
     def test_coverage_with_unknown_runner_option_is_not_a_check(self):
         self.assertFalse(evidence._runs_checks('coverage run -x -m pytest'))
