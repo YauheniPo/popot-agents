@@ -17,6 +17,73 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_operator_turn_rejects_holmes_memory_without_changing_assessment_status(self):
+        from ax_local.worker.project_tools import make_tools
+        tools = make_tools({'AX_DELEGATION_OPERATOR': '1', 'AX_DELEGATION_URL': 'http://operator',
+                            'AX_DELEGATION_TOKEN': 'test-token'})
+        tools['project_inspect']['call'] = Mock(return_value=json.dumps({
+            'job': 'holmes-ax-test', 'status': {'succeeded': 1}, 'source_type': 'analysis',
+            'report': 'kube-state-metrics failed with exit code 25m'}))
+        report = {'status': 'completed', 'answer': 'Assessment complete; diagnosis needs verification',
+                  'verification_status': 'failed', 'evidence': ['Holmes returned an unverified diagnosis'],
+                  'findings': [{'description': 'Check current pod state', 'scope': 'in_scope', 'status': 'open'}],
+                  'remaining_work': [], 'errors': []}
+        replies = [
+            {'content': None, 'tool_calls': [{'id': 'holmes', 'type': 'function', 'function': {
+                'name': 'project_inspect', 'arguments': '{"kind":"holmes","parameters":{"job":"holmes-ax-test"}}'}}]},
+            {'content': json.dumps(report)},
+            {'content': json.dumps({'memories': [{'kind': 'fact', 'source': 'holmes',
+                'quote': 'exit code 25m', 'text': 'kube-state-metrics failed with exit code 25m'}]})},
+        ]
+        client = Mock()
+        client.recall.return_value = []
+        state = {}
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch('popot_agents.worker.turn_memory.CogneeMemory', return_value=client), \
+             patch('popot_agents.worker.http_harness.mcp_client.discover_tools', return_value={}), \
+             patch('popot_agents.worker.http_harness.request.urlopen', side_effect=lambda *a, **kw:
+                   io.BytesIO(json.dumps({'choices': [{'message': replies.pop(0)}]}).encode())):
+            self.assertEqual(run_http(TASK, ROLE, extra_tools=tools, state=state), report['answer'])
+        client.remember.assert_not_called()
+        tools['project_inspect']['call'].assert_called_once()
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual(state['outcome']['verification_status'], 'failed')
+        self.assertEqual(state['outcome']['findings'][0]['status'], 'open')
+        self.assertEqual(client.session_event.call_args.args[0]['memories_saved'], 0)
+
+    def test_holmes_prose_cannot_be_saved_as_primary_evidence(self):
+        with patch.dict(os.environ, ENV, clear=True):
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=Mock())
+        memory.observe('holmes', 'project_inspect', {'kind': 'holmes', 'parameters': {}},
+                       '{"report": "kube-state-metrics failed with exit code 25m"}')
+        summary = json.loads(memory.summary_messages('done')[1]['content'])
+        self.assertEqual(summary['evidence_sources']['holmes']['source_type'], 'analysis')
+        for kind in ('fact', 'fix', 'check', 'decision', 'constraint'):
+            with self.subTest(kind=kind):
+                self.assertEqual(memory.save({'memories': [{
+                    'kind': kind, 'source': 'holmes', 'quote': 'exit code 25m',
+                    'text': 'kube-state-metrics failed with exit code 25m'}]}), 0)
+        memory.client.remember.assert_not_called()
+
+    def test_primary_evidence_retains_bounded_tool_and_time_provenance(self):
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch.dict(RUNTIME['memory'], {'tool_evidence_count': 1}):
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=Mock())
+            memory.observe('old', 'project_inspect', {'kind': 'holmes'}, '{"report":"Error"}')
+            memory.observe('pods', 'project_inspect', {'kind': 'pods', 'parameters': {'namespace': 'otel-system'}},
+                           '[{"pod":"metrics","ready":true}]')
+        summary = json.loads(memory.summary_messages('done')[1]['content'])
+        self.assertNotIn('old', summary['evidence_sources'])
+        source = summary['evidence_sources']['pods']
+        self.assertEqual(source['source_type'], 'observation')
+        self.assertEqual(source['tool'], 'project_inspect')
+        self.assertEqual(source['inspection_kind'], 'pods')
+        self.assertTrue(source['observed_at'])
+        self.assertEqual(memory.save({'memories': [{'kind': 'check', 'source': 'pods',
+            'quote': '"ready":true', 'text': 'metrics was ready at the observation time'}]}), 1)
+        saved = json.loads(memory.client.remember.call_args.args[0])['memories'][0]
+        self.assertEqual(saved['provenance'], source)
+
     def test_observed_tool_results_keep_trace_status_and_only_eligible_evidence(self):
         outputs = [('plain output', False), ('{invalid', False), ('[]', False),
                    ('null', False), ('false', False), ('1', False), ('"text"', False),
