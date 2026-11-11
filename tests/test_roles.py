@@ -308,7 +308,7 @@ class FeatureTeamConfigTests(unittest.TestCase):
             self.assertEqual(roles[name]["agent"], "omniroute_cloud", name)
         self.assertEqual(roles["tech_lead"]["tools"], ["calculate"])
         self.assertEqual(roles["tech_lead"]["permissions"], {"internet": True})
-        self.assertEqual(set(roles["tech_lead"]["mcpServers"]), {"cognee"})
+        self.assertEqual(set(roles["tech_lead"]["mcpServers"]), {"cognee", "context7"})
         self.assertIn("backend_engineer", roles["tech_lead"]["allowed_roles"])
         self.assertIn("calculate", roles["analyst"]["tools"])
         self.assertEqual(roles["backend_engineer"]["env_names"],

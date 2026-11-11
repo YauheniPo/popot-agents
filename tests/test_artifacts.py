@@ -1,5 +1,6 @@
 """Unpublished deliverables must outlive the worker that produced them."""
 import hashlib
+import base64
 import io
 import json
 import os
@@ -33,7 +34,7 @@ class ArtifactTests(unittest.TestCase):
                 self.export_workspace(root)
             message = str(caught.exception)
             self.assertIn(f'{limit} bytes', message)
-            self.assertIn(f'at least {limit + 1} bytes', message)
+            self.assertIn(f'at least {limit + 6} bytes', message)
             self.assertIn('outside /workspace/artifacts', message)
             raw.rename(root / raw.name)
             self.assertEqual(self.export_workspace(root), [{'name': 'fix.patch', 'content': 'patch',
@@ -52,18 +53,53 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn('16', str(caught.exception))
             self.assertIn('at least 17 files', str(caught.exception))
 
-    def test_subprocess_export_explains_utf8_failure_without_file_data(self):
-        from popot_agents import tools
+    def test_subprocess_export_preserves_binary_bytes_and_checksum(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / 'artifacts'
             target.mkdir()
-            (target / 'PRIVATE_FILENAME.log').write_bytes(b'\xffPRIVATE_DATA')
-            with self.assertRaises(tools.ToolExecutionError) as caught:
-                self.export_workspace(root)
-            self.assertIn('UTF-8', str(caught.exception))
-            self.assertNotIn('PRIVATE_DATA', str(caught.exception))
-            self.assertNotIn('PRIVATE_FILENAME', str(caught.exception))
+            data = b'\x89PNG\r\n\x1a\n\x00\xff'
+            (target / 'screenshot.png').write_bytes(data)
+            artifact = self.export_workspace(root)[0]
+            self.assertEqual(artifact['encoding'], 'base64')
+            self.assertEqual(base64.b64decode(artifact['content'], validate=True), data)
+            self.assertEqual(artifact['sha256'], hashlib.sha256(data).hexdigest())
+
+    def test_binary_and_text_have_separate_bounded_budgets(self):
+        from popot_agents.artifacts import ArtifactError, collect_artifacts, validate_artifacts
+        from popot_agents.runtime_config import RUNTIME
+        with tempfile.TemporaryDirectory() as directory, patch.dict(RUNTIME['limits'],
+                artifact_bytes=64, tool_output_chars=8):
+            root = Path(directory)
+            target = root / 'artifacts'
+            target.mkdir()
+            (target / 'fix.patch').write_bytes(b'patch')
+            (target / 'screenshot.png').write_bytes(b'\xff' * 59)
+            artifacts = collect_artifacts(root)
+            self.assertEqual(validate_artifacts(artifacts), artifacts)
+            (target / 'screenshot.png').write_bytes(b'\xff' * 60)
+            with self.assertRaises(ArtifactError) as caught:
+                collect_artifacts(root)
+            self.assertIn('at least 65 bytes', str(caught.exception))
+            with self.assertRaises(ArtifactError):
+                validate_artifacts([*artifacts, {'name': 'extra.bin', 'encoding': 'base64',
+                    'content': '/w==', 'sha256': hashlib.sha256(b'\xff').hexdigest()}])
+
+    def test_binary_validation_rejects_invalid_encoding_corruption_and_oversized_payload(self):
+        from popot_agents.artifacts import ArtifactError, validate_artifacts
+        from popot_agents.runtime_config import RUNTIME
+        artifact = {'name': 'screenshot.png', 'encoding': 'base64', 'content': '/w==',
+                    'sha256': hashlib.sha256(b'\xff').hexdigest()}
+        self.assertEqual(validate_artifacts([artifact]), [artifact])
+        for changes in ({'encoding': 'hex'}, {'encoding': None}, {'content': '***'},
+                        {'content': 'AAAA'}, {'content': 'é'}, {'extra': True}):
+            with self.subTest(changes=changes), self.assertRaises(ArtifactError):
+                validate_artifacts([{**artifact, **changes}])
+        with patch.dict(RUNTIME['limits'], artifact_bytes=8), \
+             patch('popot_agents.artifacts.base64.b64decode') as decode:
+            with self.assertRaises(ArtifactError):
+                validate_artifacts([{**artifact, 'content': 'A' * 100}])
+            decode.assert_not_called()
 
     def test_subprocess_export_does_not_forward_arbitrary_error_output(self):
         from popot_agents import tools
@@ -91,7 +127,7 @@ class ArtifactTests(unittest.TestCase):
     def test_unsafe_or_incomplete_exports_fail_without_a_truncated_success(self):
         from popot_agents.artifacts import ArtifactError, collect_artifacts
         from popot_agents.runtime_config import RUNTIME
-        for kind in ('directory_link', 'file_link', 'directory', 'binary', 'large', 'many', 'hidden', 'fifo'):
+        for kind in ('directory_link', 'file_link', 'directory', 'large', 'many', 'hidden', 'fifo'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 outside = root / 'private'
@@ -103,7 +139,6 @@ class ArtifactTests(unittest.TestCase):
                     path = target / 'fix.patch'
                     if kind == 'file_link': path.symlink_to(outside)
                     elif kind == 'directory': path.mkdir()
-                    elif kind == 'binary': path.write_bytes(b'\xff')
                     elif kind == 'large': path.write_bytes(b'x' * (RUNTIME['limits']['tool_output_chars'] + 1))
                     elif kind == 'many':
                         for index in range(17): (target / f'{index}.patch').write_text('x')

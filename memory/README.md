@@ -25,6 +25,17 @@ The launcher also imports repository `skills/**/SKILL.md` into the
 `popot-agents` brain using Cognee's native Skills API. Open **Skills** and
 select that brain to browse the instructions and bundled Markdown references.
 Skill names include their directory group, e.g. `engineering--code-review`.
+Each skill, including its bundled Markdown references and source headings, is
+limited to 1 000 000 UTF-8 bytes. The importer validates every skill before
+uploading any of them and rejects oversized text without truncation. This budget
+is separate from the 100 000-byte limit for ordinary agent memory records.
+The local `cognee_app.py` entry point also adapts the pinned Fastembed long-input
+fallback: it uses non-overlapping halves and length-weighted vector pooling.
+Every character is embedded once instead of repeatedly embedding overlapping
+thirds. Stored skill text is unchanged; the pooled vectors of long inputs can
+differ. Small inputs and native batch/error handling retain the upstream path.
+The adapter does not edit installed Cognee files. Recreate the service with
+`bash memory/up.sh` after changing this entry point.
 Repeating `bash memory/up.sh` updates the same skill nodes without duplicating
 them; removed local skills are retained in Cognee. The source folders are mounted
 read-only and bundled scripts are not ingested or executed. Roles continue to

@@ -7,6 +7,9 @@ from pathlib import Path
 import re
 
 
+MAX_SKILL_BYTES = 1_000_000
+
+
 def sync_skills(root: Path, client, dataset: str = 'popot-agents') -> int:
     if not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', dataset):
         raise ValueError('dataset must be a project slug')
@@ -34,8 +37,8 @@ def sync_skills(root: Path, client, dataset: str = 'popot-agents') -> int:
                 continue
             label = reference.relative_to(source.parent).as_posix()
             text += f'\n\n## Bundled reference: {label}\n\n' + reference.read_text(encoding='utf-8')
-        if len(text.encode('utf-8')) > 100000:
-            raise ValueError(f'skill exceeds 100000 UTF-8 bytes: {relative}')
+        if len(text.encode('utf-8')) > MAX_SKILL_BYTES:
+            raise ValueError(f'skill exceeds {MAX_SKILL_BYTES} UTF-8 bytes: {relative}')
         payloads.append({'dataset_name': dataset, 'skill_name': name, 'skills_text': text})
     if not payloads:
         raise ValueError('no SKILL.md files found')

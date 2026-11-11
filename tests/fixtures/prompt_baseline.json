@@ -3,10 +3,11 @@
     "sha256": "1906268ff6061d09e1970fd5547154dd479679576fc2e9841576b39d8c88cb3e"
   },
   "reporting/result_contract": {
-    "sha256": "74750d533c7acf12127e2f5fecde96b54cec4f099397d3d89c175183807c2e42",
+    "sha256": "05789431a88eff496dedcf149f756869baff5eb2d91a28b9d9ac0abe30dd6cb5",
     "values": {
       "artifact_count_limit": 16,
-      "artifact_byte_limit": 24000
+      "artifact_byte_limit": 24000,
+      "artifact_total_byte_limit": 1000000
     }
   },
   "memory/lifecycle": {

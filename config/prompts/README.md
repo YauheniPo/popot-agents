@@ -13,7 +13,7 @@ JSON-экранирования и дополнительных библиоте
 | `memory/` | Использование исторической памяти и извлечение новых записей | [lifecycle.md](memory/lifecycle.md), [extract.md](memory/extract.md) |
 | `harness2/` | Планирование, улучшение инструкций и выбор результата | [planning.md](harness2/planning.md), [improver.md](harness2/improver.md), [selection.md](harness2/selection.md) |
 | `skills/` | Общие правила использования подключённых skills | [references.md](skills/references.md) |
-| `tools/` | Осмотр исходников и контекст рабочего репозитория | [inspection.md](tools/inspection.md), [repository_context.md](tools/repository_context.md) |
+| `tools/` | Осмотр исходников, документация и контекст рабочего репозитория | [inspection.md](tools/inspection.md), [documentation.md](tools/documentation.md), [repository_context.md](tools/repository_context.md) |
 | `holmes/` | Диагностика AX и финальный отчёт Holmes | [diagnosis.md](holmes/diagnosis.md), [final_report.md](holmes/final_report.md) |
 
 Инструкции конкретной роли по-прежнему находятся в `config/roles/<role>.json`.
@@ -44,7 +44,7 @@ Available delegation capability:
 | `delegation/instructions` | `role`, `review_routing`, `description` |
 | `delegation/handoff` | `handoff`, `context` |
 | `workflow/budget` | `budget` — JSON серверного остатка времени и состояния проверки |
-| `reporting/result_contract` | `artifact_count_limit`, `artifact_byte_limit` |
+| `reporting/result_contract` | `artifact_count_limit`, `artifact_byte_limit` (UTF-8-текст), `artifact_total_byte_limit` (все исходные байты) |
 | `reporting/final` | `result_contract` |
 | `reporting/repair` | `reason`, `result_contract` |
 | `memory/extract` | `max_memories` |

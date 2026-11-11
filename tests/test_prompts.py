@@ -46,7 +46,7 @@ class PromptConfigTests(unittest.TestCase):
     def test_exported_reports_cannot_claim_a_newer_revision_than_the_assessment(self):
         from popot_agents.prompts import render_prompt
         contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
-                                 artifact_byte_limit=24000)
+                                 artifact_byte_limit=24000, artifact_total_byte_limit=1000000)
         for text in ('report artifacts', 'structured revision', 'superseded', 'PR metadata'):
             self.assertIn(text, contract)
 
@@ -81,7 +81,7 @@ class PromptConfigTests(unittest.TestCase):
     def test_repository_readback_and_summary_only_verification_are_distinguished(self):
         from popot_agents.prompts import render_prompt
         contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
-                                 artifact_byte_limit=24000)
+                                 artifact_byte_limit=24000, artifact_total_byte_limit=1000000)
         coordinator = render_prompt('workflow/coordinator')
         for text in ('get_file_contents', 'repo://', 'blob SHA', 'Python'):
             self.assertIn(text, contract)
@@ -91,7 +91,7 @@ class PromptConfigTests(unittest.TestCase):
     def test_result_contract_requires_scoped_findings_and_same_call_check_provenance(self):
         from popot_agents.prompts import render_prompt
         contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
-                                 artifact_byte_limit=24000)
+                                 artifact_byte_limit=24000, artifact_total_byte_limit=1000000)
         for text in ('"findings":[]', 'in_scope', 'out_of_scope', 'rationale',
                      'Minor', 'HEAD=', 'DIRTY=', 'test exit code'):
             self.assertIn(text, contract)
@@ -140,7 +140,7 @@ class PromptConfigTests(unittest.TestCase):
         from popot_agents.prompts import render_prompt
         coordinator = render_prompt('workflow/coordinator')
         contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
-                                 artifact_byte_limit=24000)
+                                 artifact_byte_limit=24000, artifact_total_byte_limit=1000000)
         final = render_prompt('reporting/final', result_contract=contract)
         for prompt in (coordinator, contract, final):
             self.assertIn('remaining_work', prompt)
@@ -154,7 +154,7 @@ class PromptConfigTests(unittest.TestCase):
         checkpoint = render_prompt('review/checkpoint_instructions')
         coordinator = render_prompt('workflow/coordinator')
         contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
-                                 artifact_byte_limit=24000)
+                                 artifact_byte_limit=24000, artifact_total_byte_limit=1000000)
         final = render_prompt('reporting/final', result_contract=contract)
         self.assertIn('For a delegated review-only assignment', reviewer)
         self.assertIn('completed', reviewer)
@@ -175,7 +175,7 @@ class PromptConfigTests(unittest.TestCase):
         from popot_agents.prompts import render_prompt
         coordinator = render_prompt('workflow/coordinator')
         contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
-                                 artifact_byte_limit=24000)
+                                 artifact_byte_limit=24000, artifact_total_byte_limit=1000000)
         self.assertIn('existing PR', coordinator)
         self.assertIn('publication owner', coordinator)
         self.assertIn('existing verified-revision and test claims', coordinator)
@@ -222,7 +222,7 @@ class PromptConfigTests(unittest.TestCase):
     def test_result_reporting_preserves_uncertainty_in_missing_receipts(self):
         from popot_agents.prompts import render_prompt
         contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
-                                 artifact_byte_limit=24000)
+                                 artifact_byte_limit=24000, artifact_total_byte_limit=1000000)
         self.assertIn('Read the available tool receipts before summarizing child progress', contract)
         self.assertIn('missing or truncated evidence', contract)
         self.assertIn('does not prove a check never ran', contract)

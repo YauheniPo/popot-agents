@@ -155,7 +155,7 @@ class BackendRoleTests(unittest.TestCase):
         self.assertEqual(backend["permissions"], {
             "workspace": "persistent", "shell": True, "internet": True,
         })
-        self.assertEqual(set(backend["mcpServers"]), {"fetch", "git", "github", "cognee"})
+        self.assertEqual(set(backend["mcpServers"]), {"fetch", "git", "github", "cognee", "context7"})
         self.assertEqual(backend["mcpServers"]["fetch"]["tools"], ["fetch"])
         self.assertEqual(backend["mcpServers"]["git"]["tools"],
                          ["git_status", "git_diff_unstaged"])

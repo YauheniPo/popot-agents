@@ -51,6 +51,7 @@
     "history_bytes": 2000000,
     "socket_message_bytes": 16777216,
     "tool_output_chars": 24000,
+    "artifact_bytes": 1000000,
     "write_file_bytes": 500000,
     "download_bytes": 20000000,
     "skill_prompt_bytes": 262144

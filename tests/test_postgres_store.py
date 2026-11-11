@@ -9,6 +9,22 @@ from pathlib import Path
 
 @unittest.skipUnless(os.getenv("AGENT_TEST_POSTGRES"), "requires a PostgreSQL test database")
 class PostgresSessionStoreTests(unittest.TestCase):
+    def test_binary_artifact_survives_database_reconnection(self):
+        import base64
+        from popot_agents.artifacts import collect_artifacts
+        from popot_agents.orchestrator.postgres_session_store import PostgresSessionStore
+        data = bytes(range(256)) * 1000
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'artifacts'
+            target.mkdir()
+            (target / 'screenshot.png').write_bytes(data)
+            artifacts = collect_artifacts(directory)
+        self.store.save(self.session_id, 'test', [], 'qa_engineer', {'_ax_delegation': {
+            'state': 'TASK_STATE_COMPLETED', 'outcome': {'status': 'completed', 'artifacts': artifacts}}})
+        stored = PostgresSessionStore().get(self.session_id)['roleConfig']['_ax_delegation']['outcome']['artifacts']
+        self.assertEqual(stored, artifacts)
+        self.assertEqual(base64.b64decode(stored[0]['content'], validate=True), data)
+
     def test_unpublished_artifact_survives_database_reconnection(self):
         import hashlib
         from popot_agents.orchestrator.postgres_session_store import PostgresSessionStore

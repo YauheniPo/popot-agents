@@ -262,7 +262,8 @@ class TurnMemory:
                              'evidence_quote': clean_quote, 'provenance': provenance})
         if accepted:
             references = list(dict.fromkeys(ref.rstrip('.,;:!?') for ref in
-                re.findall(r'https://github\.com/[^\s)\]"<>]+', self.task)))
+                re.findall(r'https://github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+'
+                           r'(?:[/?#][^\s)\\\]"<>`*]*)?', self.task)))
             record = {'project': self.dataset, 'task_status': task_status, 'recorded_at': datetime.now(timezone.utc).isoformat(),
                       'agent_model': os.getenv('HARNESS_MODEL', ''), 'references': references,
                       'trust': 'agent-derived historical notes; verify current sources', 'memories': accepted}

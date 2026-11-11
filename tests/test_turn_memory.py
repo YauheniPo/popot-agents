@@ -667,6 +667,32 @@ class TurnMemoryTests(unittest.TestCase):
         record = json.loads(memory.client.remember.call_args.args[0])
         self.assertEqual(record['references'], ['https://github.com/Owner/Repo/pull/68'])
 
+    def test_saved_references_exclude_markdown_and_escaped_newlines(self):
+        url = 'https://github.com/Owner/Repo/pull/68'
+        query = 'https://github.com/Owner/Repo/blob/fix/path.py?plain=1#L10-L20'
+        task = (f'Review `{url}` and **{url}**. Sources: {url}\\nChild, '
+                f'{url}\\n\\nTest, [{query}]({query}). '
+                'Ignore https://github.com/…/pull/68, https://github.com/Owner` '
+                'and https://github.com/.')
+        with patch.dict(os.environ, ENV, clear=True):
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': task}], client=Mock())
+        memory.observe('check', 'bash', {}, 'passed')
+        memory.save({'memories': [{'kind': 'check', 'text': 'Check passed',
+                                  'source': 'check', 'quote': 'passed'}]})
+        record = json.loads(memory.client.remember.call_args.args[0])
+        self.assertEqual(record['references'], [url, query])
+
+    def test_saved_references_preserve_path_characters_queries_and_fragments(self):
+        urls = ['https://github.com/Owner/Repo?tab=readme-ov-file#usage',
+                'https://github.com/Owner/Repo/blob/main/docs/пример@v2:notes.md#usage']
+        with patch.dict(os.environ, ENV, clear=True):
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': ' '.join(urls)}], client=Mock())
+        memory.observe('check', 'bash', {}, 'passed')
+        memory.save({'memories': [{'kind': 'check', 'text': 'Check passed',
+                                  'source': 'check', 'quote': 'passed'}]})
+        record = json.loads(memory.client.remember.call_args.args[0])
+        self.assertEqual(record['references'], urls)
+
     def test_runtime_reads_before_model_and_saves_curated_summary_after_answer(self):
         client = Mock()
         client.recall.return_value = [{'text': 'Use unittest for this repo.'}]

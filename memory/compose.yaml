@@ -5,7 +5,7 @@ services:
     image: cognee/cognee:${COGNEE_VERSION:?Use bash compose.sh to load pyproject.toml versions}
     restart: unless-stopped
     stop_grace_period: 30s
-    entrypoint: ["gunicorn", "--chdir", "/app/popot-sync", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-t", "30000", "--bind", "0.0.0.0:8000", "--log-level", "error", "session_api:app"]
+    entrypoint: ["gunicorn", "--chdir", "/app/popot-sync", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-t", "30000", "--bind", "0.0.0.0:8000", "--log-level", "error", "cognee_app:app"]
     environment:
       SYSTEM_ROOT_DIRECTORY: /cognee-storage/system
       DATA_ROOT_DIRECTORY: /cognee-storage/data
