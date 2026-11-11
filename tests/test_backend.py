@@ -213,6 +213,8 @@ class BackendRoleTests(unittest.TestCase):
     def test_shell_and_mcp_require_internet_permission(self):
         root = Path(__file__).resolve().parents[1] / "config"
         roles = load_roles(root / "roles", load_agents(root / "agents.json"))
+        # Removing bash must test permissions independently of the eager skill prompt size.
+        roles["backend_engineer"]["skills"] = []
         roles["backend_engineer"]["permissions"]["internet"] = False
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "roles.json"
