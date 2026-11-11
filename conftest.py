@@ -1,4 +1,4 @@
-"""Keep the tool workspace private to each test.
+"""Keep the tool workspace private to each test in both Python suites.
 
 ``popot_agents.tools`` resolves its workspace from ``TOOL_WORKSPACE_ROOT`` and
 defaults to ``/workspace``, the layout of the deployed sandbox.  A test run that

@@ -11,6 +11,46 @@ class FinalResultTests(unittest.TestCase):
     result = staticmethod(helpers.AgentReliabilityTests.result)
     delegate_call = staticmethod(helpers.AgentReliabilityTests.delegate_call)
 
+    def test_findings_error_identifies_the_invalid_field_without_echoing_its_value(self):
+        from popot_agents.worker.final_result import parse_result
+        valid = {'description': 'Observed limitation', 'scope': 'out_of_scope',
+                 'status': 'open', 'rationale': 'Present before this change'}
+        cases = [
+            ({}, 'findings must be a list'),
+            (['PRIVATE_VALUE'], 'findings[0] must be an object'),
+            ([{**valid, 'description': None}], 'findings[0].description must be a nonempty string'),
+            ([{**valid, 'scope': 'PRIVATE_VALUE'}], 'findings[0].scope must be in_scope or out_of_scope'),
+            ([valid, {**valid, 'status': []}], 'findings[1].status must be open or resolved'),
+            ([{**valid, 'rationale': ''}],
+             'findings[0].rationale must be a nonempty string for out_of_scope'),
+        ]
+        for findings, detail in cases:
+            with self.subTest(detail=detail):
+                report = {**json.loads(self.result()['content']), 'findings': findings}
+                with self.assertRaises(ValueError) as caught:
+                    parse_result(json.dumps(report))
+                self.assertEqual(str(caught.exception), 'invalid_findings: ' + detail)
+                self.assertNotIn('PRIVATE_VALUE', str(caught.exception))
+
+    def test_findings_repair_receives_field_guidance_and_preserves_valid_findings(self):
+        finding = {'description': 'Existing limitation', 'scope': 'out_of_scope',
+                   'status': 'open', 'rationale': 'Outside the assigned change'}
+        valid = {**json.loads(self.result()['content']), 'findings': [finding]}
+        invalid = {**valid, 'findings': [{**finding, 'scope': 'out-of-scope'}]}
+        with patch('popot_agents.worker.http_harness._trace') as trace:
+            _, state, bodies = self.run_sequence([
+                {'content': json.dumps(invalid)}, {'content': json.dumps(valid)}])
+        self.assertEqual(len(bodies), 2)
+        self.assertNotIn('tools', bodies[-1])
+        self.assertIn('findings[0].scope must be in_scope or out_of_scope',
+                      bodies[-1]['messages'][0]['content'])
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual(state['outcome']['findings'], [finding])
+        failure = next(call.kwargs for call in trace.call_args_list
+                       if call.args[0] == 'final_result_invalid')
+        self.assertEqual(failure['reason'], 'invalid_findings')
+        self.assertEqual(failure['detail'], 'findings[0].scope must be in_scope or out_of_scope')
+
     def test_repaired_format_does_not_mask_an_unresolved_child_failure(self):
         state = {'messages': [{'role': 'user', 'content': 'Verify the requested work'}],
                  'outcome': {'status': 'partial'}, 'failed_delegations': [[
@@ -305,3 +345,19 @@ class FinalResultTests(unittest.TestCase):
         self.assertIn('Tool receipt tool (lost)', joined)
         self.assertNotIn('claimed review passed', joined)
         self.assertEqual(len(receipts), 3)
+
+    def test_child_receipts_preserve_order_deduplication_and_limit_after_redaction(self):
+        from popot_agents.worker.final_result import retained_receipts
+        from popot_agents.runtime_config import RUNTIME
+        children = {
+            'first': {'role': 'backend_engineer', 'sessionId': 'a'*16, 'answer': 'first secret-test-value',
+                      'outcome': {'evidence': ['first secret-test-value', '', None, 'check passed']}},
+            'second': {'role': 'qa_engineer', 'sessionId': 'b'*16, 'answer': 'second',
+                       'outcome': {'evidence': ['must be truncated']}},
+        }
+        with patch.dict(RUNTIME['memory'], {'tool_evidence_count': 3, 'tool_evidence_chars': 100}), \
+             patch.dict('os.environ', {'GITHUB_PERSONAL_ACCESS_TOKEN': 'secret-test-value'}):
+            receipts = retained_receipts([], children)
+        first = f"Child backend_engineer (sessionId={'a'*16}) reported: "
+        second = f"Child qa_engineer (sessionId={'b'*16}) reported: "
+        self.assertEqual(receipts, [first + 'first [REDACTED]', first + 'check passed', second + 'second'])

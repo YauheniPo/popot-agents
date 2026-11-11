@@ -973,8 +973,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 delegation_key = None
                                 raise ToolInputError('This subtask is already running; use await_tasks for '+
                                                      str(running['session_id'])+' instead of submitting it again')
-                            # Durable children outlive this activation. Reserve
-                            # only the two bounded submission RPC attempts here.
+                            # Durable children outlive this activation. Require
+                            # enough work budget to submit before waiting on them.
                             submission_budget = 10 if run_context is not None else 60
                             if not completed_child and work_seconds() < submission_budget:
                                 if delegation_key in failed_delegations or any(
@@ -1181,10 +1181,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 answer = report['answer']
             except ValueError as exc:
                 invalid_results += 1
-                reason = str(exc)
-                format_error = reason
+                reason = getattr(exc, 'code', str(exc))
+                format_error = str(exc)
                 _trace('final_result_invalid', round=round_number, attempt=invalid_results,
-                       reason=reason, content_chars=len(answer) if isinstance(answer, str) else 0,
+                       reason=reason, **({'detail': exc.detail} if hasattr(exc, 'detail') else {}),
+                       content_chars=len(answer) if isinstance(answer, str) else 0,
                        finish_reason=finish_reason if finish_reason in
                            ('stop', 'length', 'tool_calls', 'content_filter') else 'unknown')
                 # Preserve even the failed correction in the resumable checkpoint.

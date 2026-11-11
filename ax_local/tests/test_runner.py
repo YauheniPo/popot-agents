@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -16,6 +17,71 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_transport_disconnect_recovers_the_same_request_without_resending_work(self):
+        failure = self.runner._command_error('ssh', subprocess.CompletedProcess([], 1, '',
+            'Error: receiving output stream: rpc error: code = Unavailable desc = EOF, '
+            'received prior goaway: code: NO_ERROR'))
+        progress = []
+        with patch.object(self.runner, '_remote_command', side_effect=[
+                failure, failure, {'answer': 'original result'}]) as command, \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            result = self.runner.remote('task', {'action': 'message', 'message': 'publish'},
+                                        timeout=10, on_progress=progress.append)
+        requests = [json.loads(base64.urlsafe_b64decode(call.args[1]))
+                    for call in command.call_args_list]
+        self.assertEqual([p['action'] for p in requests], ['message', 'recover', 'recover'])
+        self.assertEqual(len({p['request_id'] for p in requests}), 1)
+        self.assertTrue(all('message' not in p for p in requests[1:]))
+        self.assertEqual(result['answer'], 'original result')
+        self.assertEqual(json.loads(progress[-1])['event'], 'worker_reconnected')
+        self.assertLessEqual(command.call_args_list[-1].kwargs['timeout'], 10)
+
+    def test_unknown_recovery_does_not_fall_back_to_executing_the_message(self):
+        failure = self.runner._command_error('ssh', subprocess.CompletedProcess([], 1, '',
+            'Error: starting process: rpc error: code = Unavailable'))
+        with patch.object(self.runner, '_remote_command', side_effect=[failure,
+                {'error': 'result unavailable', 'error_type': 'RecoveryUnavailable'}]) as command, \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            result = self.runner.remote('task', {'action': 'message', 'message': 'publish'}, timeout=3)
+        self.assertEqual(result['error_type'], 'RecoveryUnavailable')
+        self.assertEqual(command.call_count, 2)
+
+    def test_message_recovery_is_bounded_by_the_original_deadline(self):
+        clock = [0]
+
+        def disconnect(*args, **kwargs):
+            clock[0] = 11
+            raise self.runner._command_error('ssh', subprocess.CompletedProcess([], 1, '',
+                'Error: receiving output stream: rpc error: code = Unavailable'))
+
+        with patch.object(self.runner, '_remote_command', side_effect=disconnect) as command, \
+             patch('ax_local.api.ax_runner.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('ax_local.api.ax_runner.time.sleep') as sleep:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.runner.remote('task', {'action': 'message', 'message': 'publish'}, timeout=10)
+        command.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_application_errors_are_not_retried_as_network_failures(self):
+        failure = self.runner._command_error('ssh', subprocess.CompletedProcess([], 1, '',
+            'Error: permission denied'))
+        with patch.object(self.runner, '_remote_command', side_effect=failure) as command:
+            with self.assertRaises(AgentRunError):
+                self.runner.remote('task', {'action': 'message', 'message': 'publish'})
+        command.assert_called_once()
+
+    def test_upload_restarts_before_consume_without_appending_duplicate_chunks(self):
+        failure = self.runner._command_error('ssh', subprocess.CompletedProcess([], 1, '',
+            'rpc error: code = Unavailable'))
+        with patch.object(self.runner, '_remote_command', side_effect=[failure,
+                {'status': 'ok'}, {'status': 'ok'}, {'answer': 'done'}]) as command, \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            result = self.runner.remote('task', {'action': 'message', 'message': 'я' * 20000}, timeout=3)
+        actions = [call.args[1] for call in command.call_args_list]
+        self.assertEqual(actions, ['--chunk', '--chunk', '--chunk', '--consume'])
+        self.assertEqual(command.call_args_list[0].args[2:], command.call_args_list[1].args[2:])
+        self.assertEqual(result['answer'], 'done')
+
     def test_stream_failure_keeps_bounded_redacted_stderr_and_does_not_retry(self):
         from ax_local.api.delegation import _worker_failure
         secret = 'fixture-stream-capability'
@@ -301,6 +367,21 @@ class AxRunnerTests(unittest.TestCase):
             self.assertEqual(chat.send("again"), {"answer": "hello"})
         self.assertEqual(remote.call_args_list[0].args[1]["action"], "restore")
         self.assertEqual(remote.call_args_list[1].args[1]["message"], "again")
+
+    def test_worker_timeout_keeps_its_cause_without_replaying_the_message(self):
+        from ax_local.api.delegation import _worker_failure
+        chat = AxChat(self.runner, "popot-chat-0123456789abcdef", 12)
+        with patch.object(self.runner, "remote", return_value={
+                "error": "Worker operation timed out (TimeoutExpired)",
+                "error_type": "TimeoutExpired"}) as remote:
+            with self.assertRaisesRegex(AgentRunError, "TimeoutExpired") as caught:
+                chat.send("continue")
+        remote.assert_called_once()
+        _, failure = _worker_failure(caught.exception, 'worker_message')
+        self.assertEqual(failure['diagnostic']['reason'], 'TimeoutExpired')
+        self.assertEqual(failure['diagnostic']['task'], chat.container_name)
+        self.assertNotIn('command', failure['diagnostic'])
+        self.assertEqual(chat._messages, [])
 
     def test_chat_passes_shortened_turn_budget_to_worker(self):
         chat = AxChat(self.runner, "popot-chat-0123456789abcdef", 900)

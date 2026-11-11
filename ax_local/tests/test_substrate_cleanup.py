@@ -34,7 +34,13 @@ class SubstrateCleanupTests(unittest.TestCase):
         self.assertEqual(patched.count('popotBeginWorkloadOperation'),3)
         self.assertEqual(patched.count('actorUID), false)'),2)
         self.assertEqual(patched.count('actorUID), true)'),1)
+        self.assertEqual(patched.count('popotWorkloadHasNoState'), 1)
+        self.assertIn('return &ateletpb.TerminateResponse{}, nil', patched)
+        self.assertLess(patched.index('defer releaseLifecycle()', patched.index('func (s *AteomHerder) Terminate(')),
+                        patched.index('popotWorkloadHasNoState'))
         self.assertEqual(substrate_cleanup.patch_lifecycle(patched),patched)
+        legacy = patched.replace(substrate_cleanup.EMPTY_ACTOR_GUARD, '')
+        self.assertEqual(substrate_cleanup.patch_lifecycle(legacy), patched)
         with self.assertRaises(ValueError):substrate_cleanup.patch_lifecycle('unsupported source')
 
     def test_retry_guard_wraps_only_termination_rpc(self):

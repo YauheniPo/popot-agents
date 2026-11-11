@@ -1,8 +1,13 @@
 import io
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -12,6 +17,60 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class WorkerDelegationTests(unittest.TestCase):
+    def test_network_recovery_retries_the_same_durable_submission(self):
+        tools = make_tools({'AX_DELEGATION_URL': 'http://api:8005',
+                            'AX_DELEGATION_TOKEN': 'test-capability',
+                            'AX_DELEGATION_ROLES': '["backend_engineer"]'})
+        message_ids = []
+
+        async def reconnect(request):
+            message_ids.append(json.loads(request.content)['params']['message']['messageId'])
+            if len(message_ids) <= 3:
+                raise httpx.ReadError('connection dropped after accepting the request', request=request)
+            return httpx.Response(200, json={'jsonrpc': '2.0', 'id': 1, 'result': {'task': {
+                'id': 'c' * 16, 'contextId': 'parent', 'status': {'state': 'TASK_STATE_WORKING'},
+                'metadata': {'durable': True}}}})
+
+        with patch('httpx.AsyncHTTPTransport.handle_async_request', side_effect=reconnect), \
+             patch('ax_local.worker.delegation.asyncio.sleep', new_callable=AsyncMock):
+            result = json.loads(tools['delegate_task']['call'](
+                {'role': 'backend_engineer', 'task': 'publish the fix'},
+                timeout_seconds=5, call_id='same-submission'))
+        self.assertTrue(result['pending'])
+        self.assertEqual(result['sessionId'], 'c' * 16)
+        self.assertEqual(len(message_ids), 4)
+        self.assertEqual(len(set(message_ids)), 1)
+
+    def test_network_recovery_stops_at_its_deadline(self):
+        tools = make_tools({'AX_DELEGATION_URL': 'http://api:8005',
+                            'AX_DELEGATION_TOKEN': 'test-capability',
+                            'AX_DELEGATION_ROLES': '["backend_engineer"]'})
+        started = time.monotonic()
+        with patch('httpx.AsyncHTTPTransport.handle_async_request',
+                   side_effect=httpx.ReadError('network unavailable')) as send:
+            result = json.loads(tools['delegate_task']['call'](
+                {'role': 'backend_engineer', 'task': 'publish'},
+                timeout_seconds=.05, call_id='short-budget'))
+        self.assertTrue(result['isError'])
+        self.assertLess(time.monotonic() - started, 2)
+        send.assert_called_once()
+
+    def test_harness_delegation_is_isolated_from_existing_workspace_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = Path(directory) / 'artifacts'
+            artifacts.mkdir()
+            existing = artifacts / 'existing-report.log'
+            content = b'x' * 26000
+            existing.write_bytes(content)
+            result = subprocess.run([sys.executable, '-m', 'pytest',
+                'ax_local/tests/test_worker_delegation.py::WorkerDelegationTests::'
+                'test_harness_passes_child_answer_back_to_parent_model', '-q'],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ | {'TOOL_WORKSPACE_ROOT': directory},
+                capture_output=True, text=True, timeout=30, check=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(existing.read_bytes(), content)
+
     def test_completed_child_preserves_attributed_observations(self):
         from a2a.types import a2a_pb2 as types
         from ax_local.worker.delegation import delegated_result

@@ -47,6 +47,16 @@ func (r *runsc) popotListContainers(ctx context.Context) ([]string, error) {
 }
 '''
 
+EMPTY_ACTOR_GUARD = '''\temptyActor, err := popotWorkloadHasNoState(ateompath.ActorPath(actorUID))
+\tif err != nil {
+\t\treturn nil, err
+\t}
+\tif emptyActor {
+\t\ts.systemInfoVolumes.Deregister(actorUID)
+\t\treturn &ateletpb.TerminateResponse{}, nil
+\t}
+'''
+
 
 def patch_runsc(source: str) -> str:
     for operation in ('state', 'delete'):
@@ -105,11 +115,16 @@ def patch_lifecycle(source: str) -> str:
         # gofmt expands the error block; accept only our exact installed guard.
         formatted = guard.replace('if err != nil { return nil, err }',
                                   'if err != nil {\n\t\treturn nil, err\n\t}')
-        if guard in body or formatted in body:
-            continue
-        if body.count(anchor) != 1 or 'popotBeginWorkloadOperation' in body:
-            raise ValueError('Unexpected Substrate lifecycle guard')
-        source = source[:start] + body.replace(anchor,anchor+guard,1) + source[end:]
+        if guard not in body and formatted not in body:
+            if body.count(anchor) != 1 or 'popotBeginWorkloadOperation' in body:
+                raise ValueError('Unexpected Substrate lifecycle guard')
+            body = body.replace(anchor, anchor + guard, 1)
+        if name == 'Terminate' and EMPTY_ACTOR_GUARD not in body:
+            anchor = '\tdefer releaseLifecycle()\n'
+            if body.count(anchor) != 1 or 'popotWorkloadHasNoState' in body:
+                raise ValueError('Unexpected empty actor cleanup guard')
+            body = body.replace(anchor, anchor + EMPTY_ACTOR_GUARD, 1)
+        source = source[:start] + body + source[end:]
     return source
 
 
@@ -246,7 +261,9 @@ def main():
     updated = patch_lifecycle(patch_terminate(source))
     helper = Path(__file__).with_name('cleanup_go')
     helper_names = ('popot_cleanup.go','popot_cleanup_test.go',
-                    'popot_workload_lifecycle.go','popot_workload_lifecycle_test.go')
+                    'popot_workload_lifecycle.go','popot_workload_lifecycle_test.go',
+                    'popot_empty_actor.go','popot_empty_actor_test.go',
+                    'popot_empty_actor_rpc_test.go')
     for name in helper_names:
         target = main_file.with_name(name)
         content = (helper / name).read_text()
@@ -281,7 +298,9 @@ def main():
     for name in helper_names:
         main_file.with_name(name).write_text((helper / name).read_text())
     run(['gofmt','-w',str(main_file)])
-    run(['go', 'test', *helper_names], cwd=main_file.parent)
+    run(['go', 'test', *[name for name in helper_names if name != 'popot_empty_actor_rpc_test.go']],
+        cwd=main_file.parent)
+    run(['go', 'test', '.', '-run', '^TestPopotTerminate', '-count=1'], cwd=main_file.parent)
     arch = run(['go', 'env', 'GOARCH'], capture_output=True).stdout.strip()
     env['KO_DEFAULTPLATFORMS'] = 'linux/' + arch
     ldflags = '-X=github.com/agent-substrate/substrate/internal/version.Version=popot-cleanup-' + PIN[:12]

@@ -28,7 +28,7 @@ ci = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "ax_local/tests"]
-addopts = "--import-mode=importlib"
+addopts = "--import-mode=importlib -rs"
 junit_family = "xunit2"
 
 [tool.coverage.run]

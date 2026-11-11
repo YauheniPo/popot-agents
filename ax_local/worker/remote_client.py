@@ -40,21 +40,32 @@ def call(encoded: str) -> dict:
 def main(args: list[str]) -> None:
     if len(args) == 1:
         result = call(args[0])
-    elif len(args) in {2, 3} and args[0] in {"--chunk", "--consume"}:
+    elif len(args) in {2, 3, 4} and args[0] in {"--chunk", "--consume"}:
         request_id = args[1]
         if not re.fullmatch(r"[0-9a-f]{32}", request_id):
             raise ValueError("invalid AX request ID")
         # Transport fragments are temporary, not part of the durable workspace.
         path = os.path.join(REQUEST_DIRECTORY, f'.ax-local-request-{request_id}')
-        if args[0] == "--chunk" and len(args) == 3:
-            if not re.fullmatch(r"[A-Za-z0-9_=-]{1,48000}", args[2]):
+        if args[0] == "--chunk" and len(args) in {3, 4}:
+            chunk = args[-1].encode('ascii')
+            if not re.fullmatch(rb"[A-Za-z0-9_=-]{1,48000}", chunk):
                 raise ValueError("invalid AX request chunk")
-            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+            if len(args) == 4 and not re.fullmatch(r'[0-9]{1,10}', args[2]):
+                raise ValueError('invalid AX chunk offset')
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(path, flags, 0o600)
             try:
-                if os.fstat(fd).st_size + len(args[2]) > MAX_ENCODED_REQUEST_BYTES:
+                size = os.fstat(fd).st_size
+                offset = int(args[2]) if len(args) == 4 else size
+                if offset > size:
+                    raise ValueError('AX chunk offset is past the received request')
+                if offset + len(chunk) > MAX_ENCODED_REQUEST_BYTES:
                     raise ValueError("AX request is too large")
-                os.write(fd, args[2].encode("ascii"))
+                previous = os.pread(fd, min(len(chunk), size - offset), offset)
+                if previous != chunk[:len(previous)]:
+                    raise ValueError('AX request chunk differs from the received request')
+                if os.pwrite(fd, chunk, offset) != len(chunk):
+                    raise OSError('incomplete AX request chunk')
             finally:
                 os.close(fd)
             result = {"status": "ok"}

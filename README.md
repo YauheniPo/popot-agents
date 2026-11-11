@@ -56,6 +56,8 @@ worker containers through Docker or provides a separate API entrypoint.
 Run local tests with `python -m pytest`.
 Install test and runtime dependencies with `python -m pip install --group ci`
 (requires pip 25.1 or newer).
+Pytest prints skip reasons by default. The shared root `conftest.py` gives both
+Python suites a separate tool workspace for each test.
 
 ## CI and code quality
 
@@ -303,7 +305,12 @@ TASK="$(cat <<'TASK_TEXT'
 TASK_TEXT
 )" ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
-
+```bash
+TASK="$(cat <<'TASK_TEXT'
+https://github.com/YauheniPo/popot-agents/pull/59 подготовь к merge и sonarqube все порешай
+TASK_TEXT
+)" ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
+```
 The closing `TASK_TEXT` marker must stand alone, without indentation, and must not
 occur as a separate line inside the request. Command substitution (`$(...)`)
 removes trailing newlines; the remaining text is preserved.

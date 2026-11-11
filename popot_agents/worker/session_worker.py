@@ -1,9 +1,12 @@
 """One long-lived conversation process inside one Docker chat container."""
 
+import hashlib
 import json
 import os
+import re
 import socket
 import socketserver
+import subprocess
 import sys
 import time
 
@@ -94,9 +97,12 @@ def serve(*, extra_tools: dict | None = None) -> None:
     else:
         answer = lambda messages, **options: answer_with_cli(messages, role_config.get("instructions", ""), **options)
     conversation = Conversation(answer)
+    last_reply = None
 
     class Handler(socketserver.StreamRequestHandler):
         def handle(self) -> None:
+            nonlocal last_reply
+            cache_reply = False
             try:
                 payload = json.loads(self.rfile.readline(RUNTIME["limits"]["socket_message_bytes"]))
                 if not isinstance(payload, dict):
@@ -104,6 +110,19 @@ def serve(*, extra_tools: dict | None = None) -> None:
                 if payload.get("action") == "ping":
                     result = {"status": "ok"}
                 elif payload.get("action") == "message":
+                    request_id = payload.get('request_id')
+                    if 'request_id' in payload and (
+                            not isinstance(request_id, str) or not re.fullmatch(r'[a-f0-9]{32}', request_id)):
+                        raise ValueError('invalid worker request ID')
+                    fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+                    if request_id and last_reply and last_reply[0] == request_id:
+                        if last_reply[1] != fingerprint:
+                            raise ValueError('worker request ID was already used with different input')
+                        self.wfile.write(last_reply[2])
+                        return
+                    # One serial conversation needs only its latest result.
+                    last_reply = None
+                    cache_reply = request_id is not None
                     def notify(message):
                         try:
                             self.wfile.write((json.dumps({'progress': message}, ensure_ascii=False) + '\n').encode())
@@ -120,6 +139,15 @@ def serve(*, extra_tools: dict | None = None) -> None:
                             result['interventionIds'] = harness_state.get('intervention_ids', [])
                             if result['outcome']['status'] in {'partial', 'blocked', 'failed'}:
                                 result['checkpoint'] = harness_state
+                elif payload.get('action') == 'recover':
+                    request_id = payload.get('request_id')
+                    if not isinstance(request_id, str) or not re.fullmatch(r'[a-f0-9]{32}', request_id):
+                        raise ValueError('invalid worker request ID')
+                    if last_reply and last_reply[0] == request_id:
+                        self.wfile.write(last_reply[2])
+                        return
+                    result = {'error': 'Worker result is unavailable; reconcile effects before retrying',
+                              'error_type': 'RecoveryUnavailable'}
                 elif payload.get("action") == "restore":
                     checkpoint = payload.get('checkpoint', {})
                     if not isinstance(checkpoint, dict) or len(json.dumps(checkpoint, ensure_ascii=False).encode()) > MAX_HISTORY_BYTES:
@@ -127,14 +155,30 @@ def serve(*, extra_tools: dict | None = None) -> None:
                     conversation.restore(payload.get("messages"))
                     harness_state.clear()
                     harness_state.update(checkpoint)
+                    last_reply = None
                     _trace("session_restored", turns=len(conversation.messages) // 2)
                     result = {"status": "ok"}
                 else:
                     result = {"error": "unknown action"}
+            except subprocess.TimeoutExpired:
+                _trace("worker_error", error_type="TimeoutExpired")
+                # The subprocess may already have changed external state. Return
+                # the cause without exposing its command or replaying the turn.
+                result = {"error": "Worker operation timed out (TimeoutExpired); "
+                          "reconcile partial effects before retrying",
+                          "error_type": "TimeoutExpired"}
             except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
                 _trace("worker_error", error_type=type(exc).__name__)
                 result = {"error": str(exc)}
-            self.wfile.write((json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"))
+            reply = (json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8")
+            if cache_reply:
+                # Save immutable bytes before delivery: a lost observer cannot
+                # turn an already executed request into another execution.
+                last_reply = (request_id, fingerprint, reply)
+            try:
+                self.wfile.write(reply)
+            except OSError:
+                pass  # The response remains available to a reconnecting client.
 
     with socketserver.UnixStreamServer(SOCKET_PATH, Handler) as server:
         _trace("worker_ready", session_mode=os.getenv("HARNESS_SESSION_MODE", "cli"))

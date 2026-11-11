@@ -211,13 +211,8 @@ class TurnMemory:
         if len(self.tools) < RUNTIME["memory"]["trace_tool_limit"]:
             self.tools.append({'name': name[:200], 'status': 'error' if is_error else 'success',
                                'output_chars': len(output)})
-        if name.startswith('mcp__cognee__'):
+        if name.startswith('mcp__cognee__') or is_error:
             return
-        try:
-            if json.loads(output).get('isError'):
-                return
-        except (ValueError, AttributeError, TypeError):
-            pass
         self.evidence[call_id] = scrub(output)[:RUNTIME["memory"]["tool_evidence_chars"]]
         while len(self.evidence) > RUNTIME["memory"]["tool_evidence_count"] + 1:
             del self.evidence[next(key for key in self.evidence if key != 'user')]

@@ -17,6 +17,37 @@ TASK = 'Review https://github.com/Owner/Repo/pull/68'
 
 
 class TurnMemoryTests(unittest.TestCase):
+    def test_observed_tool_results_keep_trace_status_and_only_eligible_evidence(self):
+        outputs = [('plain output', False), ('{invalid', False), ('[]', False),
+                   ('null', False), ('false', False), ('1', False), ('"text"', False),
+                   ('{}', False), ('{"isError": false}', False), ('{"isError": 0}', False),
+                   ('{"isError": null}', False), ('{"isError": []}', False),
+                   ('{"isError": true}', True), ('{"isError": "failed"}', True),
+                   ('{"isError": 1}', True), ('{"isError": ["failed"]}', True)]
+        for name in ('bash', 'mcp__cognee__recall'):
+            for output, is_error in outputs:
+                with self.subTest(name=name, output=output), patch.dict(os.environ, ENV, clear=True):
+                    memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=Mock())
+                    memory.observe('call', name, {}, output)
+                    self.assertEqual(memory.tools, [{'name': name,
+                        'status': 'error' if is_error else 'success', 'output_chars': len(output)}])
+                    expected = {'user': TASK}
+                    if name == 'bash' and not is_error:
+                        expected['call'] = output
+                    self.assertEqual(memory.evidence, expected)
+
+    def test_observed_evidence_stays_bounded_after_the_tool_trace_is_full(self):
+        with patch.dict(os.environ, ENV, clear=True), \
+             patch.dict(RUNTIME['memory'], {'trace_tool_limit': 1, 'tool_evidence_count': 2}):
+            memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=Mock())
+            for call_id in ('first', 'second', 'third'):
+                memory.observe(call_id, 'bash', {}, call_id + ' private-password')
+            memory.observe('error', 'bash', {}, '{"isError": true}')
+            self.assertEqual(memory.evidence, {'user': TASK,
+                'second': 'second [REDACTED]', 'third': 'third [REDACTED]'})
+            self.assertEqual(memory.tools, [{'name': 'bash', 'status': 'success',
+                                            'output_chars': len('first private-password')}])
+
     def test_automatic_continuation_keeps_authorized_memory_project(self):
         from popot_agents.orchestrator.workflow import WorkflowRun
         workflow = WorkflowRun(RUNTIME['workflow'], TASK)

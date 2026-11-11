@@ -20,7 +20,7 @@ from a2a.utils.proto_utils import validate_proto_required_fields
 
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.progress import forward_progress, is_progress_message
+from popot_agents.progress import forward_progress, is_progress_message, format_progress
 from popot_agents.tools import ToolInputError
 
 
@@ -193,13 +193,22 @@ class DelegationRequest:
             params.message.metadata.update({'timeout_seconds': self.deadline - time.monotonic()})
             return await transport.send_message(params, context=context)
 
-        try:
-            return await self.invoke(send)
-        except (A2AClientError, asyncio.TimeoutError) as exc:
-            # Retry transport failures with the same message ID to deduplicate side effects.
-            if not isinstance(exc, asyncio.TimeoutError) and not isinstance(exc.__cause__, httpx.RequestError):
-                raise
-            return await self.invoke(send)
+        attempt = 0
+        while True:
+            try:
+                return await self.invoke(send)
+            except (A2AClientError, asyncio.TimeoutError) as exc:
+                # The server deduplicates this message ID, including acceptance
+                # whose response was lost. Never ask the model to resubmit it.
+                if not isinstance(exc, asyncio.TimeoutError) and not isinstance(exc.__cause__, httpx.RequestError):
+                    raise
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                attempt += 1
+                forward_progress(format_progress('delegation_reconnecting', attempt=attempt,
+                                                 target_role=self.arguments['role']))
+                await asyncio.sleep(min(2, .5 * attempt, remaining))
 
     async def poll(self, task, transport):
         self.task_id = task.id
