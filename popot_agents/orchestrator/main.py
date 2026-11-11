@@ -155,10 +155,6 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
         if "description" in config and (not isinstance(config["description"], str)
                 or not config["description"].strip() or len(config["description"]) > 1000):
             raise ValueError(f"role {name} has invalid description")
-        try:
-            load_skill_instructions(config.get("skills", []))
-        except ValueError as exc:
-            raise ValueError(f"role {name} has invalid skills: {exc}") from exc
         allowed_roles = config.get("allowed_roles", [])
         if not isinstance(allowed_roles, list) or any(
                 not isinstance(target, str) or target not in roles or target == name
@@ -197,6 +193,10 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
             raise ValueError(f"role {name} has an unknown tool")
         if tools and agents[agent].session_mode != "http":
             raise ValueError(f"role {name} needs an HTTP agent for built-in tools")
+        try:
+            load_skill_instructions(config.get("skills", []), include_references='bash' not in tools)
+        except ValueError as exc:
+            raise ValueError(f"role {name} has invalid skills: {exc}") from exc
         permissions = config.get("permissions", {})
         if not isinstance(permissions, dict) or set(permissions) - {"workspace", "shell", "internet"}:
             raise ValueError(f"role {name} has invalid permissions")

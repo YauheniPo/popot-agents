@@ -9,7 +9,6 @@ import os
 import ssl
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import tempfile
 import time
@@ -59,23 +58,15 @@ def manifests(config):
                          'kind': 'Role', 'name': 'holmes-ax-reader'},
              'subjects': [{'kind': 'ServiceAccount', 'name': 'holmes', 'namespace': NAMESPACE}]},
         ])
-    tools = []
-    columns = ','.join([
-        'NAME:.metadata.name', 'PHASE:.status.phase', 'CONTAINERS:.spec.containers[*].name',
-        'READY:.status.containerStatuses[*].ready', 'RESTARTS:.status.containerStatuses[*].restartCount',
-        'WAITING:.status.containerStatuses[*].state.waiting.reason',
-        'TERMINATED:.status.containerStatuses[*].state.terminated.reason',
-        'LAST_REASON:.status.containerStatuses[*].lastState.terminated.reason',
-        'LAST_EXIT:.status.containerStatuses[*].lastState.terminated.exitCode',
-        'LAST_FINISHED:.status.containerStatuses[*].lastState.terminated.finishedAt',
-        'CPU_REQUEST:.spec.containers[*].resources.requests.cpu',
-        'CPU_LIMIT:.spec.containers[*].resources.limits.cpu',
-        'MEMORY_REQUEST:.spec.containers[*].resources.requests.memory',
-        'MEMORY_LIMIT:.spec.containers[*].resources.limits.memory',
-    ])
+    tools = [{
+        'name': 'ax_pods',
+        'description': 'Read timestamped JSON pod observations. Container readiness and current state '
+                       'are separate from previous termination and cumulative restart_count. '
+                       'Resource requests/limits are configuration, not utilization. Null means unknown.',
+        'command': 'python /etc/popot-holmes/pod_evidence.py {{ namespace }}',
+        'parameters': {'namespace': {'type': 'string', 'enum': list(namespaces)}},
+    }]
     for name, description, command in [
-        ('ax_pods', 'Read AX pod readiness, restarts, termination reasons and resources.',
-         'get pods -o ' + shlex.quote('custom-columns=' + columns)),
         ('ax_events', 'Read recent Kubernetes events for AX pods.',
          'get events --sort-by=.lastTimestamp -o json'),
         ('ax_pod_logs', 'Read the last 200 log lines of an AX pod container.',
@@ -105,6 +96,7 @@ def manifests(config):
                     'metadata': {'name': 'holmes-ax', 'namespace': NAMESPACE},
                     'data': {'tools.json': json.dumps(toolsets), 'kubeconfig.json': json.dumps(kubeconfig),
                              'runner.py': (ROOT / 'ax_local/holmes/runner.py').read_text(),
+                             'pod_evidence.py': (ROOT / 'ax_local/holmes/pod_evidence.py').read_text(),
                              'settings.json': json.dumps({
                                  **json.loads((ROOT / 'config/holmes.json').read_text()),
                                  'prompts': {name: render_prompt('holmes/' + name)

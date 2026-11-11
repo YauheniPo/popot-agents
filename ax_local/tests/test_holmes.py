@@ -16,6 +16,12 @@ TEST_MODEL = 'selected-free-combo'
 
 
 class HolmesTests(unittest.TestCase):
+    def test_api_build_context_includes_the_mounted_holmes_sources(self):
+        root = Path(__file__).resolve().parents[2]
+        rules = (root / 'ax_local/docker/api.Dockerfile.dockerignore').read_text().splitlines()
+        for required in ('!ax_local/cluster/holmes.py', '!ax_local/holmes/', '!ax_local/holmes/**'):
+            self.assertIn(required, rules)
+
     def test_prompt_templates_are_delivered_with_job_settings(self):
         from popot_agents.prompts import render_prompt
         data = next(o for o in manifests(CONFIG) if o['kind'] == 'ConfigMap')['data']
@@ -35,6 +41,7 @@ class HolmesTests(unittest.TestCase):
             (target/'config').mkdir()
             (target/'ax_local/holmes').mkdir(parents=True)
             (target/'ax_local/holmes/runner.py').write_text('runner')
+            (target/'ax_local/holmes/pod_evidence.py').write_text('pod reader')
             settings=json.loads((root/'config/holmes.json').read_text())
             settings.update(active_deadline_seconds=180,ttl_seconds_after_finished=3600,max_steps=5)
             settings['resources']['limits']['memory']='1Gi'
@@ -181,7 +188,10 @@ class HolmesTests(unittest.TestCase):
         self.assertEqual({t['name'] for t in tools}, {
             'ax_pods', 'ax_events', 'ax_pod_logs', 'ax_previous_pod_logs'})
         for tool in tools:
-            self.assertTrue(tool['command'].startswith('kubectl --request-timeout=20s -n {{ namespace }} '))
+            if tool['name'] == 'ax_pods':
+                self.assertEqual(tool['command'], 'python /etc/popot-holmes/pod_evidence.py {{ namespace }}')
+            else:
+                self.assertTrue(tool['command'].startswith('kubectl --request-timeout=20s -n {{ namespace }} '))
             self.assertEqual(tool['parameters']['namespace']['enum'], list(scope(CONFIG)))
             self.assertNotIn('--all-namespaces', tool['command'])
             self.assertNotIn('script', tool)
@@ -190,10 +200,9 @@ class HolmesTests(unittest.TestCase):
         configmap = next(o for o in manifests(CONFIG) if o['kind'] == 'ConfigMap')
         tools = json.loads(configmap['data']['tools.json'])['ax/pods']['tools']
         command = next(t['command'] for t in tools if t['name'] == 'ax_pods')
-        self.assertIn('custom-columns=', command)
-        for field in ('restartCount', 'lastState.terminated.reason', 'resources.limits.memory'):
-            self.assertIn(field, command)
-        self.assertNotIn('-o json', command)
+        self.assertEqual(command, 'python /etc/popot-holmes/pod_evidence.py {{ namespace }}')
+        reader = configmap['data']['pod_evidence.py']
+        self.assertEqual(reader, (Path(__file__).resolve().parents[2] / 'ax_local/holmes/pod_evidence.py').read_text())
 
     def test_job_uses_pinned_model_and_secret_without_host_credentials(self):
         job = investigation_job('Check AX pods', TEST_MODEL)

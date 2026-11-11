@@ -138,7 +138,9 @@ class CogneeMemoryTests(unittest.TestCase):
                   'agent_model': 'openrouter/free', 'references': ['https://github.com/a/b/pull/70'],
                   'trust': 'historical; verify', 'memories': [
                       {'kind': 'decision', 'text': 'PR #70 uses a 60-second retry for HTTP 429.',
-                       'source': 'call-private-id', 'evidence_quote': 'RETRY_SECONDS = 60'}]}
+                       'source': 'call-private-id', 'evidence_quote': 'RETRY_SECONDS = 60',
+                       'provenance': {'tool': 'source-reader', 'source_type': 'observation',
+                                      'observed_at': '2026-10-10T11:45:06+00:00'}}]}
         self.memory.remember(json.dumps(record), 'project-a')
         _, headers, body = self.calls[-1]
         message = BytesParser(policy=default).parsebytes(
@@ -146,7 +148,7 @@ class CogneeMemoryTests(unittest.TestCase):
         parts = {p.get_param('name', header='content-disposition'): p.get_payload(decode=True).decode()
                  for p in message.iter_parts()}
         self.assertIn('60-second retry for HTTP 429', parts['data'])
-        for value in ('2026-10-10', 'openrouter/free', 'call-private-id', 'evidence_quote'):
+        for value in ('2026-10-10', 'openrouter/free', 'call-private-id', 'evidence_quote', 'source-reader'):
             self.assertNotIn(value, parts['data'])
         metadata = json.loads(parts['external_metadata'])[0]['popot_memory']
         self.assertEqual(metadata['record'], record)

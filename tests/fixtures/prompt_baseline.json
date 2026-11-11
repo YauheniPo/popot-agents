@@ -80,7 +80,7 @@
     "sha256": "ba4a5532ba77b121ef50fda37198b4a5a7eeedf477636f0af9bd435308b9b4de"
   },
   "memory/extract": {
-    "sha256": "9868d9db322dba4bc4c72fe05792231ef1042da0ea920a7cd2c199efac77c7eb",
+    "sha256": "94d1d9988ee89da744b9d477109d8e5e3c72ca40d4cabff127d5f44fdc1873bf",
     "values": {
       "max_memories": 5
     }
@@ -143,9 +143,9 @@
     }
   },
   "holmes/diagnosis": {
-    "sha256": "9aeb11bca5ebc74441e338b7ffb230af34c750cb6bade97f48503323f67356df"
+    "sha256": "00889dcb3216270d15a9868493e6c2cc905b0df01845f6c5061f767b4ad047ab"
   },
   "holmes/final_report": {
-    "sha256": "bef5856e281efb2d556d3d5e16024fe1533dc4adb33bc4e7c8ff960584909a9b"
+    "sha256": "f0c58a99bdfcba37bad8fa03769f66ccebca22cc90ff7dd3120f91d41d9be4f5"
   }
 }

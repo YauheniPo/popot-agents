@@ -100,6 +100,17 @@ tool logs are not persisted. Known credentials are redacted before extraction;
 items containing redactions are rejected. This does not make notes infallible:
 agents must still verify historical claims against current sources.
 
+Capture tracks each tool source's name, inspection kind and observation time in
+`evidence_sources` and retains that provenance with accepted memories. This time
+records when the runtime received the output; source timestamps and query ranges
+still determine its freshness. `project_inspect(kind=holmes)` is secondary model
+analysis: extraction sees that label, and the runtime rejects all memories citing
+it even if the quote matches. A successful Holmes Job does not verify its prose.
+Operational notes must preserve missing metrics (`no_data`) and uncertainty;
+missing samples do not establish zero usage or wasted resources. The quote gate
+checks provenance and quotation, not the semantic truth of every statement.
+Existing records are not reclassified or deleted automatically.
+
 The adapter sends statement text as the document and stores the original record
 in Cognee's native `external_metadata.popot_memory` (format version 2). The
 native `labels` field supplies a readable title. Provenance is excluded from

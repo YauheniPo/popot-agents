@@ -8,6 +8,19 @@ from unittest.mock import patch
 
 
 class PromptConfigTests(unittest.TestCase):
+    def test_operator_reports_require_primary_sources_and_metric_scope(self):
+        from popot_agents.prompts import render_prompt
+        role = json.loads((Path(__file__).resolve().parents[1] / 'config/roles/project_operator.json').read_text())
+        for prompt in (role['instructions'], render_prompt('holmes/diagnosis')):
+            for text in ('25m', 'exit code', 'requests/limits', 'utilization', 'timestamp'):
+                self.assertIn(text, prompt)
+        for text in ('no_data', 'source_type=analysis', 'warm_workers', 'connection count'):
+            self.assertIn(text, role['instructions'])
+        extraction = render_prompt('memory/extract', max_memories=5)
+        self.assertIn('evidence_sources', extraction)
+        self.assertIn('analysis', extraction)
+        self.assertIn('no_data', extraction)
+
     def test_cached_child_reconciliation_requires_an_explicit_assignment_link(self):
         from popot_agents.prompts import render_prompt
         instructions = render_prompt('delegation/instructions', role='planner', review_routing='', description='')
