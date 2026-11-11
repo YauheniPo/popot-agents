@@ -212,42 +212,29 @@ class AxAgentRunner:
         deadline = time.monotonic() + timeout
         recovering, attempt = False, 0
         while True:
-            remaining = self._remote_remaining(deadline, timeout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout)
             try:
-                result = self._remote_payload(
-                    task_name,
+                result = self._remote_payload(task_name,
                     {'action': 'recover', 'request_id': request_id} if recovering else payload,
                     remaining, on_progress=on_progress)
             except AxCommandError as exc:
-                recovering, attempt = self._remote_recovery(exc, attempt, deadline, timeout, on_progress)
+                if 'rpc error: code = Unavailable' not in exc.diagnostic.get('stderr', ''):
+                    raise
+                recovering = not getattr(exc, 'request_not_sent', False)
+                attempt += 1
+                if on_progress:
+                    on_progress(format_progress('worker_reconnecting', attempt=attempt,
+                                                reason='ax_transport_unavailable'))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout) from exc
+                time.sleep(min(2, .5 * attempt, remaining))
                 continue
             if attempt and not result.get('error') and on_progress:
                 on_progress(format_progress('worker_reconnected', attempt=attempt))
             return result
-
-    @staticmethod
-    def _remote_remaining(deadline: float, timeout: int) -> float:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout)
-        return remaining
-
-    @staticmethod
-    def _remote_recovery(exc: AxCommandError, attempt: int, deadline: float, timeout: int,
-                         on_progress=None) -> tuple:
-        """Return the recovery state for the next attempt or re-raise a non-transport error."""
-        if 'rpc error: code = Unavailable' not in exc.diagnostic.get('stderr', ''):
-            raise exc
-        recovering = not getattr(exc, 'request_not_sent', False)
-        attempt += 1
-        if on_progress:
-            on_progress(format_progress('worker_reconnecting', attempt=attempt,
-                                        reason='ax_transport_unavailable'))
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout) from exc
-        time.sleep(min(2, .5 * attempt, remaining))
-        return recovering, attempt
 
     def _remote_payload(self, task_name: str, payload: dict, timeout: int = 60, *, on_progress=None) -> dict:
         raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
@@ -687,7 +674,13 @@ class AxChat:
                 raise
 
         while True:
-            phase, reason = self._probe_phase(budget, diagnostic)
+            budget(AX_CONFIG['probe_timeout_seconds'])
+            try:
+                phase, reason = self.runner.task_status(self.container_name,
+                    timeout=budget(AX_CONFIG['probe_timeout_seconds']))
+            except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
+                diagnostic['probe_error_type'] = type(exc).__name__
+                phase, reason = None, None
             if phase:
                 diagnostic.update(phase=phase, reason=reason)
             if phase == 'Suspended':
@@ -696,38 +689,21 @@ class AxChat:
             if phase == 'Running' or (phase == 'Failed' and reason in {
                     'ActorSuspendFailed', 'AtespaceCreationFailed'}):
                 if time.monotonic() >= retry_at:
-                    retry_at, retry_delay = self._retry_suspend(budget, diagnostic, retry_delay)
+                    # Substrate resumes the same in-progress snapshot on a retry.
+                    # Repeating suspend never starts a model turn or replays tools.
+                    emit_progress('snapshot_suspend_retry', mode=self.runner.snapshot_mode)
+                    try:
+                        self.runner._run('suspend', 'task', self.container_name,
+                            timeout=budget(AX_CONFIG['cli_timeout_seconds']))
+                    except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
+                        diagnostic['retry_error_type'] = type(exc).__name__
+                    retry_at = time.monotonic() + retry_delay
+                    retry_delay = min(retry_delay * 2, 30)
             elif phase in {'Failed', 'Completed', 'Terminating'}:
-                raise self._suspension_failure(diagnostic)
+                failure = AgentRunError('AX suspension could not be confirmed')
+                failure.diagnostic = diagnostic
+                raise failure
             time.sleep(budget(AX_CONFIG['startup_probe_interval_seconds']))
-
-    def _probe_phase(self, budget, diagnostic):
-        """One bounded status probe, recording transport errors instead of failing."""
-        budget(AX_CONFIG['probe_timeout_seconds'])
-        try:
-            return self.runner.task_status(self.container_name,
-                timeout=budget(AX_CONFIG['probe_timeout_seconds']))
-        except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
-            diagnostic['probe_error_type'] = type(exc).__name__
-            return None, None
-
-    def _retry_suspend(self, budget, diagnostic, retry_delay):
-        """Retry the suspend once; return the next retry time and backoff delay."""
-        # Substrate resumes the same in-progress snapshot on a retry.
-        # Repeating suspend never starts a model turn or replays tools.
-        emit_progress('snapshot_suspend_retry', mode=self.runner.snapshot_mode)
-        try:
-            self.runner._run('suspend', 'task', self.container_name,
-                timeout=budget(AX_CONFIG['cli_timeout_seconds']))
-        except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
-            diagnostic['retry_error_type'] = type(exc).__name__
-        return time.monotonic() + retry_delay, min(retry_delay * 2, 30)
-
-    def _suspension_failure(self, diagnostic):
-        """The error raised for an AX state that cannot be suspended."""
-        failure = AgentRunError('AX suspension could not be confirmed')
-        failure.diagnostic = diagnostic
-        return failure
 
     def resume(self, *, timeout_seconds: float | None = None) -> None:
         with self._close_lock:
