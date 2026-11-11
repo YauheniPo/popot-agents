@@ -64,8 +64,9 @@ def test_await_children_rejects_a_mismatched_child_role(tmp_path):
                   'failed_delegations': [[('qa_engineer', 'alias'),
                                           {'pending': True, 'session_id': child}]]}
     worker = SimpleNamespace(get_checkpoint=lambda: checkpoint, runner=None)
+    deadline = time.monotonic() + 5
     with pytest.raises(AgentRunError, match='Pending child role mismatch'):
-        service.await_children(parent, worker, [], time.monotonic() + 5)
+        service.await_children(parent, worker, [], deadline)
 
 
 def test_child_begin_stops_when_the_workflow_budget_is_exhausted(tmp_path):

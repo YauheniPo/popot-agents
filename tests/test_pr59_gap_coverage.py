@@ -163,3 +163,12 @@ def test_timeout_without_workflow_reraises(tmp_path):
     with pytest.raises(subprocess.TimeoutExpired):
         run_root(server, SESSION, record, 'publish once', None, role_config={}, delegation=None)
     assert worker.closes == 1
+
+
+def test_partial_outcome_without_checkpoint_stops_the_workflow():
+    workflow = WorkflowRun({**POLICY, 'total_seconds': 60}, 'publish once')
+    result = workflow.record({'outcome': {'status': 'partial', 'evidence': ['patch saved'],
+                                          'remaining_work': ['finish review'], 'errors': []}},
+                            None)
+    assert result['outcome']['reason'] == 'workflow_checkpoint_unavailable'
+    assert workflow.meta['state'] == 'blocked'
