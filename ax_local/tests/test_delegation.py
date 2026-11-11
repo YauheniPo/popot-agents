@@ -832,6 +832,11 @@ class DelegationTests(unittest.TestCase):
             event.get('agent_session_id') == self.runner.chats[0].session_id for event in events))
         self.assertTrue(any(event.get('name') == 'mcp__github__pull_request_read' and
             event.get('agent_session_id') == self.runner.chats[1].session_id for event in events))
+        parent_id, child_id = (chat.session_id for chat in self.runner.chats)
+        for event in events:
+            self.assertEqual(event['root_session_id'], self.parent)
+            self.assertEqual(event['parent_session_id'],
+                             parent_id if event['agent_session_id'] == child_id else self.parent)
         self.assertNotIn('PRIVATE', json.dumps(received))
         wait_for(lambda: not self.service.jobs)
         self.assertTrue(all(chat.closed for chat in self.runner.chats))
@@ -932,6 +937,7 @@ class DelegationTests(unittest.TestCase):
             for index in range(10):
                 self.service._record_progress(job, json.dumps({
                     'event': 'assistant_reasoning', 'agent_role': 'qa_engineer', 'agent_session_id': 'd'*16,
+                    'root_session_id': 'a' * 16, 'parent_session_id': 'b' * 16,
                     'reasoning_details': [{'text': '🧪\\"\n' * 5000}], 'index': index}, ensure_ascii=False))
         self.assertTrue(job.activity)
         self.assertLessEqual(len(json.dumps(list(job.activity)).encode()), 2048)
@@ -939,6 +945,8 @@ class DelegationTests(unittest.TestCase):
         event = json.loads(job.activity[-1]['message'])
         self.assertEqual(event['agent_role'], 'qa_engineer')
         self.assertEqual(event['agent_session_id'], 'd'*16)
+        self.assertEqual(event['root_session_id'], 'a' * 16)
+        self.assertEqual(event['parent_session_id'], 'b' * 16)
         self.assertTrue(event['truncated'])
 
 

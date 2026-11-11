@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from popot_agents.tools import TOOL_SCHEMAS
-from popot_agents.progress import is_progress_message, emit_progress, observe_progress, format_progress, TurnProgress
+from popot_agents.progress import is_progress_message, emit_progress, observe_progress, format_progress, scoped_progress, TurnProgress
 from popot_agents.role_env import validate_role_env_names
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.skills import load_skill_instructions
@@ -424,7 +424,20 @@ def create_server(
                 return getattr(live.worker, "workspace_path", None)
             return None
 
+        def _begin_progress(self, session_id, *, role=None, role_config=None) -> None:
+            meta = (role_config or {}).get('_ax_delegation', {})
+            self._progress_scope = {'role': role, 'session_id': session_id,
+                'root_session_id': meta.get('root_session_id') or session_id,
+                'parent_session_id': meta.get('parent_session_id')}
+            emit_progress('accepted')
+
         def _progress(self, message: str, *, finished: bool = False) -> None:
+            scope = getattr(self, '_progress_scope', None) or {}
+            message = scoped_progress(scope.get('role'), message,
+                session_id=scope.get('session_id'), root_session_id=scope.get('root_session_id'),
+                parent_session_id=scope.get('parent_session_id'))
+            if message is None:
+                return
             if progress := getattr(self, '_turn_progress', None):
                 progress.update(message, finished=finished)
             if (sid := getattr(self, '_work_session_id', None)) and (receipt := evidence_event(message)):
@@ -453,6 +466,8 @@ def create_server(
                 self._progress_broken = True
 
         def _reply(self, status: int, payload: dict) -> None:
+            if getattr(self, '_wants_progress', False) and getattr(self, '_progress_scope', None) is None:
+                self._begin_progress(payload.get('sessionId'), role=payload.get('role'))
             if getattr(self, '_stream_started', False) or getattr(self, '_turn_progress', None):
                 self._progress(format_progress('completed' if status < 400 else 'failed', status=status), finished=True)
             if getattr(self, '_stream_started', False):
@@ -622,6 +637,7 @@ def create_server(
                                   if 'disableDelegation' in payload else {}),
                                **({'requestId': payload['requestId']} if 'requestId' in payload else {})})
                 return
+            self._begin_progress(None, role=role, role_config=role_config)
             result = agents[agent](task.strip(), role_config) if role_config else agents[agent](task.strip())
             if role_config:
                 result = {**result, "role": role, "agent": agent}
@@ -652,6 +668,7 @@ def create_server(
                                 '_disable_delegation': payload.get('disableDelegation', False),
                                 '_workflow': {'request_id': request_id, 'state': 'running',
                                               'original_task': payload.get('message')}}}
+                self._begin_progress(new_session_id, role=payload.get('role'))
                 try:
                     with self.server.session_lock(new_session_id):
                         self._coordinated_message(payload, new_session_id)
@@ -666,6 +683,8 @@ def create_server(
                                       'sessionId': session_id})
                     return
                 saved = self.server.store.get(session_id)
+                self._begin_progress(session_id, role=saved.get('role') if saved else None,
+                                     role_config=saved.get('roleConfig') if saved else None)
                 if saved and 'disableDelegation' in payload and payload['disableDelegation'] != bool(
                         (saved.get('roleConfig') or {}).get('_disable_delegation')):
                     self._reply(409, {'error': 'disableDelegation cannot change for an existing session'})
@@ -919,6 +938,9 @@ def create_server(
             })
 
         def do_POST(self) -> None:
+            self._progress_scope = None
+            self._turn_progress = None
+            self._work_session_id = None
             if self.path not in {"/tasks", "/messages"}:
                 self._log_request(None)
                 self._reply(404, {"error": "not found"})
@@ -930,7 +952,6 @@ def create_server(
                 streaming = self.headers.get('Accept') == 'application/x-ndjson'
                 self._wants_progress = streaming
                 with observe_progress(self._progress):
-                    emit_progress('accepted')
                     if self.path == "/tasks":
                         self._task(payload)
                     else:

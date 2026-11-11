@@ -873,6 +873,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 _trace("assistant_message", round=round_number, content=content)
             messages.append({'role': 'assistant', **message})
             requested_wait = None
+            round_input_errors = set()
             for tool_call in calls:
                 remaining_seconds()
                 name = None
@@ -939,11 +940,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             if not isinstance(arguments.get('task'), str) or not arguments['task'].strip():
                                 raise ToolInputError('delegate_task requires a nonempty task')
                             assignment = arguments['task'].strip()
-                            revision = arguments.pop('revision', None)
+                            revision = arguments.get('revision')
                             if revision is not None:
                                 if not isinstance(revision, str) or len(revision) != 40 or any(c not in '0123456789abcdefABCDEF' for c in revision):
-                                    raise ToolInputError('revision must be a full commit SHA')
+                                    raise ToolInputError('revision must be a full commit SHA (40 hexadecimal characters). '
+                                                         'Copy the exact value from git rev-parse HEAD or PR metadata head.sha.')
                                 arguments['task'] += '\nTarget revision: ' + revision.lower()
+                            arguments.pop('revision', None)
                             session_id = arguments.get('session_id')
                             recovering_child = next((value for value in failed_delegations.values()
                                 if value.get('session_id') == session_id and value.get('role') == arguments['role']
@@ -1114,7 +1117,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     }, ensure_ascii=False)
                     if isinstance(exc, ToolInputError):
                         fingerprint = (name, type(exc).__name__, str(exc)[:400])
-                        input_errors[fingerprint] = input_errors.get(fingerprint,0)+1
+                        if fingerprint not in round_input_errors:
+                            input_errors[fingerprint] = input_errors.get(fingerprint,0)+1
+                            round_input_errors.add(fingerprint)
                         if getattr(exc,'retryable',None) is False or input_errors[fingerprint] >= RUNTIME['workflow']['max_no_progress']:
                             structural_blocker = str(exc)
                 except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:

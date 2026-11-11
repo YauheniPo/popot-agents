@@ -299,19 +299,7 @@ passed literally:
 
 ```bash
 TASK="$(cat <<'TASK_TEXT'
-[P2] Реальный таймаут всё ещё может оборвать ход агента без сохранения состояния.
-В http_harness.py:711 (https://github.com/YauheniPo/popot-agents/blob/ee38d42fe128968ebd2c03a78e56b10730071984/popot_agents/worker/http_harness.py#L711) вспомогательное чтение получает весь остаток времени.
-
-При допустимом бюджете 3 секунды медленное чтение расходует его полностью. TimeoutExpired перехватывается, затем возникает RuntimeError: turn deadline exceeded, который выходит наружу.
-
-Воспроизведено настоящим subprocess timeout:
-
-elapsed: 3.009s
-model_calls: 0
-state: {}
-RuntimeError: turn deadline exceeded
-
-Новые тесты выбрасывают таймаут мгновенно и пропускают этот сценарий. Перед merge нужно сохранить резерв времени либо направить истечение дедлайна в partial с checkpoint и добавить соответствующий тест.
+порезолвь конфликты и подтяни main и запуш в https://github.com/YauheniPo/popot-agents/pull/59
 TASK_TEXT
 )" ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
@@ -493,7 +481,13 @@ The snapshot is capped at 8 tasks and 16 KiB, with explicit truncation markers;
 raw commands, stdout, diffs, prompts and reasoning are excluded.
 
 Progress actions/errors include `observedAt`, sequence and originating
-`agent_session_id`. `eventsAfterLastError` counts subsequent activity and does
+`agent_session_id`. Every streamed progress event also carries `root_session_id`
+for the root session and `parent_session_id` for the source's immediate parent.
+For root events, `agent_session_id` equals `root_session_id` and the parent is
+`null`. IDs remain attached when a nested child's event is forwarded or truncated,
+and are retained in compact progress snapshots. An ID that is not known yet,
+such as on a rejection before session allocation, is `null`.
+`eventsAfterLastError` counts subsequent activity and does
 not establish that the error was resolved. Recoverable delegation-input and
 MCP errors include a short redacted message. The top-level `turns` still counts
 saved conversation answers; `workflow.turns` and each task's `coordinatorTurns`
@@ -505,7 +499,9 @@ authorization from server scope, without nesting prior handoff wrappers. The
 last coordinator turn accepts results instead of starting children. Completed
 implementation requires reviewer and QA receipts for the same observed SHA;
 a newer PR-head read-back invalidates verification of an older revision.
-Repeated identical input errors stop with a blocker and failed tool receipts
+Repeated identical input errors across model responses stop with a blocker;
+duplicates within one response count once so the model can correct its arguments.
+Explicitly non-retryable errors still block immediately. Failed tool receipts
 do not reset the no-progress guard. `delegate_task` returns immediately for
 durable children; the parent continues its own work until `await_tasks` joins
 selected children (`all` or `any`). Child waits resume the same coordinator turn.

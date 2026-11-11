@@ -74,8 +74,8 @@ def _bounded_progress(entry: dict, limit: int) -> dict | None:
                'original_bytes': original_bytes, 'preview': ''}
     if isinstance(native.get('agent_role'), str):
         preview['agent_role'] = native['agent_role'][:128]
-    if isinstance(native.get('agent_session_id'), str):
-        preview['agent_session_id'] = native['agent_session_id'][:128]
+    for key in ('agent_session_id', 'root_session_id', 'parent_session_id'):
+        preview[key] = native[key][:128] if isinstance(native.get(key), str) else None
 
     def truncated(length):
         preview['preview'] = message[:length]
@@ -1049,7 +1049,9 @@ class DelegationService:
                   file=sys.stderr, flush=True)
 
     def _record_progress(self, job: Job, message: str):
-        message = scoped_progress(job.config['_ax_role'], message, session_id=job.session_id)
+        meta = job.config.get('_ax_delegation', {})
+        message = scoped_progress(job.config['_ax_role'], message, session_id=job.session_id,
+            root_session_id=meta.get('root_session_id'), parent_session_id=meta.get('parent_session_id'))
         if message is None:
             return
         event = json.loads(message)
