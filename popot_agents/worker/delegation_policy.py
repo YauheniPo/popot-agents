@@ -16,30 +16,46 @@ class DelegationContextError(ToolInputError):
     retryable = False
 
 
+_GIT_OPERANDS = {'-c', '-C', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'}
+_GH_OPERANDS = {'-R', '--repo', '--hostname'}
+_GIT_GLOBAL_FLAGS = {'--no-pager', '-P', '--paginate', '-p', '--bare', '--no-replace-objects',
+                     '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs',
+                     '--icase-pathspecs', '--no-optional-locks', '--no-lazy-fetch'}
+
+
 def _publication_command(words):
     """Identify git/gh writes after global options, never from argument text."""
     program = os.path.basename(words[0])
-    rest = words[1:]
-    operands = ({'-c', '-C', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'}
-                if program == 'git' else {'-R', '--repo', '--hostname'})
-    flags = {'--no-pager', '-P', '--paginate', '-p', '--bare', '--no-replace-objects',
-             '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs',
-             '--icase-pathspecs', '--no-optional-locks', '--no-lazy-fetch'}
-    while rest and rest[0].startswith('-'):
-        option, separator, _ = rest[0].partition('=')
-        if option in operands:
-            rest = rest[1 if separator else 2:]
-        elif program == 'git' and (rest[0] in flags or separator and option == '--exec-path'
-                                  or rest[0][:2] in {'-c', '-C'} and len(rest[0]) > 2):
-            rest = rest[1:]
-        elif program == 'gh' and rest[0].startswith('-R') and len(rest[0]) > 2:
-            rest = rest[1:]
-        else:
-            return None
+    rest = _after_global_options(program, words[1:])
+    if rest is None:
+        return None
     if program == 'git' and rest and rest[0] in {'commit', 'commit-tree', 'push'}:
         return rest[0]
     if program == 'gh' and rest[:2] in [['pr', 'create'], ['pr', 'merge']]:
         return 'push'
+    return None
+
+
+def _after_global_options(program, rest):
+    """Words after the interpreter's global options, or None for an unknown option."""
+    operands = _GIT_OPERANDS if program == 'git' else _GH_OPERANDS
+    while rest and rest[0].startswith('-'):
+        rest = _global_option_step(program, rest, operands)
+        if rest is None:
+            return None
+    return rest
+
+
+def _global_option_step(program, rest, operands):
+    """Consume one git/gh global option, or report that it is unknown."""
+    option, separator, _ = rest[0].partition('=')
+    if option in operands:
+        return rest[1 if separator else 2:]
+    if program == 'git' and (rest[0] in _GIT_GLOBAL_FLAGS or separator and option == '--exec-path'
+                             or rest[0][:2] in {'-c', '-C'} and len(rest[0]) > 2):
+        return rest[1:]
+    if program == 'gh' and rest[0].startswith('-R') and len(rest[0]) > 2:
+        return rest[1:]
     return None
 
 

@@ -637,13 +637,7 @@ class AxChat:
                 raise
 
         while True:
-            budget(AX_CONFIG['probe_timeout_seconds'])
-            try:
-                phase, reason = self.runner.task_status(self.container_name,
-                    timeout=budget(AX_CONFIG['probe_timeout_seconds']))
-            except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
-                diagnostic['probe_error_type'] = type(exc).__name__
-                phase, reason = None, None
+            phase, reason = self._probe_phase(budget, diagnostic)
             if phase:
                 diagnostic.update(phase=phase, reason=reason)
             if phase == 'Suspended':
@@ -652,21 +646,38 @@ class AxChat:
             if phase == 'Running' or (phase == 'Failed' and reason in {
                     'ActorSuspendFailed', 'AtespaceCreationFailed'}):
                 if time.monotonic() >= retry_at:
-                    # Substrate resumes the same in-progress snapshot on a retry.
-                    # Repeating suspend never starts a model turn or replays tools.
-                    emit_progress('snapshot_suspend_retry', mode=self.runner.snapshot_mode)
-                    try:
-                        self.runner._run('suspend', 'task', self.container_name,
-                            timeout=budget(AX_CONFIG['cli_timeout_seconds']))
-                    except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
-                        diagnostic['retry_error_type'] = type(exc).__name__
-                    retry_at = time.monotonic() + retry_delay
-                    retry_delay = min(retry_delay * 2, 30)
+                    retry_at, retry_delay = self._retry_suspend(budget, diagnostic, retry_delay)
             elif phase in {'Failed', 'Completed', 'Terminating'}:
-                failure = AgentRunError('AX suspension could not be confirmed')
-                failure.diagnostic = diagnostic
-                raise failure
+                raise self._suspension_failure(diagnostic)
             time.sleep(budget(AX_CONFIG['startup_probe_interval_seconds']))
+
+    def _probe_phase(self, budget, diagnostic):
+        """One bounded status probe, recording transport errors instead of failing."""
+        budget(AX_CONFIG['probe_timeout_seconds'])
+        try:
+            return self.runner.task_status(self.container_name,
+                timeout=budget(AX_CONFIG['probe_timeout_seconds']))
+        except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
+            diagnostic['probe_error_type'] = type(exc).__name__
+            return None, None
+
+    def _retry_suspend(self, budget, diagnostic, retry_delay):
+        """Retry the suspend once; return the next retry time and backoff delay."""
+        # Substrate resumes the same in-progress snapshot on a retry.
+        # Repeating suspend never starts a model turn or replays tools.
+        emit_progress('snapshot_suspend_retry', mode=self.runner.snapshot_mode)
+        try:
+            self.runner._run('suspend', 'task', self.container_name,
+                timeout=budget(AX_CONFIG['cli_timeout_seconds']))
+        except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
+            diagnostic['retry_error_type'] = type(exc).__name__
+        return time.monotonic() + retry_delay, min(retry_delay * 2, 30)
+
+    def _suspension_failure(self, diagnostic):
+        """The error raised for an AX state that cannot be suspended."""
+        failure = AgentRunError('AX suspension could not be confirmed')
+        failure.diagnostic = diagnostic
+        return failure
 
     def resume(self, *, timeout_seconds: float | None = None) -> None:
         with self._close_lock:
