@@ -71,6 +71,10 @@
 Email для входа — `admin@localhost`; пароль — значение
 `PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD`. Это initial password: его изменение
 в конфиге не сбрасывает пароль уже существующего пользователя.
+Для прямого чтения Phoenix ролью `project_operator` используется отдельный
+пользователь `VIEWER` и его API key в `PHOENIX_API_KEY`. Этот ключ передаётся
+worker через `env_names`; `PHOENIX_ADMIN_SECRET` служит экспорту в API.
+Встроенный MCP и его инструменты описаны в [AX operations](../ax_local/README.md#project-operator-единая-роль-для-анализа-проекта).
 
 ```bash
 bash compose.sh --env-file .env -f evals/compose.yaml up -d

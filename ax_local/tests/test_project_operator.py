@@ -60,6 +60,8 @@ class OperatorBoundaryTests(unittest.TestCase):
         server = start_a2a_server(self.service,'127.0.0.1',0)
         self.addCleanup(server.server_close)
         tools = make_tools({**self.environment,'AX_DELEGATION_URL':self.service.base_url})
+        kinds = tools['project_inspect']['schema']['function']['parameters']['properties']['kind']['enum']
+        self.assertNotIn('phoenix', kinds)
         self.assertEqual(set(tools),{'project_inspect','project_propose_change','project_apply_change'})
         self.assertEqual(make_tools({}),{})
         call = tools['project_inspect']['call']
@@ -473,6 +475,8 @@ class OperatorInspectionTests(unittest.TestCase):
             self.assertEqual(self.ops.inspect('metrics', {'query': 'up'})['observation']['availability'], 'unknown')
 
     def test_metrics_models_memory_and_sessions_use_only_their_bounded_read_routes(self):
+        with self.assertRaisesRegex(ValueError, 'unknown inspection'):
+            self.ops.inspect('phoenix', {'view': 'spans'})
         with patch.object(self.ops, '_proxy', return_value={'result': 'ok'}) as proxy:
             self.ops.inspect('metrics', {'query': 'up'})
             self.assertIn('/api/v1/query?', proxy.call_args.args[1])
@@ -515,6 +519,7 @@ class OperatorInspectionTests(unittest.TestCase):
         self.assertEqual(overview['ax_api'], {'status': 'ok'})
         self.assertEqual(overview['mcp_gateway'], {'unavailable': True, 'error_type': 'TimeoutError'})
         self.assertEqual(overview['roles'], {'test': {'agent': 'omniroute_free'}})
+        self.assertNotIn('phoenix', overview)
         self.assertEqual(overview['worker_pool']['warm_workers'], 4)
         self.assertEqual(overview['worker_pool']['max_workers'], 12)
         self.assertEqual(overview['worker_pool']['source_type'], 'configuration')
@@ -562,6 +567,20 @@ class OperatorInspectionTests(unittest.TestCase):
 
 
 class OperatorRoleTests(unittest.TestCase):
+    def test_phoenix_access_uses_native_read_tools_with_its_own_key(self):
+        root = Path(__file__).resolve().parents[2]
+        role = json.loads((root / 'config/roles/project_operator.json').read_text())
+        self.assertEqual(role['mcpServers']['phoenix'], {
+            'url': 'http://host.docker.internal:6006/mcp',
+            'bearer_token_env': 'PHOENIX_API_KEY',
+            'tools': ['describeGraphqlSchema', 'executeGraphqlQuery'],
+        })
+        self.assertIn('PHOENIX_API_KEY', role['env_names'])
+        self.assertNotIn('kind=phoenix', role['instructions'])
+        self.assertIn('root_session_id', role['instructions'])
+        self.assertIn('pagination', role['instructions'])
+        self.assertNotIn('PHOENIX_ADMIN_SECRET', role['env_names'])
+
     def test_operator_uses_shared_free_route_without_changing_other_roles(self):
         root=Path(__file__).resolve().parents[2]
         roles={path.stem:json.loads(path.read_text()) for path in (root/'config/roles').glob('*.json')}
