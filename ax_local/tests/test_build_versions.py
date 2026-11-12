@@ -24,6 +24,7 @@ SERVICE_PINS = {
     'GO_IMAGE': 'golang:1.28.0-bookworm',
     'NODE_IMAGE': 'node:24-alpine@sha256:' + 'e' * 64,
     'WORKER_NODE_IMAGE': 'node:24-bookworm-slim@sha256:' + 'f' * 64,
+    'PHOENIX_IMAGE': 'arizephoenix/phoenix:version-99.0.0@sha256:' + 'a' * 64,
 }
 PINS += ''.join(f'{key} = "{value}"\n' for key, value in SERVICE_PINS.items())
 

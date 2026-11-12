@@ -12,9 +12,11 @@
 | [agents.json](agents.json) | Профили провайдеров, endpoint, имя переменной модели, параметры запросов |
 | [roles/](roles/) | Роли, инструкции, инструменты, память, делегирование, Harness² и бюджеты выполнения |
 | [prompts/](prompts/) | Markdown-шаблоны общих инструкций: делегирование, ревью, отчёт, память, Harness2, skills и Holmes |
-| [runtime.json](runtime.json) | Роль MCP по умолчанию (`mcp.default_role`), лимиты координации (`workflow`), общие таймауты, ограничения сообщений/инструментов, память и разрешённые имена env |
+| [runtime.json](runtime.json) | Роль MCP по умолчанию (`mcp.default_role`), лимиты координации (`workflow`), общие таймауты, ограничения сообщений/инструментов и доказательств, разрешённые имена env |
 | [../ax_local/config.json](../ax_local/config.json) | Контекст kind, namespace/workers, ресурсы AX Task, прокси и backend сессий |
-| [../pyproject.toml](../pyproject.toml) | Версии образов и зависимостей, включая OmniRoute, Cognee, Holmes, Grafana и kube-state-metrics |
+| [../evals/config.json](../evals/config.json) | Phoenix, baseline и `x-tracing`: постоянный проект трейсов AX, endpoint, очередь и повторы доставки |
+| [../memory/config.json](../memory/config.json) | Сервисы Cognee, UI и шлюза; `x-agent`: recall/capture, summary, журнал и таймауты памяти |
+| [../pyproject.toml](../pyproject.toml) | Версии образов и зависимостей, включая Phoenix, OmniRoute, Cognee, Holmes, Grafana и kube-state-metrics |
 
 Каждая роль хранится в `roles/<название_роли>.json`, например `roles/planner.json`.
 Имя роли берётся из имени файла. В JSON лежат только её настройки (`agent`,
@@ -58,6 +60,36 @@
 ## Применение изменений
 
 Все команды выполняются из корня репозитория; для AX нужен Python 3.11+.
+
+**Phoenix** — секреты `PHOENIX_SECRET`, `PHOENIX_ADMIN_SECRET` и
+`PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD` задаются в корневом `.env`.
+Настройки сервиса находятся в `evals/config.json`, образ с digest —
+в `pyproject.toml → tool.popot.build.PHOENIX_IMAGE`.
+`x-tracing` в том же JSON управляет постоянным экспортом всех рабочих ролей
+в отдельный проект. После его изменения пересоберите API/worker через
+`bash ax_local/rebuild-worker.sh`; подробности — в [гайде](../evals/README.md#постоянные-трейсы-ax).
+Email для входа — `admin@localhost`; пароль — значение
+`PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD`. Это initial password: его изменение
+в конфиге не сбрасывает пароль уже существующего пользователя.
+
+```bash
+bash compose.sh --env-file .env -f evals/compose.yaml up -d
+```
+
+**Cognee** — после правок `memory/config.json → services`:
+
+```bash
+bash memory/up.sh
+```
+
+Оба Compose-файла подключают соседний `config.json` штатным `extends`.
+Пароли остаются в корневом `.env`. Параметры интеграции агентов с Cognee,
+включая таймауты `memory_*`, находятся в `memory/config.json → x-agent`.
+После их изменения пересоберите worker/API/MCP через `bash ax_local/rebuild-worker.sh`
+и начните новую сессию. Для прямых Python-запусков другой файл выбирается
+через `POPOT_MEMORY_CONFIG` до старта процесса.
+Общие `tool_evidence_chars` и `tool_evidence_count` остаются в `runtime.json → limits`:
+они используются и для итоговых отчётов при отключённом Cognee.
 
 **Мониторинг** — после правок `monitoring.json`:
 
@@ -110,8 +142,9 @@ bash ax_local/rebuild-worker.sh
 bash ax_local/up.sh
 ```
 
-Топология Docker, публикация портов и healthchecks остаются в
-`ax_local/compose.yaml` и `memory/compose*.yaml`; Grafana публикуется port-forward
+Топология Docker и хранилища остаются в `ax_local/compose.yaml`,
+`memory/compose*.yaml` и `evals/compose.yaml`. Порты и healthchecks памяти,
+параметры Phoenix вынесены в соседние `config.json`; Grafana публикуется port-forward
 на `127.0.0.1:3002`. PVC и данные сервисов сохраняются отдельно от JSON.
 Определение панелей Grafana остаётся в `ax_local/cluster/resource_dashboard.py`.
 

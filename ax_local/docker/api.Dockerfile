@@ -69,6 +69,8 @@ COPY ax_local/cluster/holmes.py ax_local/cluster/build_versions.py /app/ax_local
 COPY ax_local/holmes /app/ax_local/holmes
 COPY pyproject.toml /app/pyproject.toml
 COPY config /app/config
+COPY memory/config.json /app/memory/config.json
+COPY evals/config.json /app/evals/config.json
 ENV PYTHONPATH=/app
 EXPOSE 8002
 CMD ["python", "-u", "-m", "ax_local.api.server"]

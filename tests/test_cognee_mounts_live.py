@@ -21,6 +21,7 @@ class CogneeMountTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         paths = {'popot_agents/runtime_config.py': '/app/popot_agents/runtime_config.py',
                  'config/runtime.json': '/app/config/runtime.json',
+                 'memory/config.json': '/app/popot-sync/config.json',
                  'memory/import_skills.py': '/app/popot-sync/import_skills.py'}
         code = ('from pathlib import Path; import hashlib,json; print(json.dumps('
                 '{name:hashlib.sha256(Path(path).read_bytes()).hexdigest() for name,path in '

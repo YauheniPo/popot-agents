@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from collections import deque
 from dataclasses import dataclass, field
@@ -1081,8 +1081,18 @@ class DelegationService:
     def _execute(self, job: Job):
         # Each child owns its observer; parent clients read only their authorized
         # Task's bounded activity through the existing A2A polling transport.
-        with observe_progress(lambda message: self._record_progress(job, message)):
-            self._execute_observed(job)
+        tracer = getattr(self, 'tracer', None)
+        meta = job.config.get('_ax_delegation', {})
+        with (tracer.session(job.session_id, job.config['_ax_role'], job.config,
+                parent_session_id=meta.get('parent_session_id')) if tracer else nullcontext()) as span:
+            def record(message):
+                if span:
+                    span.event(message)
+                self._record_progress(job, message)
+            with observe_progress(record):
+                self._execute_observed(job)
+            if span:
+                span.result({'outcome': meta.get('outcome', {'status': 'failed'})})
 
     def _execute_observed(self, job: Job):
         answer, issue, failure = None, None, None

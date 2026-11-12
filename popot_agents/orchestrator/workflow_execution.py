@@ -4,7 +4,7 @@ import subprocess
 import time
 from contextlib import ExitStack
 
-from popot_agents.progress import emit_progress, trace_event, redact_text
+from popot_agents.progress import emit_progress, trace_event, redact_text, observe_progress, progress_observer
 from popot_agents.runtime_config import RUNTIME
 from .errors import AgentRunError
 from .workflow import include_interventions
@@ -167,7 +167,17 @@ def run_root(server, session_id, record, message, workflow=None, *, role_config=
     """
     execution = _RootExecution(server, session_id, record, message, workflow, role_config, delegation)
     scope = ExitStack()
+    traced = None
     try:
+        tracer = getattr(server, 'tracer', None)
+        if tracer:
+            traced = scope.enter_context(tracer.session(session_id, record.role, execution.config or {}))
+            previous = progress_observer()
+            def trace_progress(message):
+                traced.event(message)
+                if previous:
+                    previous(message)
+            scope.enter_context(observe_progress(trace_progress))
         if workflow and delegation:
             scope.enter_context(delegation.workflow(session_id, workflow.deadline,
                 max_turns=workflow.policy['max_turns'], metadata=workflow.meta))
@@ -194,6 +204,8 @@ def run_root(server, session_id, record, message, workflow=None, *, role_config=
             raise
     finally:
         # Root cleanup must finish before closing the delegation scope.
+        if traced and 'result' in locals():
+            traced.result(result)
         scope.close()
     return result
 

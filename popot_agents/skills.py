@@ -84,6 +84,8 @@ def prepare_role_config(role_config: dict | None) -> dict:
     """Snapshot skills once at worker startup; safe to pass to a harness again."""
     prepared = dict(role_config or {})
     selected = prepared.pop("skills", [])
+    if selected:
+        prepared['_loaded_skills'] = list(selected)
     instructions = load_skill_instructions(selected,
         include_references='bash' not in prepared.get('tools', []))
     if instructions:

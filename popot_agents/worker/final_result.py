@@ -125,8 +125,8 @@ def _tool_receipt(message, name, chars):
 
 def retained_receipts(messages, completed_children, observations=()):
     """Receipts are attributed observations, never proof of whole-task completion."""
-    limit = RUNTIME['memory']['tool_evidence_count']
-    chars = RUNTIME['memory']['tool_evidence_chars']
+    limit = RUNTIME['limits']['tool_evidence_count']
+    chars = RUNTIME['limits']['tool_evidence_chars']
     receipts = []
     # Check outcomes survive transcript compaction and later file reads. An
     # unbound check remains useful evidence, but cannot verify a specific SHA.

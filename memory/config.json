@@ -1,0 +1,71 @@
+{
+  "x-agent": {
+    "summary_attempts": 2,
+    "summary_max_tokens": 2000,
+    "summary_retry_max_tokens": 4000,
+    "recall_top_k": 8,
+    "task_chars": 8000,
+    "query_chars": 4000,
+    "chunk_chars": 4000,
+    "context_chars": 24000,
+    "answer_chars": 8000,
+    "max_memories": 5,
+    "text_chars": 1600,
+    "quote_chars": 600,
+    "trace_tool_limit": 200,
+    "timeouts": {
+      "memory_request_seconds": 5,
+      "memory_recall_seconds": 20,
+      "memory_session_start_seconds": 15,
+      "memory_session_finish_seconds": 5,
+      "memory_summary_seconds": 30,
+      "memory_capture_min_seconds": 8,
+      "memory_capture_margin_seconds": 5,
+      "memory_recall_min_seconds": 1,
+      "memory_tool_request_seconds": 60,
+      "memory_skill_import_seconds": 600
+    }
+  },
+  "services": {
+    "cognee": {
+      "restart": "unless-stopped",
+      "stop_grace_period": "30s",
+      "entrypoint": ["gunicorn", "--chdir", "/app/popot-sync", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-t", "30000", "--bind", "0.0.0.0:8000", "--log-level", "error", "cognee_app:app"],
+      "environment": {
+        "POPOT_MEMORY_CONFIG": "/app/popot-sync/config.json",
+        "SYSTEM_ROOT_DIRECTORY": "/cognee-storage/system",
+        "DATA_ROOT_DIRECTORY": "/cognee-storage/data",
+        "HF_HOME": "/cognee-storage/system/model-cache/huggingface",
+        "FASTEMBED_CACHE_PATH": "/cognee-storage/system/model-cache/fastembed",
+        "ENABLE_BACKEND_ACCESS_CONTROL": "true",
+        "REQUIRE_AUTHENTICATION": "true",
+        "GRAPH_EXTRACTOR": "gliner_demo",
+        "ONTOLOGY_FILE_PATH": "/app/popot-sync/project-ontology.ttl",
+        "CACHING": "true",
+        "CACHE_BACKEND": "sqlite",
+        "AUTO_FEEDBACK": "false",
+        "IMPROVE_AUTO_ENABLED": "false",
+        "LLM_API_KEY": "",
+        "CORS_ALLOWED_ORIGINS": "http://localhost:3001,http://127.0.0.1:3001",
+        "TELEMETRY_DISABLED": "true"
+      },
+      "healthcheck": {
+        "test": ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).close()"],
+        "interval": "10s",
+        "timeout": "6s",
+        "retries": 30,
+        "start_period": "60s"
+      }
+    },
+    "cognee-web": {
+      "restart": "unless-stopped",
+      "ports": ["127.0.0.1:3001:3001"]
+    },
+    "cognee-ui": {
+      "restart": "unless-stopped",
+      "environment": {
+        "COGNEE_BACKEND_URL": "http://localhost:3001"
+      }
+    }
+  }
+}

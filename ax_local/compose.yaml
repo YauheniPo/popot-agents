@@ -129,6 +129,7 @@ services:
       POPOT_DB_PASSWORD: ${POPOT_DB_PASSWORD:-}
     volumes:
       - ../config:/app/config
+      - phoenix-outbox:/var/lib/popot-traces
       - type: bind
         source: ./.local/kubeconfig-container
         target: /run/ax-local/kubeconfig
@@ -167,6 +168,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  phoenix-outbox:
   omniroute-data:
   omniroute-tls:
   ax-postgres:
