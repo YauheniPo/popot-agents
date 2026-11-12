@@ -97,6 +97,12 @@ jobs:
         # the SARIF upload so findings are always published, and it does not write
         # gitguardian.sarif, which stays owned by the path scan.
         uses: GitGuardian/ggshield/actions/secret@4cccd600fd3890a7aba07fd0a45e483f3099fe70 # v1.56.1
+        with:
+          # The pull request range still contains the fixture literal added in
+          # 66d48c9 and removed in 4c40cef (GitGuardian incident 39998695, false
+          # positive). Only secrets already known to the dashboard are skipped;
+          # any new finding in any pushed commit still fails the job.
+          args: --ignore-known-secrets
         env:
           GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
           GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
