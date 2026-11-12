@@ -23,11 +23,13 @@ from dataclasses import dataclass, field
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.artifacts import validate_artifacts
-from popot_agents.work_evidence import evidence_event, child_resolution, MAX_RECEIPTS
+from popot_agents.child_results import ChildResults
+from popot_agents.work_evidence import evidence_event, MAX_RECEIPTS
 from ax_local.config import AX_CONFIG
-from popot_agents.orchestrator.workflow import WorkflowRun, include_interventions
+from popot_agents.orchestrator.workflow import WorkflowRun
+from popot_agents.orchestrator.workflow_execution import run_child
 from popot_agents.workflow_config import role_policy
-from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError
+from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError, WorkerCapacityTimeout
 from popot_agents.progress import emit_progress, observe_progress, scoped_progress, forward_progress
 
 ACTIVE = {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
@@ -107,42 +109,64 @@ def _bounded_activity(activity, budget: int) -> list[dict]:
 
 def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
     """Expose known diagnostics without forwarding arbitrary exception text."""
-    code, reason = "worker_failed", "delegated AX worker failed; inspect local worker logs"
-    if isinstance(exc, subprocess.TimeoutExpired):
-        code, reason = "ax_command_timeout", "AX command timed out"
-    elif isinstance(exc, ConnectionResetError):
-        code, reason = "worker_transport_interrupted", (
-            "AX worker connection reset; reconcile external effects before retrying")
-    elif isinstance(exc, AgentConfigurationError):
-        code, reason = "worker_configuration_failed", "AX worker configuration failed"
-    elif isinstance(exc, AgentRunError):
-        detail = str(exc)
-        model_http = re.fullmatch(r"model endpoint returned HTTP ([0-9]{3})", detail)
-        mcp = re.match(r"MCP server ([a-zA-Z0-9_-]{1,64}) "
-                       r"(failed|timed out) during discovery(?:$|:)", detail)
-        if model_http:
-            code, reason = "model_http_error", model_http[0]
-        elif re.fullmatch(r"(?:\[Errno (?:54|104)\] )?Connection reset by peer", detail):
-            code, reason = "worker_transport_interrupted", (
-                "AX worker connection reset; reconcile external effects before retrying")
-        elif mcp:
-            code = "mcp_discovery_failed"
-            reason = f"MCP server {mcp[1]} {mcp[2]} during discovery"
-        elif 'ActorResumeFailed' in detail:
-            code, reason = 'actor_resume_failed', 'AX actor could not start; inspect physical worker capacity and controller events'
-        elif detail == 'AX task lookup failed':
-            code, reason = 'ax_task_lookup_failed', 'AX task lookup failed; inspect AX API and Kubernetes control plane'
-        elif detail in {"model endpoint is unreachable", "model endpoint returned no answer",
-                        "model endpoint returned an empty answer"}:
-            code, reason = "model_response_failed", detail
+    code, reason = _failure_classification(exc)
     failure = {"stage": stage, "code": code, "error_type": type(exc).__name__}
     diagnostic = getattr(exc, 'diagnostic', None)
     if isinstance(diagnostic, dict):
-        failure['diagnostic'] = {key: diagnostic[key] for key in ('command', 'exit_code', 'stderr', 'task', 'phase', 'reason', 'probe')
-                                 if key in diagnostic}
-        if diagnostic.get('exit_code') and code == 'worker_failed':
-            failure['code'] = 'ax_command_failed'
+        failure['diagnostic'] = _failure_diagnostic(diagnostic, failure)
     return reason, failure
+
+
+_DIAGNOSTIC_FIELDS = ('command', 'exit_code', 'stderr', 'task', 'phase', 'reason', 'probe')
+
+
+def _failure_diagnostic(diagnostic, failure):
+    """Bounded diagnostic fields, promoting a command exit to its own code."""
+    bounded = {key: diagnostic[key] for key in _DIAGNOSTIC_FIELDS if key in diagnostic}
+    if diagnostic.get('exit_code') and failure['code'] == 'worker_failed':
+        failure['code'] = 'ax_command_failed'
+    return bounded
+
+
+def _failure_classification(exc):
+    """Publication-safe code and reason for one worker failure."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "ax_command_timeout", "AX command timed out"
+    if isinstance(exc, WorkerCapacityTimeout):
+        return 'worker_capacity_unavailable', (
+            'AX worker capacity is unavailable; wait for capacity or release a retained session before retrying')
+    if isinstance(exc, ConnectionResetError):
+        return "worker_transport_interrupted", (
+            "AX worker connection reset; reconcile external effects before retrying")
+    if isinstance(exc, AgentConfigurationError):
+        return "worker_configuration_failed", "AX worker configuration failed"
+    if isinstance(exc, AgentRunError):
+        known = _run_error_detail(str(exc))
+        if known:
+            return known
+    return "worker_failed", "delegated AX worker failed; inspect local worker logs"
+
+
+def _run_error_detail(detail):
+    """Known AgentRunError texts as publication-safe codes."""
+    model_http = re.fullmatch(r"model endpoint returned HTTP ([0-9]{3})", detail)
+    if model_http:
+        return "model_http_error", model_http[0]
+    if re.fullmatch(r"(?:\[Errno (?:54|104)\] )?Connection reset by peer", detail):
+        return "worker_transport_interrupted", (
+            "AX worker connection reset; reconcile external effects before retrying")
+    mcp = re.match(r"MCP server ([a-zA-Z0-9_-]{1,64}) "
+                   r"(failed|timed out) during discovery(?:$|:)", detail)
+    if mcp:
+        return "mcp_discovery_failed", f"MCP server {mcp[1]} {mcp[2]} during discovery"
+    if 'ActorResumeFailed' in detail:
+        return 'actor_resume_failed', 'AX actor could not start; inspect physical worker capacity and controller events'
+    if detail == 'AX task lookup failed':
+        return 'ax_task_lookup_failed', 'AX task lookup failed; inspect AX API and Kubernetes control plane'
+    if detail in {"model endpoint is unreachable", "model endpoint returned no answer",
+                  "model endpoint returned an empty answer"}:
+        return "model_response_failed", detail
+    return None
 
 
 class A2AError(ValueError):
@@ -152,6 +176,10 @@ class A2AError(ValueError):
 
 
 class DependencyBlocked(AgentRunError):
+    pass
+
+
+class VerificationBudgetExhausted(AgentRunError):
     pass
 
 
@@ -270,8 +298,53 @@ class DelegationService:
                 'authorization':run.metadata.get('authorization', [run.metadata.get('original_task','')]),
                 'assignments':meta.get('scope_assignments', []),
                 'target_revision':meta.get('revision'),
-                'can_delegate':not grant.config.get('_disable_delegation') and turns < limit,
+                'can_delegate':not grant.config.get('_disable_delegation') and turns <= limit,
+                'budget':{'workflow_seconds_remaining':max(0, run.deadline-time.monotonic()),
+                    'implementation_seconds_remaining':self._implementation_seconds(
+                        run, run.metadata.get('implementationDeadlineAt')),
+                    'verification_reserve_seconds':run.metadata.get('verificationReserveSeconds', 0),
+                    'implementation_limited':self.implementation_remaining(session_id) is not None,
+                    'verification_started':self.verification_completed(run)},
                 'dependency_results':meta.get('dependency_results',[])}
+
+    def verification_completed(self, run):
+        run_id = run.metadata.get('run_id')
+        owner = run.metadata.get('verification_owner') or run.root_id
+        if not run_id or not owner:
+            return False
+        for saved in self.store.list_chats():
+            meta = (saved.get('roleConfig') or {}).get('_ax_delegation', {})
+            outcome = meta.get('outcome', {})
+            if (saved.get('role') in {'code_reviewer', 'qa_engineer'}
+                    and meta.get('run_id') == run_id and meta.get('parent_session_id') == owner
+                    and meta.get('state') == 'TASK_STATE_COMPLETED' and outcome.get('status') == 'completed'
+                    and any(isinstance(item, str) and item.strip() for item in outcome.get('evidence', []))):
+                return True
+        return False
+
+    @staticmethod
+    def _implementation_seconds(run, cutoff):
+        if cutoff is None:
+            return None
+        root_deadline = run.metadata.get('deadlineAt')
+        remaining = (run.deadline-(root_deadline-cutoff)-time.monotonic()
+                     if root_deadline is not None else cutoff-time.time())
+        return max(0, remaining)
+
+    def implementation_remaining(self, session_id):
+        with self.lock:
+            grant = self.grants.get(session_id)
+            if not grant or not grant.run or not grant.run.persistent:
+                return None
+            job = self.jobs.get(session_id)
+            if job:
+                cutoff = job.config['_ax_delegation'].get('implementationDeadlineAt')
+            elif (grant.role in {'backend_engineer', 'frontend_engineer'}
+                    and not grant.config.get('_disable_delegation') and not self.verification_completed(grant.run)):
+                cutoff = grant.run.metadata.get('implementationDeadlineAt')
+            else:
+                cutoff = None
+            return self._implementation_seconds(grant.run, cutoff)
 
     def wait_state(self, session_id):
         with self.lock:
@@ -357,35 +430,12 @@ class DelegationService:
             receipts[sid] = receipt
         updated = json.loads(json.dumps(checkpoint))
         updated.pop('await_tasks',None)
-        failed = []
-        for key, value in updated.get('failed_delegations', []):
-            receipt = receipts.get(value.get('session_id'))
-            if receipt is None:
-                failed.append([key,value]);continue
-            if key[0] != receipt['role']:
-                raise AgentRunError('Pending child role mismatch')
-            if receipt['outcome'].get('status') == 'completed' and value.get('previous_failure'):
-                try:
-                    resolution = child_resolution(value['previous_failure'], receipt, value.get('target_revision'))
-                except RuntimeError as exc:
-                    receipt.update(resumable=False, error=str(exc))
-                    receipt['outcome'] = {**receipt['outcome'], 'status': 'failed',
-                        'reason': 'child_reconciliation_invalid', 'errors': [str(exc)],
-                        'remaining_work': ['Verify the required revision and remaining deliverables']}
-                else:
-                    resolutions = updated.setdefault('resolved_delegations', [])
-                    resolutions.append(resolution)
-                    resolutions[:] = resolutions[-16:]
-            if receipt['outcome'].get('status') != 'completed':
-                failed.append([key,{**value,'pending':False, 'answer':receipt['answer'],
-                    'status':receipt['outcome'].get('status'),
-                    'outcome':receipt['outcome'],'resumable':receipt['resumable'],
-                    'error':receipt.get('error','Child returned incomplete work')}])
-        updated['failed_delegations'] = failed
-        completed = updated.setdefault('completed_delegations', {})
-        for sid, receipt in receipts.items():
-            if receipt['outcome'].get('status') == 'completed':
-                completed[sid] = receipt
+        children = ChildResults(checkpoint)
+        try:
+            receipts = children.deliver_reports(receipts)
+        except ValueError as exc:
+            raise AgentRunError(str(exc)) from exc
+        updated.update(children.snapshot())
         replaced = set()
         for message in updated.get('messages', []):
             if message.get('role') != 'tool':continue
@@ -752,8 +802,8 @@ class DelegationService:
             turns = (job.config['_ax_delegation'].get('workflow',{}).get('turns',0) if job
                      else grant.run.metadata.get('turns',0))
             limit = role_policy(job.config)['max_turns'] if job else grant.run.max_turns
-            if turns >= limit:
-                raise A2AError('The last coordinator turn is reserved for acceptance; no child started')
+            if turns > limit:
+                raise A2AError('Coordinator turn limit exceeded; no child started')
             if grant.run.calls >= grant.run.call_limit:
                 raise A2AError('workflow delegation call limit reached')
             if grant.run.turn_calls >= self.policy['max_calls_per_turn']:
@@ -846,6 +896,17 @@ class DelegationService:
                 *config['_ax_delegation'].get('scope_assignments', []), assignment]))
             config['_ax_delegation']['run_id'] = grant.run.metadata.get('run_id')
             config['_ax_delegation']['verification_owner'] = verification_owner
+            config['_ax_delegation'].pop('implementationDeadlineAt', None)
+            if durable:
+                cutoff = parent_meta.get('implementationDeadlineAt')
+                if cutoff is None and role not in {'code_reviewer', 'qa_engineer'} \
+                        and self.implementation_remaining(grant.session_id) is not None:
+                    cutoff = grant.run.metadata.get('implementationDeadlineAt')
+                if cutoff is None and role in {'backend_engineer', 'frontend_engineer'} \
+                        and not self.verification_completed(grant.run):
+                    cutoff = grant.run.metadata.get('implementationDeadlineAt')
+                if cutoff is not None:
+                    config['_ax_delegation']['implementationDeadlineAt'] = cutoff
             if durable and grant.run.pool is not None:
                 config['_ax_delegation']['pool_reservation'] = grant.run.reservation
             if revision:
@@ -862,6 +923,13 @@ class DelegationService:
                     deadline = min(deadline, time.monotonic() + max(0, prior_deadline - time.time()))
                 deadline = min(deadline, time.monotonic() + role_policy(config)['total_seconds'])
                 remaining = max(0, deadline-time.monotonic())
+                implementation_remaining = self._implementation_seconds(
+                    grant.run, config['_ax_delegation'].get('implementationDeadlineAt'))
+                if implementation_remaining is not None:
+                    if implementation_remaining <= (RUNTIME['timeouts']['turn_response_margin_seconds']
+                                                     + RUNTIME['timeouts']['min_turn_seconds']):
+                        raise A2AError('Initial implementation budget exhausted; start review or QA before corrective work')
+                    remaining = min(remaining, implementation_remaining)
                 estimate = self.setup_estimate(config)
                 reserve = min(RUNTIME['model']['final_answer_reserve_seconds'],
                               remaining / RUNTIME['model']['final_answer_reserve_divisor'])
@@ -937,6 +1005,16 @@ class DelegationService:
         remaining = job.deadline - time.monotonic()
         if job.canceled.is_set() or job.run.canceled.is_set() or remaining <= 0:
             raise TimeoutError("delegation canceled or deadline exceeded")
+        return remaining
+
+    def _startup_remaining(self, job):
+        remaining = self._remaining(job)
+        implementation = self._implementation_seconds(
+            job.run, job.config['_ax_delegation'].get('implementationDeadlineAt'))
+        if implementation is not None:
+            if implementation <= 0:
+                raise VerificationBudgetExhausted()
+            remaining = min(remaining, implementation)
         return remaining
 
     def _save(self, job: Job, state: str, answer: str | None = None, error: str | None = None,
@@ -1015,10 +1093,16 @@ class DelegationService:
                 with job.run.lane_condition:
                     job.waiting_for='capacity'
                     while not self._can_start(job):
-                        job.run.lane_condition.wait(min(.1,self._remaining(job)))
+                        try:
+                            remaining = self._startup_remaining(job)
+                        except TimeoutError:
+                            if job.canceled.is_set() or job.run.canceled.is_set():
+                                raise
+                            raise WorkerCapacityTimeout('Reserved worker capacity deadline exceeded') from None
+                        job.run.lane_condition.wait(min(.1, remaining))
                     job.run.admitted[job.session_id] = job
                     job.waiting_for=None
-            self._remaining(job)
+            self._startup_remaining(job)
             self._save(job, "TASK_STATE_WORKING")
             runner = self.runners[job.config['agent']]
             policy = None if job.config.get('_ax_harness2_probe') else role_policy(job.config)
@@ -1029,58 +1113,17 @@ class DelegationService:
                 job.config['_workflow_coordinator'] = True
                 job.config['timeout_seconds'] = policy['turn_seconds']
             if job.chat is None:
-                job.chat = runner.start_chat(job.session_id, job.config,
-                                             deadline=job.deadline, cancel_event=job.canceled)
+                try:
+                    job.chat = runner.start_chat(job.session_id, job.config,
+                        deadline=time.monotonic()+self._startup_remaining(job), cancel_event=job.canceled)
+                except (TimeoutError, subprocess.TimeoutExpired, AgentRunError):
+                    self._startup_remaining(job)
+                    raise
             stage = "worker_message"
             # Adapters without checkpoint support retain their one-turn contract.
             if not hasattr(job.chat, 'get_checkpoint'):
                 workflow = None
-            message = job.task
-            while True:
-                if workflow:
-                    if workflow.remaining() < RUNTIME['timeouts']['min_turn_seconds']:
-                        result = workflow.stop({'answer': 'No budget remains for another worker turn',
-                                                'outcome': workflow.meta.get('outcome')},
-                                               'workflow_deadline_exhausted')
-                        break
-                    workflow.begin()
-                    job.config['_ax_delegation']['workflow'] = {
-                        'state': 'running', 'turns': workflow.meta['turns']}
-                    self._save(job, 'TASK_STATE_WORKING')
-                emit_progress('turn_started')
-                result = job.chat.send(message, timeout_seconds=min(
-                    self._remaining(job), policy['turn_seconds']) if workflow else self._remaining(job))
-                intervention_ids = list(dict.fromkeys([*intervention_ids, *result.get('interventionIds', [])]))
-                meta = job.config['_ax_delegation']
-                meta['scope_assignments'] = include_interventions(meta.get('scope_assignments', []),
-                    self.store.recent_interventions(job.session_id), intervention_ids)
-                if workflow:
-                    terminal = workflow.record(result, job.chat.get_checkpoint())
-                    job.config['_ax_delegation']['outcome'] = workflow.meta['outcome']
-                    job.config['_ax_delegation']['outcomeRecordedAt'] = workflow.meta['outcomeRecordedAt']
-                    job.config['_ax_delegation']['workflow'] = {
-                        key: workflow.meta[key] for key in ('state', 'turns')}
-                    if terminal is None:
-                        servers = job.config.get('mcpServers', {})
-                        setup_budget = self.setup_estimate(job.config) + RUNTIME['model']['final_answer_reserve_seconds']
-                        if not job.run.persistent and servers and workflow.remaining() <= setup_budget:
-                            result = {**result, 'outcome': {**result['outcome'],
-                                'reason': 'parent_budget_checkpoint',
-                                'remaining_work': [*result['outcome']['remaining_work'],
-                                    'Resume this session on a fresh parent turn; budget cannot cover MCP rediscovery']}}
-                            job.config['_ax_delegation']['workflow']['state'] = 'checkpoint'
-                            break
-                        job.messages += [{'role': 'user', 'content': message},
-                                         {'role': 'assistant', 'content': result['answer']}]
-                        self._save(job, 'TASK_STATE_WORKING')
-                        if job.run.persistent:
-                            self.await_children(job.session_id, job.chat, job.messages, job.deadline)
-                            workflow.meta['checkpoint'] = job.chat.get_checkpoint()
-                        message = workflow.continuation(compact=bool(getattr(job.chat,'supports_run_context',False)))
-                        emit_progress('workflow_checkpoint', turn=workflow.meta['turns'])
-                        continue
-                    result = terminal
-                break
+            result = run_child(self, job, workflow, intervention_ids)
             answer = result['answer']
             outcome = result.get('outcome', {'status': 'completed', 'reason': 'answer_returned'})
             if not isinstance(outcome, dict) or outcome.get('status') not in {'completed', 'partial', 'blocked', 'failed'}:
@@ -1102,6 +1145,26 @@ class DelegationService:
             state, answer = 'TASK_STATE_COMPLETED',str(exc)
             job.config['_ax_delegation']['outcome'] = {'status':'blocked','reason':'dependency_not_completed',
                 'evidence':[],'errors':[str(exc)],'remaining_work':['Resolve the dependency before submitting replacement work']}
+            job.config['_ax_delegation']['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
+        except VerificationBudgetExhausted:
+            state = 'TASK_STATE_COMPLETED'
+            answer = 'Initial implementation window ended before worker execution; verification time remains reserved.'
+            prior = job.config['_ax_delegation'].get('outcome') or (
+                job.chat.get_checkpoint().get('outcome', {})
+                if job.chat and hasattr(job.chat, 'get_checkpoint') else {})
+            next_step = 'Arrange review and QA of available artifacts before requesting corrective implementation'
+            remaining = list(prior.get('remaining_work', []))
+            if next_step not in remaining:
+                remaining.append(next_step)
+            job.config['_ax_delegation']['outcome'] = {**prior, 'status': 'partial', 'reason': 'verification_reserve',
+                'evidence': prior.get('evidence', []), 'errors': prior.get('errors', []), 'remaining_work': remaining}
+            job.config['_ax_delegation']['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
+        except WorkerCapacityTimeout as exc:
+            issue, failure = _worker_failure(exc, stage)
+            state, answer = 'TASK_STATE_COMPLETED', issue
+            job.config['_ax_delegation']['outcome'] = {'status': 'blocked',
+                'reason': failure['code'], 'evidence': [], 'errors': [issue],
+                'remaining_work': ['Wait for worker capacity or release a retained session before retrying']}
             job.config['_ax_delegation']['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
         except TimeoutError:
             state, issue = "TASK_STATE_CANCELED", "delegation canceled or deadline exceeded"
@@ -1147,10 +1210,7 @@ class DelegationService:
                     job.config['_ax_delegation']['outcome'] = outcome
                     job.config['_ax_delegation']['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
                 self._cancel_children(job.session_id)
-                with job.run.lane_condition:
-                    if job.run.admitted.get(job.session_id) is job:
-                        job.run.admitted.pop(job.session_id)
-                    job.run.lane_condition.notify_all()
+                self._release_admission(job)
                 with self.lock:
                     if resumable and not job.chat.closed and not job.canceled.is_set() and not job.run.canceled.is_set():
                         self.retained[job.session_id] = (job.chat, time.monotonic())
@@ -1163,10 +1223,7 @@ class DelegationService:
                             intervention_ids)
                     self.jobs.pop(job.session_id, None)
             finally:
-                with job.run.lane_condition:
-                    if job.run.admitted.get(job.session_id) is job:
-                        job.run.admitted.pop(job.session_id)
-                    job.run.lane_condition.notify_all()
+                self._release_admission(job)
                 with self.lock:
                     if self.jobs.get(job.session_id) is job:
                         self.jobs.pop(job.session_id)
@@ -1174,28 +1231,42 @@ class DelegationService:
     def _can_start(self, job):
         if job.run.pool is None:
             return True
-        active=list(job.run.admitted.values())
-        proposed=[*active,job]
-        names={getattr(item.chat,'container_name',f'popot-chat-{item.session_id}') for item in proposed}
-        retained=job.run.pool.reserved_workers(job.run.reservation)-names
-        slots=job.run.reserved_slots-len(retained)
         depth=len(job.config['_ax_delegation']['lineage'])
-        frontier=max((len(item.config['_ax_delegation']['lineage']) for item in active),default=1)
-        depth_limit=min(self.policy['max_depth']+1,frontier+max(0,slots-len(active)))
+        depth_limit=min(self.policy['max_depth']+1,job.run.reserved_slots+1)
         if depth>depth_limit:
-            raise AgentRunError('Reserved capacity cannot support this nesting depth; no worker started')
-        deepest=max(len(item.config['_ax_delegation']['lineage']) for item in proposed)
+            raise WorkerCapacityTimeout('Reserved capacity cannot support this nesting depth; no worker started')
+        return self._resize_reservation(job.run,[*job.run.admitted.values(),job])
+
+    def _resize_reservation(self, run, jobs):
+        names={getattr(item.chat,'container_name',f'popot-chat-{item.session_id}') for item in jobs}
+        retained=run.pool.reserved_workers(run.reservation)-names
+        depth_limit=min(self.policy['max_depth']+1,run.reserved_slots+1)
+        deepest=max((len(item.config['_ax_delegation']['lineage']) for item in jobs),default=1)
         # Keep a complete path to a leaf available, even while ancestors wait.
         future=max(0,depth_limit-deepest) if any(item.config.get('allowed_roles')
-            for item in proposed if len(item.config['_ax_delegation']['lineage']) == deepest) else 0
-        return len(proposed)+future<=slots
+            for item in jobs if len(item.config['_ax_delegation']['lineage']) == deepest) else 0
+        required=max(run.reserved_slots,len(jobs)+future)+len(retained)
+        return run.pool.resize_reservation(run.reservation,required)
+
+    def _release_admission(self, job):
+        run=job.run
+        with run.lane_condition:
+            if run.admitted.get(job.session_id) is job:
+                run.admitted.pop(job.session_id)
+                if run.pool is not None:
+                    try:
+                        self._resize_reservation(run,list(run.admitted.values()))
+                    except AgentRunError:
+                        if not run.pool.closed:
+                            raise
+            run.lane_condition.notify_all()
 
     def _wait_dependencies(self, job):
         ids=job.config['_ax_delegation'].get('depends_on',[])
         if not ids:return
         job.waiting_for='dependencies'
         while True:
-            self._remaining(job)
+            self._startup_remaining(job)
             reports=[]
             with self.lock:
                 for sid in ids:
@@ -1217,7 +1288,7 @@ class DelegationService:
                 job.config['_ax_delegation']['dependency_results']=reports
                 job.waiting_for=None
                 return
-            with job.run.lane_condition:job.run.lane_condition.wait(min(.1,self._remaining(job)))
+            with job.run.lane_condition:job.run.lane_condition.wait(min(.1,self._startup_remaining(job)))
 
     def _task(self, saved: dict) -> dict:
         meta = saved["roleConfig"]["_ax_delegation"]

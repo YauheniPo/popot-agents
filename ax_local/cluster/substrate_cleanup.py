@@ -128,9 +128,21 @@ def daemonset_patch(ds: dict, image: str) -> list:
         if capability not in added:
             added.append(capability)
     path = f'/spec/template/spec/containers/{index}'
+    probes = []
+    for name in ('livenessProbe', 'readinessProbe'):
+        if name not in container:
+            continue
+        probe = copy.deepcopy(container[name])
+        probe['timeoutSeconds'] = max(5, probe.get('timeoutSeconds', 1))
+        if name == 'livenessProbe':
+            probe['failureThreshold'] = max(6, probe.get('failureThreshold', 3))
+        else:
+            probe['periodSeconds'] = max(5, probe.get('periodSeconds', 10))
+        probes.append({'op': 'add', 'path': path + '/' + name, 'value': probe})
     return [
         {'op': 'test', 'path': '/metadata/resourceVersion', 'value': ds['metadata']['resourceVersion']},
         {'op': 'replace', 'path': path + '/image', 'value': image},
+        *probes,
         {'op': 'add', 'path': path + '/securityContext', 'value': security},
     ]
 
@@ -252,9 +264,12 @@ def main():
     container = next(c for c in items[0]['spec']['template']['spec']['containers']
                      if c['name'] == 'atelet')
     name = items[0]['metadata']['name']
-    desired_security = daemonset_patch(items[0], container['image'])[-1]['value']
+    desired = daemonset_patch(items[0], container['image'])
+    desired_security = desired[-1]['value']
+    probes_current = all(container.get(item['path'].rsplit('/', 1)[-1]) == item['value']
+                         for item in desired[2:-1])
     if (installed.get('version') == version and installed.get('image') == container['image']
-            and container.get('securityContext') == desired_security):
+            and container.get('securityContext') == desired_security and probes_current):
         # Inspect the live DaemonSet rather than trusting a local stamp alone.
         run([*ds_base, 'rollout', 'status', 'daemonset/' + name, '--timeout=300s'])
         print('Local atelet cleanup fix is current; build skipped.', flush=True)

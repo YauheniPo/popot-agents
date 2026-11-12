@@ -5,6 +5,7 @@ import re
 
 from popot_agents.runtime_config import RUNTIME
 from .turn_memory import scrub
+from .verification import validate_findings
 
 
 def evidence_transcript(messages, context=()):
@@ -58,6 +59,10 @@ def parse_result(content, finish_reason=None):
         report['status'] = 'partial'
     if 'revision' in report and (not isinstance(report['revision'], str) or not re.fullmatch(r'[a-f0-9]{40}', report['revision'])):
         raise ValueError('invalid_revision')
+    if 'verification_status' in report and report['verification_status'] not in ('passed', 'failed'):
+        raise ValueError('invalid_verification_status')
+    if 'findings' in report:
+        validate_findings(report['findings'])
     return report
 
 
@@ -94,17 +99,47 @@ def _tool_receipt(message, name, chars):
             + (f' Full output: {artifact[1]}' if artifact else ''))
 
 
-def retained_receipts(messages, completed_children):
+def retained_receipts(messages, completed_children, observations=()):
     """Receipts are attributed observations, never proof of whole-task completion."""
     limit = RUNTIME['memory']['tool_evidence_count']
     chars = RUNTIME['memory']['tool_evidence_chars']
-    receipts = _child_receipts(completed_children, chars)
+    # Check outcomes survive transcript compaction and later file reads. An
+    # unbound check remains useful evidence, but cannot verify a specific SHA.
+    receipts = [_observation_receipt(item, chars) for item in reversed(observations)
+                if item.get('source') == 'tool_result' and item.get('kind') in {'checks', 'ci'}]
+    receipts.extend(_child_receipts(completed_children, chars))
+    receipts.extend(_message_receipts(messages, limit, chars))
+    return list(dict.fromkeys(receipts))[:limit]
+
+
+def _observation_receipt(item, chars):
+    """One attributed check or CI observation, including its skip details."""
+    receipt = (f"Observed {item['kind']} {item.get('tool')} ({item.get('callId')}): "
+               f"{item.get('status')}; {item.get('summary')}; "
+               f"revision={item.get('revision') or 'unverified'}")
+    if 'exitCode' in item:
+        receipt += f"; exit_code={item['exitCode']}"
+    if 'skipCount' in item:
+        receipt += f"; skipped={item['skipCount']}; unknown_skip_reasons={item.get('unknownSkipReasons', 0)}"
+    receipt += f" [sha256={item.get('outputSha256')}]"
+    if item.get('outputArtifact'):
+        receipt += f" Full output: {item['outputArtifact']}"
+    if item.get('skippedTests'):
+        receipt += '; skip details=' + json.dumps(item['skippedTests'], ensure_ascii=False)
+    return scrub(receipt)[:chars]
+
+
+def _message_receipts(messages, limit, chars):
+    """Transcript tool messages that are not this agent's own receipts."""
+    receipts = []
     names = _tool_name_index(messages)
-    for m in [m for m in messages if m.get('role') == 'tool'][-limit:]:
-        name = names.get(m.get('tool_call_id'), 'tool')
+    for message in [m for m in messages if m.get('role') == 'tool'][-limit:]:
+        name = names.get(message.get('tool_call_id'), 'tool')
         if _is_own_receipt(name):
             continue
-        receipt = _tool_receipt(m, name, chars)
+        receipt = _tool_receipt(message, name, chars)
         if receipt:
             receipts.append(receipt)
-    return list(dict.fromkeys(receipts))[:limit]
+    return receipts
+
+

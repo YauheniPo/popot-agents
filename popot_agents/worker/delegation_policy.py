@@ -1,12 +1,13 @@
 """Guide model-selected delegation using user context and available capabilities."""
 
 import json
-import re
-import shlex
+import os
 
+from popot_agents.child_results import completed_answer  # Compatibility import for existing callers.
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.tools import ToolInputError
+from popot_agents.work_evidence import executed_commands
 from .turn_memory import scrub
 
 
@@ -15,55 +16,55 @@ class DelegationContextError(ToolInputError):
     retryable = False
 
 
-_GIT_VALUE_OPTIONS = {'-c', '-C', '--git-dir', '--work-tree', '--namespace',
-                      '--exec-path', '--config-env'}
+_GIT_OPERANDS = {'-c', '-C', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'}
+_GH_OPERANDS = {'-R', '--repo', '--hostname'}
+_GIT_GLOBAL_FLAGS = {'--no-pager', '-P', '--paginate', '-p', '--bare', '--no-replace-objects',
+                     '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs',
+                     '--icase-pathspecs', '--no-optional-locks', '--no-lazy-fetch'}
 
 
-def _segment_words(segment: str) -> list[str]:
-    """Split one shell segment into words, tolerating unbalanced quotes."""
-    try:
-        tokens = shlex.split(segment)
-    except ValueError:
-        tokens = segment.split()
-    return [word for token in tokens for word in token.split()]
-
-
-def _git_subcommand(words) -> str | None:
-    """Return the first non-option word, skipping options that take a value."""
-    options = iter(words)
-    for word in options:
-        if not word.startswith('-'):
-            return word
-        if word in _GIT_VALUE_OPTIONS:
-            next(options, None)
+def _publication_command(words):
+    """Identify git/gh writes after global options, never from argument text."""
+    program = os.path.basename(words[0])
+    rest = _after_global_options(program, words[1:])
+    if rest is None:
+        return None
+    if program == 'git' and rest and rest[0] in {'commit', 'commit-tree', 'push'}:
+        return rest[0]
+    if program == 'gh' and rest[:2] in [['pr', 'create'], ['pr', 'merge']]:
+        return 'push'
     return None
 
 
-def _git_subcommands(command: str) -> set[str]:
-    """Return the git subcommands a shell command runs, skipping global options."""
-    subcommands = set()
-    for segment in re.split(r'\|\||&&|[;|\n]', command):
-        words = _segment_words(segment)
-        for index, word in enumerate(words):
-            if word.rsplit('/', 1)[-1] != 'git':
-                continue
-            subcommand = _git_subcommand(words[index + 1:])
-            if subcommand:
-                subcommands.add(subcommand)
-    return subcommands
+def _after_global_options(program, rest):
+    """Words after the interpreter's global options, or None for an unknown option."""
+    operands = _GIT_OPERANDS if program == 'git' else _GH_OPERANDS
+    while rest and rest[0].startswith('-'):
+        rest = _global_option_step(program, rest, operands)
+        if rest is None:
+            return None
+    return rest
 
 
-def _creates_commit(command: str) -> bool:
-    """Return whether the shell command writes a git commit object."""
-    return any(name == 'commit' or name.startswith('commit-')
-               for name in _git_subcommands(command))
+def _global_option_step(program, rest, operands):
+    """Consume one git/gh global option, or report that it is unknown."""
+    option, separator, _ = rest[0].partition('=')
+    if option in operands:
+        return rest[1 if separator else 2:]
+    if program == 'git' and (rest[0] in _GIT_GLOBAL_FLAGS or separator and option == '--exec-path'
+                             or rest[0][:2] in {'-c', '-C'} and len(rest[0]) > 2):
+        return rest[1:]
+    if program == 'gh' and rest[0].startswith('-R') and len(rest[0]) > 2:
+        return rest[1:]
+    return None
 
 
 def check_publication_owner(name, arguments, context):
     """Coordinate branch publication; role credentials remain the security boundary."""
-    if context and context.get('role') == 'code_reviewer' and name == 'bash':
-        command = arguments.get('command', '')
-        if isinstance(command, str) and _creates_commit(command):
+    writes = ({_publication_command(words) for words in executed_commands(arguments.get('command'))}
+              if name == 'bash' else set())
+    if context and context.get('role') == 'code_reviewer':
+        if writes & {'commit', 'commit-tree'}:
             raise ToolInputError('The code reviewer cannot create commits; delegate authorized fixes to backend_engineer.')
     if context is None or 'publication_owner' not in context or context.get('publication_owner') == context.get('session_id'):
         return
@@ -71,10 +72,7 @@ def check_publication_owner(name, arguments, context):
         'push_files','create_or_update_file','delete_file','create_branch',
         'create_pull_request','merge_pull_request','update_pull_request_branch'}
     if name == 'bash':
-        command = arguments.get('command','')
-        branch_write = isinstance(command,str) and bool(
-            'push' in _git_subcommands(command)
-            or re.search(r'\bgh\s+pr\s+(?:create|merge)\b',command))
+        branch_write = 'push' in writes
     if branch_write:
         raise ToolInputError('Branch publication belongs to integration owner '+
             str(context.get('publication_owner') or 'not assigned')+
@@ -145,28 +143,3 @@ def handoff_task(task: str, messages: list[dict], role_config: dict) -> str:
                 break
             text = text[:max(0, len(text)-(len(candidate)-limit))]
     return content
-
-
-def completed_answer(output: str, role: str, *, session_id: str | None = None) -> str:
-    try:
-        result = json.loads(output)
-    except (TypeError, ValueError):
-        raise RuntimeError(f'delegation to {role} returned invalid JSON') from None
-    if not isinstance(result, dict):
-        raise RuntimeError(f'delegation to {role} returned an invalid result')
-    session = result.get('sessionId')
-    suffix = f' (sessionId={session})' if isinstance(session, str) and re.fullmatch(r'[0-9a-f]{16}', session) else ''
-    answer = result.get('answer')
-    outcome = result.get('outcome')
-    if (result.get('isError') or result.get('error') or result.get('state') != 'TASK_STATE_COMPLETED'
-            or (session_id is not None and session != session_id)
-            or (outcome is not None and (not isinstance(outcome, dict) or outcome.get('status') != 'completed'
-                                        or outcome.get('errors') or outcome.get('remaining_work')))
-            or result.get('role') != role or result.get('truncated')
-            or not isinstance(answer, str) or not answer.strip() or not suffix):
-        diagnostic = '; '.join(scrub(result[key])[:500] for key in ('state', 'error')
-                               if isinstance(result.get(key), str) and result[key])
-        raise RuntimeError(f'delegation to {role} did not return a complete successful answer{suffix}; '
-                           + (diagnostic + '; ' if diagnostic else '')
-                           + 'inspect the child result before retrying external actions')
-    return f'{role} · sessionId: {session}\n\n{answer.strip()}'

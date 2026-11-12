@@ -79,6 +79,30 @@ class SubstrateCleanupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             daemonset_patch(original, 'image')
 
+    def test_atelet_health_probes_tolerate_short_local_node_stalls(self):
+        original = self.fixture()
+        atelet = original['spec']['template']['spec']['containers'][1]
+        atelet['livenessProbe'] = {'httpGet': {'path': '/healthz', 'port': 9090},
+            'timeoutSeconds': 1, 'periodSeconds': 10, 'failureThreshold': 3}
+        atelet['readinessProbe'] = {'httpGet': {'path': '/readyz', 'port': 9090},
+            'timeoutSeconds': 1, 'periodSeconds': 2, 'failureThreshold': 3}
+        before = copy.deepcopy(original)
+        operations = daemonset_patch(original, 'image')
+        live = next(op['value'] for op in operations if op['path'].endswith('/livenessProbe'))
+        ready = next(op['value'] for op in operations if op['path'].endswith('/readinessProbe'))
+        self.assertEqual(live['timeoutSeconds'], 5)
+        self.assertEqual(live['failureThreshold'], 6)
+        self.assertEqual(live['httpGet'], atelet['livenessProbe']['httpGet'])
+        self.assertEqual(ready['timeoutSeconds'], 5)
+        self.assertEqual(ready['periodSeconds'], 5)
+        self.assertEqual(ready['httpGet'], atelet['readinessProbe']['httpGet'])
+        self.assertEqual(original, before)
+        # Preserve explicitly more tolerant settings on subsequent installs.
+        atelet['livenessProbe']['timeoutSeconds'] = 12
+        operations = daemonset_patch(original, 'image')
+        live = next(op['value'] for op in operations if op['path'].endswith('/livenessProbe'))
+        self.assertEqual(live['timeoutSeconds'], 12)
+
     def test_preview_does_not_execute_commands(self):
         with patch('sys.argv', ['substrate_cleanup.py']), \
              patch.object(substrate_cleanup.subprocess, 'run') as run:

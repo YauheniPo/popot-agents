@@ -3,7 +3,11 @@
     "sha256": "1906268ff6061d09e1970fd5547154dd479679576fc2e9841576b39d8c88cb3e"
   },
   "reporting/result_contract": {
-    "sha256": "28c25f8f29120a18a7cf85e369742929c0315ce144a77a951b59accfc1be2e75"
+    "sha256": "512b2c4857da57ac0bd06ef0265b17a973a830d7498be47188caeae59f80b6f5",
+    "values": {
+      "artifact_count_limit": 16,
+      "artifact_byte_limit": 24000
+    }
   },
   "memory/lifecycle": {
     "sha256": "75f50cb5547742f7fd62e2b67125aedae116351a1544174504a62178583fdaec"
@@ -15,7 +19,7 @@
     "sha256": "a04a73f226d6ffdbea8385b51c11b6cbc49676de6e6cd43eefba7f90aa53f7fe"
   },
   "review/checkpoint_instructions": {
-    "sha256": "9589ce554975cc16f8bab8738bcd9758b352fe18a7b5cfdad7007c3d0e8c6506"
+    "sha256": "045bf6f5cb1b7f10f2e504cec9713a88aed0adf16be2764ef2cbd76ab3c226db"
   },
   "memory/retry": {
     "sha256": "97cc9cf0f89127e23eae0e10834f0f0be50edd60d873105b6b2c673805623909"
@@ -30,7 +34,7 @@
     "sha256": "fbf1781dbd31cf3b235ada2c8d53f5d52894796127e2acefeddca3ee8e962498"
   },
   "reporting/final": {
-    "sha256": "2a2354647e8578338055aaf2cc31c91c843ee43d6da2c7604f213fc1d4072bbc",
+    "sha256": "a28fab5395706fb202e5db123428a5413334f5f5889abc355226a52e74d3d286",
     "values": {
       "result_contract": "CONTRACT"
     }
@@ -43,13 +47,13 @@
     }
   },
   "delegation/reviewer": {
-    "sha256": "c6939e38fafa63600cff95120d9fecca8c006d0baf070dc0655753285ce4e864"
+    "sha256": "5840b25089aa29973cb8100e54c5bad936c63f29eae4e46498ccd2dc642c7c66"
   },
   "delegation/review_routing": {
     "sha256": "675c26e2a2853c1c3d6c8ed7726c71994e70e393556d5052b59f00533ae9d71e"
   },
   "delegation/instructions": {
-    "sha256": "b3d7f70273e5ad1c359b2147dabf5e4331a4f88e35eee3e8073247416699e17d",
+    "sha256": "bc1dfd57b3b450c980088d5e7a7b23bfe684916ab95bf126a0cebb36c4c4f6fe",
     "values": {
       "role": "engineer",
       "review_routing": "ROUTING ",

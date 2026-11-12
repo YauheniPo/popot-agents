@@ -59,7 +59,7 @@ class EntrypointTests(unittest.TestCase):
             self.assertTrue(path.is_symlink())
             self.assertEqual(target.read_text(), 'keep this file')
 
-    def test_root_overlay_allows_tool_uid_to_traverse_before_harness_starts(self):
+    def test_root_overlay_allows_tool_uid_to_open_directories_before_harness_starts(self):
         modes = {"/": 0o700, "/workspace": 0o1777, "/dev/shm": 0o755}
         owners = {99: [0, 0], 100: [0, 0]}
         directories = {99: "/workspace", 100: "/dev/shm"}
@@ -68,8 +68,8 @@ class EntrypointTests(unittest.TestCase):
             modes[directories[fd]] = mode
 
         def start_harness():
-            # UID 10001 must cross / to execute Python or read its stdlib.
-            self.assertEqual(modes["/"], 0o711)
+            # O_RDONLY | O_DIRECTORY traversal also needs directory read access.
+            self.assertEqual(modes["/"] & 0o555, 0o555)
             self.assertEqual(modes["/"] & 0o022, 0)
             self.assertEqual(modes["/workspace"], 0o700)
             self.assertEqual(owners, {99: [10001, 10001], 100: [10001, 10001]})

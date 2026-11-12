@@ -6,9 +6,9 @@ Tools are unavailable.
 State what tool evidence confirms, which actions already happened, and what remains unverified.
 Distinguish requested actions from executed actions.
 Use the original user language.
-Budget exhaustion alone does not mean the task is incomplete: use completed only if tool evidence verifies every requested deliverable and no required work or unresolved errors remain.
+Budget exhaustion alone does not mean the task is incomplete: use completed only if tool evidence verifies your assigned deliverables and no required work or unresolved errors remain.
 Otherwise use partial or blocked with concrete remaining work.
-Before completed, reconcile every known finding with the original request. Put unresolved in-scope corrections, including stale published claims about the requested result, in remaining_work and return partial. State why any reported limitation is pre-existing or out of scope; never leave an in-scope fix as a conditional offer to the client.
+Before completed, reconcile every known finding with your assignment. Put unresolved in-scope corrections and stale published claims owned by your assignment in remaining_work and return partial. For review/QA-only work, hand corrections belonging to another owner off as findings with verification_status=failed; completed is valid when your own checks and required publication/read-back are finished. State why any reported limitation is pre-existing or out of scope; never leave an in-scope fix as a conditional offer to the client.
 Optional extra checks are limitations, not new requirements.
 Never infer success from a tool call without its result.
 Preserve test limitations: a passing CI job alone does not prove that a specific test ran without skips, and a failed job does not identify its failing step.

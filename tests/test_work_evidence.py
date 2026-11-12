@@ -8,6 +8,139 @@ from popot_agents.tools import TOOL_SCHEMAS
 
 
 class WorkEvidenceTests(unittest.TestCase):
+    def test_node_skip_names_and_reasons_survive_receipt_transport(self):
+        from popot_agents.work_evidence import observe_tool_result, evidence_event
+        cases = (
+            'ok 1 - needs upstream # SKIP WORKSPACE_UPSTREAM_DIR missing\n'
+            'ok 2 - placeholder # SKIP\n# pass 1\n# skipped 2\n',
+            '﹣ needs upstream (0.1ms) # WORKSPACE_UPSTREAM_DIR missing\n'
+            '﹣ placeholder (0.2ms) # SKIP\nℹ pass 1\nℹ skipped 2\n')
+        for output in cases:
+            with self.subTest(output=output):
+                receipt = observe_tool_result('bash', {'command': 'node --test fixture.mjs'},
+                    'exit_code=0\n' + output, 'node-skips')
+                self.assertEqual(receipt['skipCount'], 2)
+                self.assertEqual(receipt['unknownSkipReasons'], 1)
+                self.assertEqual(receipt['skippedTests'], [
+                    {'name': 'needs upstream', 'reason': 'WORKSPACE_UPSTREAM_DIR missing'},
+                    {'name': 'placeholder', 'reason': None}])
+                restored = evidence_event(json.dumps({'event': 'work_evidence', 'receipt': receipt}))
+                self.assertEqual(restored['skippedTests'], receipt['skippedTests'])
+                self.assertEqual(restored['unknownSkipReasons'], 1)
+                from popot_agents.worker.final_result import retained_receipts
+                self.assertIn('WORKSPACE_UPSTREAM_DIR missing',
+                    ' '.join(retained_receipts([], {}, [receipt])))
+
+    def test_node_skip_summary_without_details_remains_unknown_and_is_bounded(self):
+        from popot_agents.work_evidence import observe_tool_result, evidence_event
+        receipt = observe_tool_result('bash', {'command': 'node --test fixture.mjs | tail -8'},
+            'exit_code=0\n# pass 2\n# skipped 8\n', 'summary')
+        self.assertEqual(receipt['skipCount'], 8)
+        self.assertEqual(receipt['unknownSkipReasons'], 8)
+        self.assertEqual(receipt['skippedTests'], [])
+        detail = ''.join(f'ok {i+1} - case {i} # SKIP prerequisite\n' for i in range(20))
+        receipt = observe_tool_result('bash', {'command': 'node --test fixture.mjs'},
+            'exit_code=0\n' + detail + '# pass 1\n# skipped 20\n', 'bounded')
+        self.assertEqual(len(receipt['skippedTests']), 16)
+        self.assertEqual(receipt['unknownSkipReasons'], 0)
+        self.assertTrue(receipt['skipsTruncated'])
+        receipt['skippedTests'][0]['reason'] = 'x' * 1000
+        restored = evidence_event(json.dumps({'event': 'work_evidence', 'receipt': receipt}))
+        self.assertLessEqual(len(restored['skippedTests'][0]['reason']), 320)
+
+    def test_loaded_github_file_observes_commit_revision_separately_from_blob_and_pr_head(self):
+        from popot_agents.work_evidence import observe_tool_result, evidence_event
+        from popot_agents.worker.verification import observed_revision, acceptance_revision
+        sha, blob = 'a' * 40, 'b' * 40
+        args = {'owner': 'example', 'repo': 'repo', 'ref': sha, 'path': 'src/app.py'}
+        output = (f'successfully downloaded text file (SHA: {blob})\n'
+                  f'[repo://example/repo/sha/{sha}/contents/src/app.py]\nprint("hello")\n')
+        receipt = observe_tool_result('mcp__github__get_file_contents', args, output, 'file')
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt['revision'], sha)
+        self.assertEqual(receipt['revisionSource'], 'repository_content')
+        self.assertEqual(receipt['repository'], 'example/repo')
+        restored = evidence_event(json.dumps({'event': 'work_evidence', 'receipt': receipt}))
+        self.assertEqual(restored['revisionSource'], 'repository_content')
+        self.assertEqual(observed_revision({'revision': sha}, [restored]), sha)
+        self.assertIsNone(acceptance_revision([], [restored]))
+        for name, arguments, text in (
+                ('read_file', args, output),
+                ('mcp__github__get_file_contents', {**args, 'ref': blob}, output),
+                ('mcp__github__get_file_contents', {**args, 'repo': 'other'}, output),
+                ('mcp__github__get_file_contents', {**args, 'path': 'other.py'}, output),
+                ('mcp__github__get_file_contents', args, 'error: ' + output),
+                ('mcp__github__get_file_contents', args, 'File body:\n' + output),
+                ('mcp__github__get_file_contents', args, output.replace('/sha/' + sha, '/heads/main')),
+                ('mcp__github__get_file_contents', args, f'Resource link (content not loaded): repo://example/repo/sha/{sha}/contents/src/app.py')):
+            with self.subTest(name=name, arguments=arguments, text=text):
+                self.assertNotIn('revision', observe_tool_result(name, arguments, text, 'unverified') or {})
+
+    def test_labeled_head_from_the_same_check_command_is_reusable(self):
+        from popot_agents.work_evidence import observe_tool_result, reusable_checks
+        sha = 'a' * 40
+        command = ('git rev-parse HEAD > /tmp/rev.txt && python3 -m pytest -q > /tmp/run.log; '
+                   'echo "PYTEST_EXIT=$?"; echo "REV=$(cat /tmp/rev.txt)"; tail /tmp/run.log')
+        receipt = observe_tool_result('bash', {'command': command},
+            f'exit_code=0\nPYTEST_EXIT=0\nREV={sha}\n921 passed, 32 skipped\n', 'suite')
+        self.assertEqual(receipt.get('revision'), sha)
+        self.assertEqual(reusable_checks([receipt], sha), [receipt])
+
+    def test_reading_pytest_summary_does_not_create_another_check_execution(self):
+        from popot_agents.work_evidence import observe_tool_result
+        command = 'echo "=== pytest summary line ==="; grep passed research/pytest_run.log'
+        self.assertIsNone(observe_tool_result('bash', {'command': command},
+            'exit_code=0\n=== pytest summary line ===\n921 passed, 32 skipped\n', 'read'))
+
+    def test_head_substitution_is_observed_but_dirty_or_ambiguous_checks_are_not_reused(self):
+        from popot_agents.work_evidence import observe_tool_result, reusable_checks
+        sha = 'a' * 40
+        command = 'echo "HEAD=$(git rev-parse HEAD)"; python3 -m pytest -q'
+        clean = observe_tool_result('bash', {'command': command},
+            f'exit_code=0\nHEAD={sha}\nDIRTY=0\n3 passed\n', 'clean')
+        self.assertEqual(clean.get('revision'), sha)
+        dirty = observe_tool_result('bash', {'command': command},
+            f'exit_code=0\nHEAD={sha}\nDIRTY=1\n3 passed\n', 'dirty')
+        self.assertEqual(reusable_checks([dirty], sha), [])
+        mixed = observe_tool_result('bash', {'command': command},
+            f'exit_code=0\nHEAD={sha}\nREV={"b" * 40}\n3 passed\n', 'mixed')
+        self.assertEqual(reusable_checks([mixed], sha), [])
+
+    def test_dirty_marker_survives_durable_receipt_transport(self):
+        from popot_agents.work_evidence import observe_tool_result, evidence_event, reusable_checks
+        sha = 'a' * 40
+        receipt = observe_tool_result('bash', {'command': 'git rev-parse HEAD; pytest -q'},
+            f'exit_code=0\n{sha}\nDIRTY=1\n3 passed\n', 'dirty')
+        restored = evidence_event(json.dumps({'event': 'work_evidence', 'receipt': receipt}))
+        self.assertEqual(reusable_checks([restored], sha), [])
+
+    def test_explicit_failed_check_exit_and_node_spec_output_are_interpreted(self):
+        from popot_agents.work_evidence import observe_tool_result
+        failed = observe_tool_result('bash', {'command': 'pytest -q; echo PYTEST_EXIT=$?'},
+            'exit_code=0\nPYTEST_EXIT=1\n3 passed\n', 'failed')
+        self.assertEqual(failed['status'], 'failed')
+        node = observe_tool_result('bash', {'command': 'node --test tests/*.mjs'},
+            'exit_code=0\nℹ pass 26\nℹ fail 0\n', 'node')
+        self.assertEqual(node['kind'], 'checks')
+        self.assertEqual(node['status'], 'passed')
+
+    def test_node_failure_or_cancellation_cannot_be_masked_by_later_shell_success(self):
+        from popot_agents.work_evidence import observe_tool_result
+        for marker in ('# fail 1', 'ℹ fail 1', '# cancelled 1', 'ℹ cancelled 1'):
+            with self.subTest(marker=marker):
+                receipt = observe_tool_result('bash', {'command': 'node --test; echo done'},
+                    'exit_code=0\n# pass 26\n' + marker + '\n', 'masked-node')
+                self.assertEqual(receipt['status'], 'failed')
+
+    def test_interpreter_script_arguments_are_not_test_execution(self):
+        from popot_agents.work_evidence import observe_tool_result
+        for command in ('python3 -c \'print("921 passed")\' -m pytest',
+                        'python3 read_log.py -m pytest', 'node read_log.js --test',
+                        'node -e \'console.log("921 passed")\' --test'):
+            with self.subTest(command=command):
+                self.assertIsNone(observe_tool_result('bash', {'command': command},
+                    'exit_code=0\n921 passed\n', 'script-args'))
+
     @unittest.skipUnless(os.getenv('AX_TEST_WORKER_IMAGE'), 'requires a built AX worker image')
     def test_shared_module_is_packaged_in_worker_image(self):
         result = subprocess.run(['docker','run','--rm','--entrypoint','python',
@@ -118,6 +251,23 @@ class WorkEvidenceTests(unittest.TestCase):
                 f'exit_code=0\n{sha}\n', 'real')
             self.assertEqual(receipt['revision'], sha, command)
             self.assertEqual(receipt['kind'], 'revision')
+
+    def test_clone_revision_requires_the_native_success_receipt_for_the_requested_commit(self):
+        from popot_agents.work_evidence import observe_tool_result
+        sha = 'd' * 40
+        arguments = {'url': 'https://example.com/repo.git', 'directory': 'checkout', 'commit_sha': sha}
+        output = f'cloned to /workspace/checkout\nverified_commit={sha}\nexit_code=0\n{sha}\n'
+        for name, args, result in (
+                ('git_clone', {k: v for k, v in arguments.items() if k != 'commit_sha'}, output),
+                ('git_clone', {**arguments, 'commit_sha': 'e' * 40}, output),
+                ('git_clone', arguments, output.replace('exit_code=0', 'exit_code=1')),
+                ('git_clone', arguments, output.replace(f'\n{sha}\n', '\n' + 'e' * 40 + '\n')),
+                ('git_clone', arguments, 'git_clone failed: ' + output),
+                ('git_clone', arguments, f'verified_commit={sha}'),
+                ('read_file', {'path': 'old-output.txt'}, output)):
+            with self.subTest(name=name, args=args, result=result):
+                receipt = observe_tool_result(name, args, result, 'clone')
+                self.assertNotIn('revision', receipt or {})
 
     def test_pr_head_receipt_binds_the_observed_pull_request(self):
         from popot_agents.work_evidence import observe_tool_result, evidence_event

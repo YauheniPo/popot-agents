@@ -197,7 +197,7 @@ class AsyncServiceTests(unittest.TestCase):
         self.assertGreaterEqual(peak[0],4)
         self.assertEqual(pool.reservations,{})
 
-    def test_retained_sandbox_reduces_reachable_depth_without_blocking_every_branch(self):
+    def test_retained_sandbox_preserves_reachable_depth_when_pool_has_capacity(self):
         from ax_local.api.worker_queue import WorkerQueue
         from ax_local.api.delegation import Job,Run
         from popot_agents.orchestrator.main import AgentRunError
@@ -208,11 +208,11 @@ class AsyncServiceTests(unittest.TestCase):
         def job(i,depth):
             return Job(f'{i:016x}',{'_ax_delegation':{'lineage':['role']*depth}},'',run,run.deadline)
         for i in range(4):run.admitted[str(i)]=job(i,2)
-        for depth in (3,4,5):
+        for depth in (3,4,5,6):
             child=job(depth+10,depth)
             self.assertTrue(self.service._can_start(child))
             run.admitted[child.session_id]=child
-        with self.assertRaises(AgentRunError):self.service._can_start(job(20,6))
+        with self.assertRaises(AgentRunError):self.service._can_start(job(20,7))
 
     def test_terminal_result_is_published_after_previous_attempt_cleanup(self):
         entered,release=threading.Event(),threading.Event();self.addCleanup(release.set)
@@ -352,14 +352,14 @@ class PublicationOwnershipTests(unittest.TestCase):
             {'session_id':'b'*16,'publication_owner':'b'*16})
 
 
-class GitSubcommandQuoteFallbackTests(unittest.TestCase):
-    def test_unbalanced_quotes_fall_back_to_whitespace_splitting(self):
-        from popot_agents.worker.delegation_policy import _git_subcommands
-        self.assertEqual(_git_subcommands('git commit -m "unclosed'), {'commit'})
+class PublicationCommandParsingTests(unittest.TestCase):
+    def test_unbalanced_quotes_do_not_describe_an_executable_command(self):
+        from popot_agents.work_evidence import executed_commands
+        self.assertEqual(list(executed_commands('git commit -m "unclosed')), [])
 
     def test_option_scan_handles_missing_values_and_non_git_segments(self):
-        from popot_agents.worker.delegation_policy import _git_subcommands
-        self.assertEqual(_git_subcommands('git'), set())
-        self.assertEqual(_git_subcommands('git -C'), set())
-        self.assertEqual(_git_subcommands('git --no-pager'), set())
-        self.assertEqual(_git_subcommands('echo hi && git log'), {'log'})
+        from popot_agents.worker.delegation_policy import check_publication_owner
+        context={'session_id':'a'*16,'publication_owner':None,'role':'code_reviewer'}
+        for command in ('git', 'git -C', 'git --no-pager', 'echo hi && git log'):
+            with self.subTest(command=command):
+                self.assertIsNone(check_publication_owner('bash', {'command':command}, context))

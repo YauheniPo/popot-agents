@@ -24,9 +24,12 @@ import io,json,os
 from popot_agents.worker import http_harness
 from ax_local.worker.entrypoint import main
 role=json.loads(os.environ['HARNESS_ROLE_JSON'])['_ax_role']
+real_urlopen=http_harness.request.urlopen
 def tool(name,args,identifier):
  return {'id':identifier,'type':'function','function':{'name':name,'arguments':json.dumps(args)}}
 def respond(request,**kwargs):
+ if not request.full_url.endswith('/chat/completions'):
+  return real_urlopen(request,**kwargs)
  body=json.loads(request.data)
  results={m.get('tool_call_id'):m.get('content') for m in body['messages'] if m.get('role')=='tool'}
  if role=='fixture_parent':

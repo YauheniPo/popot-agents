@@ -32,6 +32,10 @@ def answer(*args, **kwargs):
 import os
 from pathlib import Path
 assert os.getuid() == 10001
+root = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+os.close(root)
+assert os.access('/', os.R_OK | os.X_OK)
+assert not os.access('/', os.W_OK)
 caps = next(line.split()[1] for line in Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))
 assert int(caps, 16) == 0, caps
 assert Path('/workspace/permission-marker').read_text() == 'kept'

@@ -1,5 +1,6 @@
 """Exercise revision checkout against real Git objects, without network access."""
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -48,6 +49,38 @@ class GitRevisionTests(unittest.TestCase):
                                         'rev-parse', 'HEAD'], text=True).strip()
         self.assertEqual(head, self.sha)
         self.assertIn('verified_commit=' + self.sha, result)
+
+    def test_verified_clone_revision_reaches_coordinator_acceptance_after_report_correction(self):
+        from tests.test_agent_reliability import AgentReliabilityTests
+        helper = AgentReliabilityTests()
+        clone = {'tool_calls': [{'id': 'clone', 'function': {'name': 'git_clone',
+            'arguments': json.dumps({'url': 'https://example.com/repo.git',
+                'directory': 'checkout', 'commit_sha': self.sha.upper()})}}]}
+        _, child, _ = helper.run_sequence([clone, helper.result()],
+            role={'name': 'backend_engineer', 'tools': ['git_clone']})
+        children = {'a' * 16: {'sessionId': 'a' * 16, 'role': 'backend_engineer',
+            'reportedAt': '2026-11-06T21:09:10Z', 'outcome': child['outcome']}}
+        # Reviewer/QA inspected the same immutable source before the report was
+        # reissued; the later producer only corrected report citations.
+        for sid, role in [('b' * 16, 'code_reviewer'), ('c' * 16, 'qa_engineer')]:
+            children[sid] = {'sessionId': sid, 'role': role, 'outcome': {
+                'status': 'completed', 'revision': self.sha, 'evidence': ['source verified']},
+                'observations': [{'kind': 'revision', 'revision': self.sha, 'status': 'observed',
+                    'sourceSessionId': sid, 'revisionSource': 'pr_head',
+                    'repository': 'example/repo', 'pullRequest': 47,
+                    'observedAt': '2026-11-06T21:03:59Z'}]}
+        state = {'messages': [{'role': 'user', 'content':
+            'Diagnose https://github.com/example/repo/pull/47 without source changes'}],
+            'outcome': {'status': 'partial'}, 'completed_delegations': children}
+        _, state, _ = helper.run_sequence([helper.result()], state=state,
+            role={'name': 'tech_lead', '_workflow_coordinator': True, 'tools': []},
+            run_context={'authorization': [state['messages'][0]['content']]})
+        self.assertEqual(state['outcome']['status'], 'completed', state['outcome'])
+        self.assertEqual(child['outcome']['revision'], self.sha)
+        self.assertEqual(state['outcome']['revision'], self.sha)
+        receipt = child['tool_evidence'][0]
+        self.assertEqual(receipt['tool'], 'git_clone')
+        self.assertNotIn('revisionSource', receipt)
 
     def test_missing_commit_does_not_leave_default_branch_source(self):
         with self.assertRaises(tools.ToolExecutionError):

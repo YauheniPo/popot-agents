@@ -59,6 +59,22 @@ class WorkerQueue:
             self.reservations.pop(key,None)
             self.condition.notify_all()
 
+    def resize_reservation(self, key, slots):
+        """Retain an active path alongside parked sessions without exceeding the pool."""
+        with self.condition:
+            if self.closed:
+                raise AgentRunError('AX worker queue is shutting down')
+            if key not in self.reservations:
+                return False
+            used = self._used(key)
+            current = self.reservations[key]
+            available = self.max_workers-len(self.active)-self._reserved()
+            if slots < used or slots-current > available:
+                return False
+            self.reservations[key] = slots
+            self.condition.notify_all()
+            return True
+
     def reserved_workers(self, key):
         with self.condition:
             return {name for name,group in self.groups.items() if group==key and name in self.active}

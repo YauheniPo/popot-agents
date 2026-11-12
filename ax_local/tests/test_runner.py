@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import socket
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,25 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_stream_failure_keeps_bounded_redacted_stderr_and_does_not_retry(self):
+        from ax_local.api.delegation import _worker_failure
+        secret = 'fixture-stream-capability'
+        self.runner.proxy_token = secret
+        real_popen = subprocess.Popen
+        program = "import sys; sys.stderr.write('x'*10000 + '\\nconnection refused ' + sys.argv[1]); sys.exit(7)"
+        def spawn(*args, **kwargs):
+            return real_popen([sys.executable, '-c', program, secret], **kwargs)
+        with patch('ax_local.api.ax_runner.subprocess.Popen', side_effect=spawn) as popen:
+            with self.assertRaises(AgentRunError) as caught:
+                self.runner._stream_command(('ssh', 'fixture-task'), 5, lambda message: None)
+        _, failure = _worker_failure(caught.exception, 'worker_message')
+        self.assertEqual(failure['diagnostic']['command'], 'ssh')
+        self.assertEqual(failure['diagnostic']['exit_code'], 7)
+        self.assertIn('connection refused', failure['diagnostic']['stderr'])
+        self.assertLessEqual(len(failure['diagnostic']['stderr']), 2000)
+        self.assertNotIn(secret, json.dumps(failure))
+        self.assertEqual(popen.call_count, 1)
+
     def test_failed_command_retains_bounded_redacted_diagnostics(self):
         from ax_local.api.delegation import _worker_failure
         secret = 'fixture-secret-value'

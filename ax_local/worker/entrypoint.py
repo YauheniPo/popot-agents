@@ -65,11 +65,11 @@ def main() -> None:
     os.makedirs("/workspace", mode=0o700, exist_ok=True)
     if os.geteuid() == 0:
         # Substrate creates the private overlay root as 0700. UID 10001 needs
-        # search permission on / to reach Python and its stdlib after the drop.
-        # Preserve existing read/write permissions; add only directory search.
+        # read/search permission on / for O_RDONLY | O_DIRECTORY traversal.
+        # Preserve existing write bits and the private child-directory modes.
         root_mode = os.stat("/").st_mode & 0o7777
-        if root_mode & 0o111 != 0o111:
-            os.chmod("/", root_mode | 0o111)
+        if root_mode & 0o555 != 0o555:
+            os.chmod("/", root_mode | 0o555)
         # AX creates /dev/shm as root:0755. All tools share UID 10001, so
         # their POSIX semaphores need no access from other unprivileged users.
         # Pin each directory rather than following a replacement or symlink.

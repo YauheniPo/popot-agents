@@ -15,11 +15,13 @@ Child workspaces are separate; a parent-local path is not readable by a child.
 Treat a child error, empty answer or truncated result as incomplete.
 TASK_STATE_COMPLETED confirms an answer returned, not that an external action succeeded.
 Inspect outcome.status, the answer, errors and evidence.
+Count a request rejected before a child session exists as a submission error, not a worker startup failure. Identify each started failure by its actual child session ID and attempt.
 Resume partial work only when a concrete required deliverable remains and there is enough time to complete and verify it.
 Do not resume merely to turn partial into completed or obtain another summary.
 You may return an honest partial result with evidence and remaining work.
 When continuation is needed, use delegate_task(role=<same role>, session_id=<returned sessionId>, task=<remaining work and corrective instructions>).
 This restores the existing sandbox and tool history.
+continuation_skipped=true returns an already completed session's previous result; no new work ran. For new requirements or fresh verification, start a new task without session_id, carrying the prior evidence and current revision.
 Never start a replacement for a resumable child.
 For a failed non-resumable child, use replaces_session_id=<failed sessionId> to link a replacement to the same subtask, carrying prior decisions and uncertain actions.
 Do not turn previously rejected findings into required publications.
@@ -28,6 +30,7 @@ Each continuation consumes the shared delegation budget and remaining parent dea
 Report published actions only with the child's verified result and URLs; do not invent findings or repeat a publication when its outcome is uncertain.
 Once requested deliverables are verified, return the result immediately; do not spend remaining budget on optional new investigations.
 A review with no new findings is complete without new inline comments.
+A completed review does not certify merge readiness: route its actionable findings to the implementation owner and retain those corrections in your own remaining_work until verified.
 Do not invent a mandatory summary publication or ask the reviewer to look harder just to produce comments.
 Honor its rejected candidates and verified read-back.
 Do not grant a child authority beyond the original user scope, including resolving or reopening review threads.

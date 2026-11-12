@@ -27,14 +27,10 @@ services:
       - cognee-system:/cognee-storage/system
       - cognee-data:/cognee-storage/data
       - ../skills:/app/popot-skills:ro
-      - ../config/runtime.json:/app/config/runtime.json:ro
-      - ../popot_agents/__init__.py:/app/popot_agents/__init__.py:ro
-      - ../popot_agents/runtime_config.py:/app/popot_agents/runtime_config.py:ro
-      - ../popot_agents/role_env.py:/app/popot_agents/role_env.py:ro
-      - ./session_api.py:/app/popot-sync/session_api.py:ro
-      - ./project-ontology.ttl:/app/popot-sync/project-ontology.ttl:ro
-      - ./import_skills.py:/app/popot-sync/import_skills.py:ro
-      - ../popot_agents/worker/cognee_memory.py:/app/popot-sync/cognee_memory.py:ro
+      # Directory mounts follow atomic editor saves instead of pinning old files.
+      - ../config:/app/config:ro
+      - ../popot_agents:/app/popot_agents:ro
+      - .:/app/popot-sync:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).close()"]
       interval: 10s
