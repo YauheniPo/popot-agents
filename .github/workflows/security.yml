@@ -82,7 +82,7 @@ jobs:
             -w /data \
             -e GITGUARDIAN_API_KEY \
             gitguardian/ggshield@sha256:363427689cdd746cf7fa3a4bad2e16b41ad4fa5f7ea5ae262711e13ed456f653 \
-            ggshield secret scan path . --format sarif --output gitguardian.sarif
+            ggshield secret scan path . --recursive --format sarif --output gitguardian.sarif
       - name: Publish GitGuardian findings to Security
         if: ${{ !cancelled() && hashFiles('gitguardian.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
