@@ -121,6 +121,10 @@ class PhoenixRuntimeTests(unittest.TestCase):
                 parent = next(s for s in spans if s['name'] == 'planner')
                 child_span = next(s for s in spans if s['name'] == 'qa_engineer')
                 self.assertEqual(child_span['parent_id'], parent['context']['span_id'])
+                self.assertEqual({s['attributes']['session.id'] for s in spans}, {'a' * 16})
+                self.assertEqual(parent['attributes']['popot.agent_session_id'], 'a' * 16)
+                self.assertEqual({s['attributes']['popot.agent_session_id'] for s in spans
+                                  if s['name'] != 'planner'}, {'b' * 16})
                 model = next(s for s in spans if s['span_kind'] == 'LLM')
                 self.assertEqual(model['attributes']['llm.token_count.total'], 10)
                 self.assertEqual(model['attributes']['llm.model_name'], 'actual-model')
@@ -130,6 +134,51 @@ class PhoenixRuntimeTests(unittest.TestCase):
                 self.assertNotIn('test-secret', ''.join(p.read_text() for p in Path(tmp).glob('*.json')))
             finally:
                 tracer.close()
+
+    def test_late_child_after_api_restart_keeps_the_root_phoenix_session(self):
+        from ax_local.api.phoenix import PhoenixTracer
+        from ax_local.api.delegation import DelegationService
+        from popot_agents.progress import emit_progress
+
+        with tempfile.TemporaryDirectory() as tmp, receiver() as (endpoint, state):
+            settings = self.settings(tmp, endpoint)
+            first = PhoenixTracer(settings, api_key='test')
+            try:
+                with first.session('a' * 16, 'planner', {}) as root:
+                    root.result({'outcome': {'status': 'partial'}})
+                wait_for(lambda: len(state['spans']) == 1)
+            finally:
+                first.close()
+
+            restarted = PhoenixTracer(settings, api_key='test')
+            try:
+                config = {'_ax_role': 'qa_engineer', '_ax_delegation': {
+                    'parent_session_id': 'a' * 16, 'root_session_id': 'a' * 16}}
+                job = SimpleNamespace(session_id='b' * 16, config=config)
+
+                def execute_child(job):
+                    emit_progress('tool_call', name='calculate', call_id='child')
+                    emit_progress('tool_result', name='calculate', call_id='child')
+                    model = restarted.model_span(job.session_id, 'requested/model')
+                    model.model_result(200, b'{"choices": [{}]}')
+                    job.config['_ax_delegation']['outcome'] = {'status': 'completed'}
+
+                service = SimpleNamespace(tracer=restarted, _execute_observed=execute_child,
+                                          _record_progress=Mock())
+                DelegationService._execute(service, job)
+                wait_for(lambda: len(state['spans']) == 4)
+                self.assertEqual({s['attributes']['session.id'] for s in state['spans']}, {'a' * 16})
+                self.assertEqual(len({s['context']['trace_id'] for s in state['spans']}), 2)
+                child = next(s for s in state['spans'] if s['name'] == 'qa_engineer')
+                self.assertIsNone(child['parent_id'])
+                self.assertEqual(child['attributes']['popot.parent_session_id'], 'a' * 16)
+                self.assertEqual(json.loads(child['attributes']['metadata'])['session_id'], 'b' * 16)
+                for span in state['spans']:
+                    self.assertEqual(span['attributes']['popot.root_session_id'], 'a' * 16)
+                    if span['name'] != 'planner':
+                        self.assertEqual(span['attributes']['popot.agent_session_id'], 'b' * 16)
+            finally:
+                restarted.close()
 
     def test_background_children_and_cron_export_without_parent_polling(self):
         from ax_local.api.phoenix import PhoenixTracer
