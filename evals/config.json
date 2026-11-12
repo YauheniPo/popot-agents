@@ -31,6 +31,7 @@
         "PHOENIX_HOST": "0.0.0.0",
         "PHOENIX_WORKING_DIR": "/data",
         "PHOENIX_ENABLE_AUTH": "true",
+        "PHOENIX_ENABLE_MCP_CODE_MODE": "false",
         "PHOENIX_TELEMETRY_ENABLED": "false",
         "PHOENIX_ALLOW_EXTERNAL_RESOURCES": "false"
       },

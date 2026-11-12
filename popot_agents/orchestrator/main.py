@@ -241,10 +241,14 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
                 if not isinstance(url, str):
                     raise ValueError(f"role {name} has invalid MCP URL")
                 parsed = urlsplit(url)
-                if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                local_phoenix = (name == 'project_operator' and alias == 'phoenix'
+                    and parsed.scheme == 'http' and parsed.netloc == 'host.docker.internal:6006'
+                    and parsed.path == '/mcp'
+                    and server.get('bearer_token_env') == 'PHOENIX_API_KEY')
+                if ((parsed.scheme != "https" and not local_phoenix) or not parsed.hostname or parsed.username is not None
                         or parsed.password is not None or parsed.query or parsed.fragment
                         or any(char.isspace() for char in url)):
-                    raise ValueError(f"role {name} needs a credential-free HTTPS MCP URL")
+                    raise ValueError(f"role {name} needs a credential-free HTTPS MCP URL or the local Phoenix endpoint")
                 if 'bearer_token_env' in server:
                     token_name = server["bearer_token_env"]
                     if not isinstance(token_name, str) or token_name not in config.get("env_names", []):
