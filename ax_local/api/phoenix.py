@@ -93,16 +93,20 @@ class Span:
 
 class AgentSpan(Span):
     def __init__(self, tracer, session_id, role, config, parent):
-        root_id = parent.data['attributes']['popot.root_session_id'] if parent else session_id
+        delegation = config.get('_ax_delegation', {})
+        root_id = (parent.data['attributes']['popot.root_session_id'] if parent
+                   else delegation.get('root_session_id') or session_id)
         metadata = {'role': role, 'session_id': session_id, 'root_session_id': root_id,
                     'skills_configured': config.get('skills', [])}
-        attributes = {'session.id': session_id, 'popot.role': role,
+        attributes = {'session.id': root_id, 'popot.role': role,
+                      'popot.agent_session_id': session_id,
                       'popot.root_session_id': root_id,
                       'popot.agent_profile': config.get('agent', 'unknown'),
                       'popot.skills.configured': list(config.get('skills', [])),
                       'metadata': json.dumps(metadata)}
-        if parent:
-            attributes['popot.parent_session_id'] = parent.session_id
+        parent_id = parent.session_id if parent else delegation.get('parent_session_id')
+        if parent_id:
+            attributes['popot.parent_session_id'] = parent_id
         super().__init__(tracer, role, 'AGENT', parent=parent, attributes=attributes)
         self.session_id = session_id
         self.pending = {}
@@ -172,7 +176,7 @@ class AgentSpan(Span):
     def base_attributes(self):
         return {key: value for key, value in self.data['attributes'].items()
                 if key in {'session.id', 'popot.role', 'popot.agent_profile', 'metadata',
-                           'popot.root_session_id', 'popot.parent_session_id'}}
+                           'popot.agent_session_id', 'popot.root_session_id', 'popot.parent_session_id'}}
 
     def result(self, result):
         if not isinstance(result, dict):

@@ -43,16 +43,28 @@ Root и дочерние роли представлены `AGENT` spans, реа
 аргументы tools и секреты в этот экспорт не входят. Времена tools наблюдаются
 на стороне API; LLM длительность измеряется в прокси.
 
-Атрибуты `popot.role`, `popot.agent_profile`, `session.id`, `popot.root_session_id`
-и `popot.parent_session_id` связывают роли и диалог. `popot.skills.configured`
-показывает конфигурацию роли; `popot.skills.loaded` — инструкции, загрузку
+Phoenix Session объединяет всю задачу: `session.id = popot.root_session_id`
+у корневого агента, всех дочерних ролей и их LLM/TOOL spans.
+ID конкретного агента сохраняется в `popot.agent_session_id`, а его родителя —
+в `popot.parent_session_id`. Когда родитель уже завершён или API перезапущен,
+дочерняя роль получает root ID из сохранённых метаданных делегирования.
+Продолжения могут создавать новые traces; общий `session.id` собирает их в одну
+Session. Это группировка диалога с данным root ID; новый root ID создаёт другую Session.
+Старые spans автоматически не перегруппировываются.
+
+Атрибуты `popot.role` и `popot.agent_profile` различают роли и профили.
+`popot.skills.configured` показывает конфигурацию роли; `popot.skills.loaded` — инструкции, загрузку
 которых подтвердил worker. Успешный `read_file` по пути выбранного skill получает
 `popot.skill.reference_read`. Skills — инструкции: эти метки не доказывают
 выполнение моделью всех требований skill. Новая сессия после rebuild получает
 актуальную загрузку skills; старые worker могут не отправлять эту метку.
 
-В Phoenix откройте Projects → `popot-runtime`: Traces покажет иерархию ролей и
-вызовов, Dashboard — стандартные графики latency, ошибок, LLM/tools и токенов.
+В Phoenix откройте Projects → `popot-runtime` → Sessions и выберите root ID,
+чтобы увидеть все traces задачи. Traces покажет иерархию ролей и вызовов,
+Dashboard — стандартные графики latency, ошибок, LLM/tools и токенов.
+Spans по умолчанию использует фильтр `parent_id is None`. Для наблюдения за
+работающими агентами очистите его: AGENT span отправляется после завершения роли,
+а закрытые LLM/TOOL spans поступают во время её работы и уже относятся к общей Session.
 Это не таблица CODE evaluations baseline. Специализированные графики по skills
 не создаются автоматически; их имена доступны в атрибутах spans.
 
