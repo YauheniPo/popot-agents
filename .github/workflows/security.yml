@@ -90,3 +90,16 @@ jobs:
           sarif_file: gitguardian.sarif
           checkout_path: ${{ github.workspace }}
           category: gitguardian
+      - name: Scan pushed commits for secrets
+        # Path mode above publishes workspace-relative SARIF. This gate keeps the
+        # commit-range coverage of the pinned action: a secret introduced by a
+        # pushed commit or by the pull request range fails the job. It runs after
+        # the SARIF upload so findings are always published, and it does not write
+        # gitguardian.sarif, which stays owned by the path scan.
+        uses: GitGuardian/ggshield/actions/secret@4cccd600fd3890a7aba07fd0a45e483f3099fe70 # v1.56.1
+        env:
+          GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
+          GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
