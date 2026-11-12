@@ -6,9 +6,11 @@ import hashlib
 import json
 import sys
 import threading
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 
 from popot_agents.orchestrator.cron import cron_matches, validate_cron
+from popot_agents.progress import observe_progress
 
 
 class CronScheduler:
@@ -86,6 +88,15 @@ class CronScheduler:
                     raise
 
     def _execute(self, key: tuple[str, int], session_id: str, config: dict, task: str) -> None:
+        tracer = getattr(self, 'tracer', None)
+        with (tracer.session(session_id, key[0], config) if tracer else nullcontext()) as span:
+            with (observe_progress(span.event) if span else nullcontext()):
+                self._execute_observed(key, session_id, config, task)
+            if span:
+                span.result({'outcome': {'status': 'completed' if config['_ax_cron']['state'] == 'TASK_STATE_COMPLETED'
+                                                   else 'failed'}})
+
+    def _execute_observed(self, key, session_id, config, task):
         chat = None
         messages = []
         stage = "worker_startup"

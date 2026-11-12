@@ -76,7 +76,8 @@ class SkillImportTests(unittest.TestCase):
                 self.assertIn(str(skill / 'references/behave-no-semantics-change.md'),
                               prepared['instructions'])
                 self.assertEqual({key: value for key, value in prepared.items() if key != 'instructions'},
-                                 {key: value for key, value in role.items() if key not in {'instructions', 'skills'}})
+                                 {**{key: value for key, value in role.items() if key not in {'instructions', 'skills'}},
+                                  '_loaded_skills': role['skills']})
                 loaded = prepared['instructions'][len(role['instructions']):]
                 self.assertLessEqual(len(loaded.encode('utf-8')), RUNTIME['limits']['skill_prompt_bytes'])
         self.assertEqual(selected, {'backend_engineer', 'frontend_engineer', 'qa_engineer', 'code_reviewer'})
@@ -115,7 +116,8 @@ class SkillImportTests(unittest.TestCase):
                                  'productivity/writing-for-agents/SKILL-MECHANICS.md'):
                     self.assertIn(document, prepared['instructions'])
                 self.assertEqual({key: value for key, value in prepared.items() if key != 'instructions'},
-                                 {key: value for key, value in role.items() if key not in {'instructions', 'skills'}})
+                                 {**{key: value for key, value in role.items() if key not in {'instructions', 'skills'}},
+                                  '_loaded_skills': role['skills']})
                 loaded = prepared['instructions'][len(role['instructions']):]
                 self.assertLessEqual(len(loaded.encode('utf-8')), RUNTIME['limits']['skill_prompt_bytes'])
                 self.assertIn('skills', role)

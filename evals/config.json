@@ -1,0 +1,40 @@
+{
+  "x-tracing": {
+    "enabled": true,
+    "project": "popot-runtime",
+    "endpoint": "http://host.docker.internal:6006",
+    "api_key_env": "PHOENIX_ADMIN_SECRET",
+    "outbox_directory": "/var/lib/popot-traces",
+    "request_timeout_seconds": 3,
+    "retry_seconds": 5
+  },
+  "x-baseline": {
+    "model": "ollama-cloud/deepseek-v4.1-flash:1017",
+    "repetitions": 2,
+    "workflow": {
+      "total_seconds": 600,
+      "turn_seconds": 300,
+      "max_turns": 2,
+      "max_no_progress": 1,
+      "verification_reserve_seconds": 60,
+      "max_child_recoveries": 1,
+      "max_concurrent": 1
+    },
+    "request_timeout_seconds": 660,
+    "inspection_timeout_seconds": 30
+  },
+  "services": {
+    "phoenix": {
+      "restart": "unless-stopped",
+      "ports": ["127.0.0.1:6006:6006"],
+      "environment": {
+        "PHOENIX_HOST": "0.0.0.0",
+        "PHOENIX_WORKING_DIR": "/data",
+        "PHOENIX_ENABLE_AUTH": "true",
+        "PHOENIX_TELEMETRY_ENABLED": "false",
+        "PHOENIX_ALLOW_EXTERNAL_RESOURCES": "false"
+      },
+      "mem_limit": "1g"
+    }
+  }
+}

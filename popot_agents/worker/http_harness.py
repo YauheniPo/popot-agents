@@ -14,7 +14,7 @@ from urllib import error, request
 from urllib.parse import urlsplit
 
 from popot_agents.prompts import render_prompt
-from popot_agents.runtime_config import RUNTIME, validate_model_parameters
+from popot_agents.runtime_config import MEMORY, RUNTIME, validate_model_parameters
 from popot_agents.progress import trace_event, trace_output, redact_text
 from popot_agents.skills import prepare_role_config
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env, export_artifacts, read_repository_context
@@ -243,6 +243,8 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
              *, extra_tools: dict | None = None, memory=None, deadline=None, turn_timeout=None,
              state: dict | None = None, discovery_cache=None, run_context=None) -> str:
+    if role_config and role_config.get('_loaded_skills'):
+        _trace('skills_loaded', skills=role_config['_loaded_skills'])
     base_url = os.environ.get("HARNESS_BASE_URL", "").rstrip("/")
     model = os.environ.get("HARNESS_MODEL", "")
     if not base_url.startswith(("http://", "https://")) or not model:
@@ -378,7 +380,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             render_prompt('memory/lifecycle') +
             (memory.dataset if memory.dataset else
              render_prompt('memory/unknown_project'))})
-    context = memory.context(min(RUNTIME["timeouts"]["memory_recall_seconds"], remaining_seconds()))
+    context = memory.context(min(MEMORY["timeouts"]["memory_recall_seconds"], remaining_seconds()))
     if context:
         first_user = next((index for index, item in enumerate(messages)
                            if item['role'] != 'system'), len(messages))
@@ -431,16 +433,16 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             phase = 'summary'
             try:
                 summary_messages = memory.summary_messages(answer.strip(), task_status=status)
-                for attempt in range(RUNTIME["memory"]["summary_attempts"]):
+                for attempt in range(MEMORY["summary_attempts"]):
                     budget = deadline - time.monotonic()
-                    if budget < RUNTIME["timeouts"]["memory_capture_min_seconds"]:
+                    if budget < MEMORY["timeouts"]["memory_capture_min_seconds"]:
                         _trace('memory_skipped', dataset=memory.dataset, reason='insufficient_time')
                         return
                     summary_body = {"model": model, "messages": summary_messages, **model_parameters,
                                     "tool_choice": "none",
                                     "response_format": {"type": "json_object"},
-                                    "max_tokens": RUNTIME["memory"]["summary_max_tokens"] if attempt == 0
-                                        else RUNTIME["memory"]["summary_retry_max_tokens"]}
+                                    "max_tokens": MEMORY["summary_max_tokens"] if attempt == 0
+                                        else MEMORY["summary_retry_max_tokens"]}
                     if 'reasoning_effort' in model_parameters:
                         # Native thinking models (including gateway routes) may need
                         # reasoning tokens before emitting the small extraction JSON.
@@ -458,8 +460,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                         data=json.dumps(summary_body).encode(), headers=headers, method="POST")
                     # A summary request may be repeated after a reset; never repeat a memory write or task.
                     summary_deadline = time.monotonic() + min(
-                        RUNTIME["timeouts"]["memory_summary_seconds"],
-                        budget - RUNTIME["timeouts"]["memory_capture_margin_seconds"])
+                        MEMORY["timeouts"]["memory_summary_seconds"],
+                        budget - MEMORY["timeouts"]["memory_capture_margin_seconds"])
                     transport_attempt = 0
                     while True:
                         try:
@@ -493,14 +495,14 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                         summary = parse_summary(content)
                         break
                     except (ValueError, KeyError, IndexError, TypeError, AttributeError):
-                        if attempt + 1 == RUNTIME["memory"]["summary_attempts"]:
+                        if attempt + 1 == MEMORY["summary_attempts"]:
                             raise
                         _trace('memory_summary_retry', dataset=memory.dataset,
                                reason=retry_reason)
                         summary_messages.append({'role': 'system', 'content':
                             render_prompt('memory/retry')})
                 phase = 'save'
-                memory.client.timeout = min(RUNTIME["timeouts"]["memory_request_seconds"], remaining_seconds() / 2)
+                memory.client.timeout = min(MEMORY["timeouts"]["memory_request_seconds"], remaining_seconds() / 2)
                 memory.save(summary, task_status=status)
             except Exception as exc:
                 memory.capture_failed(exc, phase=phase)

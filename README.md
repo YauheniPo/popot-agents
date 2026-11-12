@@ -137,19 +137,21 @@ its indexed graph. Memory persists independently of AX Tasks. See
 
 | File | Scope |
 | --- | --- |
-| [config/runtime.json](config/runtime.json) | Harness, session, model/tool/MCP budgets, message limits, logging and memory |
+| [config/runtime.json](config/runtime.json) | Harness, session, model/tool/MCP budgets, message and evidence limits, logging |
 | [config/agents.json](config/agents.json) | HTTP provider endpoints, model variable names and model parameters |
 | [config/roles/](config/roles/) | Role instructions, tools, permissions, skills, delegation and schedules |
 | [config/omniroute/settings.json](config/omniroute/settings.json) | OmniRoute settings, resilience, provider secret references and AX key policy |
 | [config/omniroute/combos.json](config/omniroute/combos.json) | Model order, fallback chains and their timeouts |
 | [ax_local/config.json](ax_local/config.json) | kind context, WorkerPool, Task resources, queue, snapshots, AX timeouts, delegation and proxy |
 | [pyproject.toml](pyproject.toml) | Python dependencies and pinned service, runtime and build versions |
+| [evals/config.json](evals/config.json) | Baseline model, repetitions, workflow budgets/timeouts and Phoenix service settings |
+| [memory/config.json](memory/config.json) | Cognee services and agent recall/capture, summary, journal and memory timeouts |
 | [compose.sh](compose.sh) | Docker Compose with versions loaded from pyproject.toml |
 | `.env` | Credentials, selected model names and published MCP port |
 
-Workers and MCP read the shared runtime file; only the AX deployment needs
-`ax_local/config.json`. For direct Python runs, `POPOT_RUNTIME_CONFIG` and
-`POPOT_AX_CONFIG` select alternate files before startup. Cluster scripts read the
+Workers and MCP read the shared runtime and memory files; only the AX deployment needs
+`ax_local/config.json`. For direct Python runs, `POPOT_RUNTIME_CONFIG`,
+`POPOT_MEMORY_CONFIG` and `POPOT_AX_CONFIG` select alternate files before startup. Cluster scripts read the
 repository's `ax_local/config.json`. Missing or unknown settings fail validation.
 
 After changing deployment settings, roles or profiles, run `bash ax_local/up.sh`.
@@ -301,7 +303,7 @@ passed literally:
 
 ```bash
 TASK="$(cat <<'TASK_TEXT'
-порезолвь конфликты и подтяни main и запуш в https://github.com/YauheniPo/popot-agents/pull/59
+https://github.com/YauheniPo/popot-bot-2.0/pull/97 порешай проблемы и подготовь к merge и sonarqube все порешай
 TASK_TEXT
 )" ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
@@ -732,7 +734,7 @@ uses the SDK's automatic protocol negotiation: modern servers use `2026-07-28`,
 and older servers use the supported initialize handshake. The gateway accepts
 both `2026-07-28` and the existing `2025-11-25` curl requests.
 The same file's `[tool.popot.build]` section pins AX, Substrate, ko, kubectl,
-OmniRoute, Holmes, Cognee, PostgreSQL, nginx and the Python/Go/Node base images.
+OmniRoute, Holmes, Cognee, Phoenix, PostgreSQL, nginx and the Python/Go/Node base images.
 Cognee also pins the UI source commit and archive SHA256; update its version,
 commit and checksum together. Launchers load these values automatically.
 For Compose commands, use `bash compose.sh --env-file .env -f <compose-file> ...`.

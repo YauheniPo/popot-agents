@@ -103,12 +103,12 @@ class CogneeSkillsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'not complete'):
             sync_skills(self.root, self.client, 'project-a')
 
-    def test_import_timeout_comes_from_shared_config(self):
-        from popot_agents.runtime_config import RUNTIME
+    def test_import_timeout_comes_from_memory_config(self):
+        from popot_agents.runtime_config import MEMORY
         adapter = Mock()
         with patch.dict(sys.modules, {'popot_agents.worker.cognee_memory': adapter}), \
              patch.dict(os.environ, {'DEFAULT_USER_PASSWORD': 'test-only'}), \
-             patch.dict(RUNTIME['timeouts'], {'memory_skill_import_seconds': 487}), \
+             patch.dict(MEMORY['timeouts'], {'memory_skill_import_seconds': 487}), \
              patch.object(sys, 'argv', ['import_skills.py']), \
              patch('memory.import_skills.sync_skills', return_value=1), \
              patch('sys.stdout', new_callable=io.StringIO):

@@ -10,7 +10,7 @@ import re
 import sys
 
 from popot_agents.prompts import render_prompt
-from popot_agents.runtime_config import RUNTIME
+from popot_agents.runtime_config import MEMORY, RUNTIME
 from popot_agents.tools import safe_tool_env
 from popot_agents.progress import trace_event, redact_text as scrub
 from .cognee_memory import CogneeMemory
@@ -71,7 +71,7 @@ class TurnMemory:
     def __init__(self, role: dict, messages: list[dict], *, client=None):
         env = safe_tool_env()
         self.dataset = project_dataset(messages, default=role.get('memory_project'))
-        self.task = scrub(next((m['content'] for m in reversed(messages) if m.get('role') == 'user'), ''))[:RUNTIME["memory"]["task_chars"]]
+        self.task = scrub(next((m['content'] for m in reversed(messages) if m.get('role') == 'user'), ''))[:MEMORY["task_chars"]]
         self.evidence = {'user': self.task}
         self.evidence_sources = {'user': {'source_type': 'user'}}
         self.enabled = bool(self.dataset and 'cognee' in role.get('mcpServers', {})
@@ -95,7 +95,7 @@ class TurnMemory:
         if self.enabled:
             self.client = client or CogneeMemory(
                 env.get('COGNEE_API_URL', 'http://host.docker.internal:3001'),
-                env['COGNEE_PASSWORD'], timeout=RUNTIME["timeouts"]["memory_request_seconds"])
+                env['COGNEE_PASSWORD'], timeout=MEMORY["timeouts"]["memory_request_seconds"])
         elif 'cognee' in role.get('mcpServers', {}):
             trace('memory_skipped', reason='no_project_or_credentials')
 
@@ -103,7 +103,7 @@ class TurnMemory:
         if not self.enabled:
             return
         try:
-            self.client.timeout = RUNTIME["timeouts"]["memory_session_start_seconds"]
+            self.client.timeout = MEMORY["timeouts"]["memory_session_start_seconds"]
             self.client.session_event({'session_id': self.session_id,
                 'dataset_name': self.dataset, 'role': self.role, 'status': 'running'})
             self.session_started = True
@@ -133,7 +133,7 @@ class TurnMemory:
             errors = [scrub(value)[:500] for value in outcome.get('errors', [])[:8]]
             failed = (outcome.get('status') == 'failed' or bool(errors)
                       or not success and not outcome)
-            self.client.timeout = RUNTIME["timeouts"]["memory_session_finish_seconds"]
+            self.client.timeout = MEMORY["timeouts"]["memory_session_finish_seconds"]
             self.client.session_event({'session_id': self.session_id,
                 'dataset_name': self.dataset, 'role': self.role,
                 'status': 'failed' if failed else 'completed', 'tools': self.tools,
@@ -150,18 +150,18 @@ class TurnMemory:
 
     def capture_failed(self, exc, *, phase='summary'):
         self.warnings.append('Memory capture failed; main task result is unchanged.')
-        if len(self.tools) < RUNTIME['memory']['trace_tool_limit']:
+        if len(self.tools) < MEMORY['trace_tool_limit']:
             self.tools.append({'name': 'memory.capture', 'status': 'error', 'output_chars': 0,
                                'error_type': type(exc).__name__, 'phase': phase})
 
     def context(self, seconds: float) -> str:
-        if not self.enabled or seconds < RUNTIME["timeouts"]["memory_recall_min_seconds"]:
+        if not self.enabled or seconds < MEMORY["timeouts"]["memory_recall_min_seconds"]:
             return ''
         try:
             # Login, dataset lookup and search share the actual remaining budget.
             self.client.timeout = seconds
-            result = self.client.recall(self.task[:RUNTIME["memory"]["query_chars"]], self.dataset,
-                                       top_k=RUNTIME["memory"]["recall_top_k"], timeout_seconds=seconds)
+            result = self.client.recall(self.task[:MEMORY["query_chars"]], self.dataset,
+                                       top_k=MEMORY["recall_top_k"], timeout_seconds=seconds)
             chunks = []
             warming_up = False
             for item in result if isinstance(result, list) else []:
@@ -183,7 +183,7 @@ class TurnMemory:
                 record = memory.get('record') if isinstance(memory, dict) else None
                 if isinstance(record, dict):
                     text = json.dumps({'text': text, 'provenance': record}, ensure_ascii=False)
-                chunks.append(scrub(text)[:RUNTIME["memory"]["chunk_chars"]])
+                chunks.append(scrub(text)[:MEMORY["chunk_chars"]])
             outcome = 'useful' if chunks else 'warming_up' if warming_up else 'empty'
             self.tools.append({'name': 'cognee.recall', 'status': 'success',
                                'output_chars': len(json.dumps(result)),
@@ -191,7 +191,7 @@ class TurnMemory:
             trace('memory_recalled', dataset=self.dataset, chunks=len(chunks), outcome=outcome)
             if chunks:
                 return (render_prompt('memory/context') + '\n'
-                        + json.dumps(chunks, ensure_ascii=False)[:RUNTIME["memory"]["context_chars"]])
+                        + json.dumps(chunks, ensure_ascii=False)[:MEMORY["context_chars"]])
         except Exception as exc:
             self.enabled = False
             self.warnings.append('Project memory recall failed; using current sources and tools.')
@@ -209,12 +209,12 @@ class TurnMemory:
             is_error = bool(json.loads(output).get('isError'))
         except (ValueError, AttributeError, TypeError):
             pass
-        if len(self.tools) < RUNTIME["memory"]["trace_tool_limit"]:
+        if len(self.tools) < MEMORY["trace_tool_limit"]:
             self.tools.append({'name': name[:200], 'status': 'error' if is_error else 'success',
                                'output_chars': len(output)})
         if name.startswith('mcp__cognee__') or is_error:
             return
-        self.evidence[call_id] = scrub(output)[:RUNTIME["memory"]["tool_evidence_chars"]]
+        self.evidence[call_id] = scrub(output)[:RUNTIME["limits"]["tool_evidence_chars"]]
         inspection = arguments.get('kind') if name == 'project_inspect' else None
         self.evidence_sources[call_id] = {
             'tool': name[:200], 'observed_at': datetime.now(timezone.utc).isoformat(),
@@ -222,7 +222,7 @@ class TurnMemory:
         }
         if isinstance(inspection, str):
             self.evidence_sources[call_id]['inspection_kind'] = inspection[:64]
-        while len(self.evidence) > RUNTIME["memory"]["tool_evidence_count"] + 1:
+        while len(self.evidence) > RUNTIME["limits"]["tool_evidence_count"] + 1:
             oldest = next(key for key in self.evidence if key != 'user')
             del self.evidence[oldest]
             del self.evidence_sources[oldest]
@@ -230,9 +230,9 @@ class TurnMemory:
     def summary_messages(self, answer: str, *, task_status: str = 'completed') -> list[dict]:
         return [
             {'role': 'system', 'content':
-             render_prompt('memory/extract', max_memories=RUNTIME["memory"]["max_memories"])},
+             render_prompt('memory/extract', max_memories=MEMORY["max_memories"])},
             {'role': 'user', 'content': json.dumps({
-                'project': self.dataset, 'task_status': task_status, 'task': self.task, 'answer': scrub(answer)[:RUNTIME["memory"]["answer_chars"]],
+                'project': self.dataset, 'task_status': task_status, 'task': self.task, 'answer': scrub(answer)[:MEMORY["answer_chars"]],
                 'evidence': self.evidence, 'evidence_sources': self.evidence_sources}, ensure_ascii=False)},
         ]
 
@@ -241,15 +241,15 @@ class TurnMemory:
         items = result.get('memories', [])
         if not isinstance(items, list):
             return 0
-        for item in items[:RUNTIME["memory"]["max_memories"]]:
+        for item in items[:MEMORY["max_memories"]]:
             if not isinstance(item, dict):
                 continue
             kind, source = item.get('kind'), item.get('source')
             text, quote = item.get('text'), item.get('quote')
             if (kind not in {'decision', 'constraint', 'fact', 'fix', 'check'}
                     or not isinstance(source, str) or source not in self.evidence or not isinstance(text, str)
-                    or not text.strip() or len(text) > RUNTIME["memory"]["text_chars"] or not isinstance(quote, str)
-                    or not quote.strip() or len(quote) > RUNTIME["memory"]["quote_chars"] or quote not in self.evidence[source]
+                    or not text.strip() or len(text) > MEMORY["text_chars"] or not isinstance(quote, str)
+                    or not quote.strip() or len(quote) > MEMORY["quote_chars"] or quote not in self.evidence[source]
                     or (source == 'user' and kind not in {'decision', 'constraint'})):
                 continue
             provenance = self.evidence_sources[source]
@@ -268,7 +268,7 @@ class TurnMemory:
                       'agent_model': os.getenv('HARNESS_MODEL', ''), 'references': references,
                       'trust': 'agent-derived historical notes; verify current sources', 'memories': accepted}
             self.client.remember(json.dumps(record, ensure_ascii=False), self.dataset)
-            if len(self.tools) < RUNTIME["memory"]["trace_tool_limit"]:
+            if len(self.tools) < MEMORY["trace_tool_limit"]:
                 self.tools.append({'name': 'cognee.remember', 'status': 'success', 'output_chars': 0})
         self.saved_count = len(accepted)
         trace('memory_saved' if accepted else 'memory_skipped', dataset=self.dataset,

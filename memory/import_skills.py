@@ -57,14 +57,14 @@ def sync_skills(root: Path, client, dataset: str = 'popot-agents') -> int:
 
 def main() -> None:
     from popot_agents.worker.cognee_memory import CogneeMemory
-    from popot_agents.runtime_config import RUNTIME
+    from popot_agents.runtime_config import MEMORY
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path('/app/popot-skills'))
     parser.add_argument('--dataset', default='popot-agents')
     args = parser.parse_args()
     client = CogneeMemory('http://127.0.0.1:8000', os.environ['DEFAULT_USER_PASSWORD'],
-                          timeout=RUNTIME['timeouts']['memory_skill_import_seconds'])
+                          timeout=MEMORY['timeouts']['memory_skill_import_seconds'])
     count = sync_skills(args.root, client, args.dataset)
     print(f'Cognee skills: {count} imported into {args.dataset}')
 

@@ -14,6 +14,8 @@
 !popot_agents/worker/**
 !config/
 !config/runtime.json
+!memory/
+!memory/config.json
 !config/prompts/
 !config/prompts/**
 !ax_local/

@@ -27,7 +27,8 @@ class ConfigSplitTests(unittest.TestCase):
         ax = json.loads((ROOT / 'ax_local/config.json').read_text())
         self.assertIn('context', ax)
         self.assertTrue(shared.keys().isdisjoint(ax))
-        self.assertIsInstance(shared["memory"], dict)
+        self.assertNotIn('memory', shared)
+        self.assertGreater(shared['limits']['tool_evidence_count'], 0)
 
     def test_shared_services_do_not_load_backend_configs(self):
         self.run_python('''
