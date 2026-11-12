@@ -71,6 +71,11 @@ class UpScriptTests(unittest.TestCase):
         memory.mkdir()
         (memory / 'up.sh').write_text(
             '#!/usr/bin/env bash\nprintf "memory-up\\n" >> "$CALLS"\n')
+        evals = self.root / 'evals'
+        evals.mkdir()
+        (evals / 'up.sh').write_text(
+            '#!/usr/bin/env bash\nprintf "phoenix-up\\n" >> "$CALLS"\n'
+            'exit "${PHOENIX_FAIL:-0}"\n')
         shutil.copyfile(SOURCE, self.ax / "up.sh")
         shutil.copyfile(SOURCE.parent / 'compose.sh', self.ax / 'compose.sh')
         config = self.root / 'config'
@@ -166,7 +171,7 @@ class UpScriptTests(unittest.TestCase):
         result = self.run_up()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(calls[0], "bootstrap.sh")
+        self.assertEqual(calls[:2], ["phoenix-up", "bootstrap.sh"])
         self.assertIn("substrate-cleanup", calls)
         self.assertLess(calls.index("substrate-cleanup"), calls.index("worker-health"))
         self.assertLess(calls.index('worker-health'), calls.index('memory-up'))
@@ -182,6 +187,12 @@ class UpScriptTests(unittest.TestCase):
         result = self.run_up()
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
+
+    def test_failed_phoenix_provision_prevents_ax_start(self):
+        self.env['PHOENIX_FAIL'] = '1'
+        result = self.run_up()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls.read_text().splitlines(), ['phoenix-up'])
 
     def test_operator_prepares_holmes_without_starting_an_investigation(self):
         (self.root / 'config/roles/project_operator.json').write_text(json.dumps({'agent':'omniroute_free'}))

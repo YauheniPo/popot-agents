@@ -6,12 +6,32 @@ services:
       file: config.json
       service: phoenix
     image: ${PHOENIX_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
+    command: ["/opt/popot/evals/phoenix_server.py"]
     environment:
       PHOENIX_SECRET: ${PHOENIX_SECRET:?Generate private Phoenix environment first}
       PHOENIX_ADMIN_SECRET: ${PHOENIX_ADMIN_SECRET:?Generate private Phoenix environment first}
       PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD: ${PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD:?Generate private Phoenix environment first}
     volumes:
       - phoenix-data:/data
+      - .:/opt/popot/evals:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6006/healthz', timeout=3).close()"]
+      interval: 5s
+      timeout: 4s
+      retries: 24
+
+  phoenix-init:
+    profiles: ["bootstrap"]
+    image: ${PHOENIX_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
+    command: ["/opt/popot/evals/phoenix_providers.py"]
+    environment:
+      PHOENIX_ADMIN_SECRET: ${PHOENIX_ADMIN_SECRET:?Generate private Phoenix environment first}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      NOUS_API_KEY: ${NOUS_API_KEY:-}
+    volumes:
+      - .:/opt/popot/evals:ro
 
 volumes:
   phoenix-data:

@@ -77,8 +77,18 @@ worker через `env_names`; `PHOENIX_ADMIN_SECRET` служит экспор�
 Встроенный MCP и его инструменты описаны в [AX operations](../ax_local/README.md#project-operator-единая-роль-для-анализа-проекта).
 
 ```bash
-bash compose.sh --env-file .env -f evals/compose.yaml up -d
+bash evals/up.sh
 ```
+
+`ax_local/up.sh` вызывает этот запуск автоматически. После готовности Phoenix
+bootstrap создаёт или обновляет подключения из `evals/config.json → x-providers`.
+Ключи читаются из `.env` только контейнером `phoenix-init`; сохраняются штатным
+API Phoenix в зашифрованном виде. Пустой ключ пропускает соответствующее
+подключение; ранее сохранённое подключение автоматически не удаляется.
+Повторный запуск сохраняет ID, применяет новые ключи и проверяет результат.
+`models` задаёт список в меню Phoenix, `extra_body` — параметры запросов по
+умолчанию (включая обязательные `tags` Nous). Настройки браузерного Default Model
+остаются пользовательским предпочтением. Подробности — в [гайде](../evals/README.md#phoenix).
 
 **Cognee** — после правок `memory/config.json → services`:
 
