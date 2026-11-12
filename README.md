@@ -23,7 +23,9 @@ cp .env.example .env
 bash ax_local/up.sh
 ```
 
-The launcher starts AX, memory and resource monitoring. The MCP endpoint is
+The launcher starts AX, memory, resource monitoring and Phoenix, including its
+[provider setup](evals/README.md#phoenix). Configure the three Phoenix secrets
+and the provider keys in `.env` before launching. The MCP endpoint is
 **http://127.0.0.1:8003/mcp** (`AX_MCP_PUBLISH_PORT` overrides the published port).
 For on-demand diagnosis of AX pods in kind, see
 [HolmesGPT setup](ax_local/README.md#holmesgpt-диагностика-ax-в-kind).
@@ -303,7 +305,7 @@ passed literally:
 
 ```bash
 TASK="$(cat <<'TASK_TEXT'
-https://github.com/YauheniPo/popot-bot-2.0/pull/97 порешай проблемы и подготовь к merge и sonarqube все порешай
+https://github.com/YauheniPo/popot-agents/pull/61 порешай проблемы и подготовь к merge и sonarqube все порешай
 TASK_TEXT
 )" ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```

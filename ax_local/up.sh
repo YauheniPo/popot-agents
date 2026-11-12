@@ -10,6 +10,8 @@ if [[ ! -f "$ROOT/.env" ]]; then
   exit 1
 fi
 
+bash "$ROOT/evals/up.sh"
+
 if [[ ! -s "$LOCAL/kubeconfig" || ! -s "$LOCAL/kubeconfig-container" || \
       ! -s "$LOCAL/worker-image" || ! -x "$LOCAL/bin/ax" || \
       ! -d "$LOCAL/src/ax/.git" || ! -d "$LOCAL/src/substrate/.git" || ! -x "$LOCAL/bin/ko" ]]; then

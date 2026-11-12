@@ -87,7 +87,7 @@ Spans по умолчанию использует фильтр `parent_id is No
 Применить код и настройки:
 
 ```bash
-bash compose.sh --env-file .env -f evals/compose.yaml up -d
+bash evals/up.sh
 bash ax_local/rebuild-worker.sh
 ```
 
@@ -174,7 +174,7 @@ python3 -m evals.report reports/evals/baseline-unique-id reports/evals/baseline-
 [../pyproject.toml](../pyproject.toml), `tool.popot.build.PHOENIX_IMAGE`.
 Настройки сервиса находятся в [config.json](config.json): публикация порта,
 авторизация, телеметрия и лимит памяти. [compose.yaml](compose.yaml) подключает
-их штатным `extends`, без отдельного загрузчика. Endpoint публикуется только на
+их штатным `extends`. Endpoint публикуется только на
 `127.0.0.1:6006`; аутентификация включена, данные находятся в named volume.
 Секреты хранятся в общем корневом `.env`, исключённом из Git, с правами `0600`.
 Пример переменных — в [../.env.example](../.env.example). Требуются три разных случайных
@@ -185,13 +185,50 @@ Email для входа — `admin@localhost`, пароль — значение
 initial password в `.env` не сбрасывает пароль пользователя.
 
 ```bash
-bash compose.sh --env-file .env -f evals/compose.yaml up -d
+bash evals/up.sh
 docker exec popot-evals-phoenix-1 python -c "from pathlib import Path; Path('/tmp/popot-eval-code').mkdir(exist_ok=True)"
 docker cp evals popot-evals-phoenix-1:/tmp/popot-eval-code/
 docker cp reports/evals/baseline-unique-id popot-evals-phoenix-1:/tmp/
 docker exec -i -w /tmp/popot-eval-code popot-evals-phoenix-1 python -u -m evals.phoenix /tmp/baseline-unique-id
 docker cp popot-evals-phoenix-1:/tmp/baseline-unique-id/phoenix.json reports/evals/baseline-unique-id/phoenix.json
 ```
+
+`ax_local/up.sh` также запускает Phoenix и его bootstrap. В
+`config.json → x-providers` заданы OpenRouter, NVIDIA NIM, Ollama Cloud и Nous:
+имя подключения, endpoint, имя переменной ключа, `models` и необязательный
+`extra_body`. Список моделей управляется этим JSON; это выбранные модели проекта,
+а не автоматически загруженный полный каталог провайдера. Квоты и доступность
+проверяются при выполнении запроса; bootstrap не запускает платную генерацию.
+
+`up.sh` ждёт готовности сервера и запускает одноразовый `phoenix-init`, который
+создаёт или обновляет подключения штатным GraphQL API и сверяет настройки и
+списки моделей. ID сохраняются при повторной раскатке, ключи обновляются из
+корневого `.env`; пользовательские подключения с другими именами не меняются.
+Без ключа соответствующий провайдер пропускается с явным статусом. Это не
+удаляет старое подключение. Ошибка bootstrap завершает запуск с ненулевым кодом.
+Непосредственный `docker compose up` запускает сервер без регистрации подключений;
+для полной раскатки используйте `bash evals/up.sh`.
+Сервер пересоздаётся при запуске, чтобы загрузить свежий JSON. Данные в named
+volume сохраняются; существующий AX exporter повторяет доставку из outbox.
+
+`phoenix_server.py` перед запуском закреплённого Phoenix подключает две адаптации:
+модели управляемых подключений берутся из `x-providers`, а параметры `extra_body`
+добавляются к запросам соответствующего endpoint. Например, Nous получает
+`tags` автоматически в Playground и серверном Chat Completions API. Явные
+параметры запроса имеют приоритет. Шифрование ключей, права доступа, выполнение
+запросов и закрытие клиентов остаются в Phoenix. При обновлении Phoenix нужно
+проверить эти точки интеграции и повторить проверку раскатки с пустой базой.
+Браузерное предпочтение Default Model bootstrap не изменяет.
+
+Проверить bootstrap и адаптацию с пустой временной базой, повторной регистрацией
+и короткой генерацией у всех четырёх провайдеров:
+
+```bash
+PHOENIX_TEST_PROVIDERS_LIVE=1 python3 -m pytest -q -s tests/test_phoenix_providers_live.py
+```
+
+Это opt-in проверка с реальными ключами из `.env`; вызовы учитываются в квотах
+провайдеров. Основной набор тестов выполняется без этих обращений.
 
 SDK уже установлен в закреплённом Phoenix image; зависимости рабочего
 приложения не меняются. [phoenix.py](phoenix.py) сохраняет dataset version,
