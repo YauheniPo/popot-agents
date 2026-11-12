@@ -205,101 +205,126 @@ _HEREDOC_WORD = re.compile(r'[A-Za-z0-9_.-]+')
 _ARITHMETIC = (('$((', '))'), ('$[', ']'), ('((', '))'))
 
 
+class _LineScan:
+    """One physical line's heredoc, quote and arithmetic state machine."""
+
+    def __init__(self, line, quote, closer, offsets):
+        self.line, self.quote, self.closer, self.offsets = line, quote, closer, offsets
+        self.index, self.word_start, self.substitutions = 0, True, 0
+        self.found, self.finished = [], False
+
+    def scan(self):
+        while self.index < len(self.line) and not self.finished:
+            self.step()
+        return self.found, self.quote, self.closer
+
+    def step(self):
+        char = self.line[self.index]
+        if self.closer:
+            self._close_group()
+        elif self.quote:
+            self._skip_quoted(char)
+        elif char == '\\':
+            self.word_start, self.index = False, self.index + 2
+        elif char == '#' and self.word_start:
+            self.finished = True
+        elif char in {'"', "'"}:
+            self.quote, self.word_start, self.index = char, False, self.index + 1
+        elif self.line.startswith('<<', self.index):
+            self._heredoc()
+        elif pair := self._arithmetic_pair():
+            self._skip_arithmetic(pair)
+        elif self.line.startswith('$(', self.index):
+            self.substitutions += 1
+            self.word_start = False
+            self.index += 2
+        elif char == ')':
+            self._close_substitution()
+        elif char in ' \t\n;&|(':
+            self.word_start, self.index = True, self.index + 1
+        else:
+            self.word_start, self.index = False, self.index + 1
+
+    def _close_group(self):
+        end = self.line.rfind(self.closer, self.index)
+        if end < 0:
+            self.finished = True
+            return
+        self.index = end + len(self.closer)
+        self.closer, self.word_start = None, False
+
+    def _skip_quoted(self, char):
+        if char == '\\' and self.quote == '"':
+            self.index += 1
+        elif char == self.quote:
+            self.quote = None
+        self.word_start = False
+        self.index += 1
+
+    def _arithmetic_pair(self):
+        return next((pair for pair in _ARITHMETIC if self.line.startswith(pair[0], self.index)), None)
+
+    def _skip_arithmetic(self, pair):
+        opener, end_token = pair
+        end = self.line.rfind(end_token, self.index + len(opener))
+        if end < 0:
+            self.closer, self.finished = end_token, True
+            return
+        self.index = end + len(end_token)
+        self.word_start = False
+
+    def _close_substitution(self):
+        if self.substitutions:
+            self.substitutions -= 1
+        else:
+            self.word_start = True
+        self.index += 1
+
+    def _heredoc(self):
+        if self.line.startswith('<<<', self.index):
+            self.word_start, self.index = False, self.index + 3
+            return
+        opener = self.index
+        word, strip_tabs, escaped, closing, end = self._heredoc_delimiter()
+        self.index = end
+        if not word:
+            self.finished = True
+            return
+        if self.index < len(self.line) and self.line[self.index] not in ' \t;&|<>()':
+            # The delimiter word continues past what the scan can resolve
+            # (for example `<<EOF#tag`): keep the body opaque instead of
+            # closing it before the shell would.
+            unknown = (None, strip_tabs, True)
+            self.found.append(unknown + (opener,) if self.offsets else unknown)
+            self.finished = True
+            return
+        item = (word, strip_tabs, escaped or bool(closing))
+        self.found.append(item + (opener,) if self.offsets else item)
+        self.word_start = False
+
+    def _heredoc_delimiter(self):
+        """Delimiter word and the index the scan resumes at."""
+        start = self.index + 2
+        strip_tabs = self.line.startswith('-', start)
+        position = start + (1 if strip_tabs else 0)
+        while position < len(self.line) and self.line[position] in ' \t':
+            position += 1
+        escaped = self.line[position:position + 1] == '\\'
+        position += 1 if escaped else 0
+        closing = self.line[position] if self.line[position:position + 1] in {'"', "'"} else None
+        if closing:
+            end = self.line.find(closing, position + 1)
+            word = self.line[position + 1:end] if end != -1 else ''
+            return word, strip_tabs, escaped, closing, (end + 1 if end != -1 else len(self.line))
+        match = _HEREDOC_WORD.match(self.line, position)
+        if not match:
+            return '', strip_tabs, escaped, closing, len(self.line)
+        return match[0], strip_tabs, escaped, closing, match.end()
+
+
 def _scan_line(line, quote=None, closer=None, *, offsets=False):
     """Heredoc openers on one physical line plus the quote and arithmetic state left."""
-    found, index, word_start, substitutions = [], 0, True, 0
-    while index < len(line):
-        char = line[index]
-        if closer:
-            end = line.rfind(closer, index)
-            if end < 0:
-                return found, quote, closer
-            index = end + len(closer)
-            closer = None
-            word_start = False
-            continue
-        if quote:
-            if char == '\\' and quote == '"':
-                index += 1
-            elif char == quote:
-                quote = None
-            word_start = False
-            index += 1
-            continue
-        if char == '\\':
-            word_start = False
-            index += 2
-            continue
-        if char == '#' and word_start:
-            return found, quote, closer
-        if char in {'"', "'"}:
-            quote = char
-            word_start = False
-            index += 1
-            continue
-        if line.startswith('<<', index):
-            if line.startswith('<<<', index):
-                word_start = False
-                index += 3
-                continue
-            opener = index
-            index += 2
-            strip_tabs = line.startswith('-', index)
-            index += 1 if strip_tabs else 0
-            while index < len(line) and line[index] in ' \t':
-                index += 1
-            escaped = line[index:index + 1] == '\\'
-            if escaped:
-                index += 1
-            closing = line[index] if line[index:index + 1] in {'"', "'"} else None
-            if closing:
-                end = line.find(closing, index + 1)
-                word = line[index + 1:end] if end != -1 else ''
-                index = end + 1 if end != -1 else len(line)
-            else:
-                match = _HEREDOC_WORD.match(line, index)
-                word, index = (match[0], match.end()) if match else ('', len(line))
-            if not word:
-                return found, quote, closer
-            if index < len(line) and line[index] not in ' \t;&|<>()':
-                # The delimiter word continues past what the scan can resolve
-                # (for example `<<EOF#tag`): keep the body opaque instead of
-                # closing it before the shell would.
-                unknown = (None, strip_tabs, True)
-                return found + [unknown + (opener,) if offsets else unknown], quote, closer
-            item = (word, strip_tabs, escaped or bool(closing))
-            found.append(item + (opener,) if offsets else item)
-            word_start = False
-            continue
-        arithmetic = next((pair for pair in _ARITHMETIC if line.startswith(pair[0], index)), None)
-        if arithmetic:
-            opener, end_token = arithmetic
-            end = line.rfind(end_token, index + len(opener))
-            if end < 0:
-                return found, quote, end_token
-            index = end + len(end_token)
-            word_start = False
-            continue
-        if line.startswith('$(', index):
-            substitutions += 1
-            word_start = False
-            index += 2
-            continue
-        if char == ')':
-            if substitutions:
-                substitutions -= 1
-                word_start = False
-            else:
-                word_start = True
-            index += 1
-            continue
-        if char in ' \t\n;&|(':
-            word_start = True
-            index += 1
-            continue
-        word_start = False
-        index += 1
-    return found, quote, closer
+    return _LineScan(line, quote, closer, offsets).scan()
 
 
 def _continued_body(raw):
@@ -338,6 +363,7 @@ def _shell_commands(command):
 
 
 def _shell_reads_stdin(words):
+    """Whether a supported shell would read its script from stdin."""
     if not words or os.path.basename(words[0]) not in _SHELLS:
         return False
     options, stdin = words[1:], False
@@ -347,18 +373,25 @@ def _shell_reads_stdin(words):
             break
         if option in {'--help', '--version'}:
             return False
-        if option in {'--rcfile', '--init-file'}:
-            options = options[1:]
-        elif option.startswith('--'):
-            continue
-        else:
-            letters = option[1:]
-            if 'c' in letters:
-                return False
-            stdin = stdin or 's' in letters
-            if letters.endswith(('o', 'O')):
-                options = options[1:]  # -o pipefail / -O extglob consume an option name.
+        options, stdin, stop = _shell_option(option, options, stdin)
+        if stop:
+            return False
     return stdin or not options
+
+
+def _shell_option(option, options, stdin):
+    """Consume one shell option: remaining words, stdin use and whether the shell exits."""
+    if option in {'--rcfile', '--init-file'}:
+        return options[1:], stdin, False
+    if option.startswith('--'):
+        return options, stdin, False
+    letters = option[1:]
+    if 'c' in letters:
+        return options, stdin, True
+    stdin = stdin or 's' in letters
+    if letters.endswith(('o', 'O')):
+        options = options[1:]  # -o pipefail / -O extglob consume an option name.
+    return options, stdin, False
 
 
 def _stdin_overridden(tail):
@@ -382,40 +415,60 @@ def _heredoc_bodies(command):
     for number, raw in enumerate(command.split('\n')):
         line = raw.rstrip('\r')
         if pending:
-            body = pending[0]
-            if not continued and (line.lstrip('\t') if body['tabs'] else line) == body['word']:
-                pending.pop(0)
-                continued = False
-            else:
-                body['lines'].append(line.lstrip('\t') if body['tabs'] else line)
-                continued = not body['quoted'] and _continued_body(raw)
+            continued = _consume_heredoc_line(pending, line, raw, continued)
             continue
         found, quote, closer = _scan_line(line, quote, closer, offsets=True)
         if closer:
             continue
         for word, tabs, quoted, offset in found:
-            if word is None:
+            body = _heredoc_body(word, tabs, quoted, offset, line, number, bodies)
+            if body is None:
                 return bodies
-            prefix = line[:offset]
-            descriptor = re.search(r'(?:^|[\s;|&])([0-9]+)$', prefix)
-            if descriptor:
-                prefix = prefix[:descriptor.start(1)]
-            commands = _line_commands(prefix)
-            words = _command_words(commands[-1]) if commands else []
-            stdin = not descriptor or descriptor[1] == '0'
-            script = stdin and _shell_reads_stdin(words) and not _stdin_overridden(line[offset:])
-            # Only the last stdin redirect supplies a shell's script. Earlier
-            # unquoted bodies still undergo the outer shell's substitutions.
-            consumer = (number, len(commands))
-            if stdin:
-                for previous in bodies:
-                    if previous['consumer'] == consumer:
-                        previous['script'] = False
-            body = {'word': word, 'tabs': tabs, 'quoted': quoted, 'script': script,
-                    'consumer': consumer, 'lines': []}
             bodies.append(body)
             pending.append(body)
     return bodies
+
+
+def _consume_heredoc_line(pending, line, raw, continued):
+    """Advance one open heredoc body; report whether the next line continues it."""
+    body = pending[0]
+    content = _heredoc_content(body, line)
+    if not continued and content == body['word']:
+        pending.pop(0)
+        return False
+    body['lines'].append(content)
+    return not body['quoted'] and _continued_body(raw)
+
+
+def _heredoc_content(body, line):
+    """The line as the body records it, with `<<-` leading tabs stripped."""
+    return line.lstrip('\t') if body['tabs'] else line
+
+
+def _heredoc_body(word, tabs, quoted, offset, line, number, bodies):
+    """One heredoc body record, or None when the delimiter cannot be resolved."""
+    if word is None:
+        return None
+    prefix = line[:offset]
+    descriptor = re.search(r'(?:^|[\s;|&])(\d+)$', prefix)
+    if descriptor:
+        prefix = prefix[:descriptor.start(1)]
+    commands = _line_commands(prefix)
+    words = _command_words(commands[-1]) if commands else []
+    stdin = not descriptor or descriptor[1] == '0'
+    consumer = (number, len(commands))
+    if stdin:
+        _detach_shadowed_script(bodies, consumer)
+    return {'word': word, 'tabs': tabs, 'quoted': quoted,
+            'script': stdin and _shell_reads_stdin(words) and not _stdin_overridden(line[offset:]),
+            'consumer': consumer, 'lines': []}
+
+
+def _detach_shadowed_script(bodies, consumer):
+    """Only the last stdin redirect supplies a shell's script."""
+    for previous in bodies:
+        if previous['consumer'] == consumer:
+            previous['script'] = False
 
 
 def _assignment(tokens):
@@ -548,73 +601,127 @@ def _command_words(tokens):
         if not shell and name in {'command', 'exec', 'time'}:
             return []
         external = '/' in tokens[0]
-        tokens = tokens[1:]
-        if name == 'nice':
-            tokens = _nice_arguments(tokens)
-        elif name == 'timeout':
-            tokens = _timeout_arguments(tokens)
-        else:
-            tokens = _wrapper_arguments(name, tokens, external)
-        if name in _ASSIGNING_WRAPPERS:
-            # env and sudo re-parse their arguments, so quoting does not hide a prefix.
-            while tokens and _ASSIGNMENT.fullmatch(tokens[0]):
-                tokens = tokens[1:]
-        elif name == 'time' and not external:
-            while _assignment(tokens):
-                tokens = tokens[1:]
+        tokens = _without_wrapper_assignments(name, _after_wrapper(name, tokens[1:], external), external)
         shell = name == 'command' or name == 'time' and not external
     return tokens
 
 
+def _after_wrapper(name, tokens, external):
+    """Words a supported wrapper passes on as its command."""
+    if name == 'nice':
+        return _nice_arguments(tokens)
+    if name == 'timeout':
+        return _timeout_arguments(tokens)
+    return _wrapper_arguments(name, tokens, external)
+
+
+def _without_wrapper_assignments(name, tokens, external):
+    """env, sudo and the time keyword re-read their own assignment prefixes."""
+    if name in _ASSIGNING_WRAPPERS:
+        # env and sudo re-parse their arguments, so quoting does not hide a prefix.
+        while tokens and _ASSIGNMENT.fullmatch(tokens[0]):
+            tokens = tokens[1:]
+    elif name == 'time' and not external:
+        while _assignment(tokens):
+            tokens = tokens[1:]
+    return tokens
+
+
+class _SubstitutionScan:
+    """End of one static command substitution, respecting its inner quoted words."""
+
+    def __init__(self, command, start, closer):
+        self.command, self.index, self.closer = command, start, closer
+        self.quote, self.depth, self.end = None, 1, None
+
+    def find(self):
+        while self.index < len(self.command):
+            if self._step():
+                return self.end
+        return None
+
+    def _step(self):
+        char = self.command[self.index]
+        if char == '\\' and self.quote != "'":
+            self.index += 2
+            return False
+        if self.quote:
+            if char == self.quote:
+                self.quote = None
+        elif char in {'"', "'"}:
+            self.quote = char
+        elif char == self.closer:
+            self.depth -= 1
+            if not self.depth:
+                self.end = self.index
+                return True
+        elif char == '(' and self.closer == ')':
+            self.depth += 1
+        self.index += 1
+        return False
+
+
 def _substitution_end(command, start, closer):
     """End of a static command substitution, respecting its inner quoted words."""
-    quote, depth, index = None, 1, start
-    while index < len(command):
-        char = command[index]
-        if char == '\\' and quote != "'":
-            index += 2
-            continue
-        if quote:
-            if char == quote:
-                quote = None
-        elif char in {'"', "'"}:
-            quote = char
-        elif char == closer:
-            depth -= 1
-            if not depth:
-                return index
-        elif char == '(' and closer == ')':
-            depth += 1
-        index += 1
-    return None
+    return _SubstitutionScan(command, start, closer).find()
 
 
 def _command_substitutions(command, *, heredoc=False):
     """Executable substitutions, including double quotes but excluding literal data."""
     quote, index = None, 0
     while index < len(command):
-        char = command[index]
-        if char == '\\' and quote != "'":
-            index += 2
-            continue
-        if not heredoc and quote == "'":
-            if char == quote:
-                quote = None
-        elif not heredoc and char == quote:
-            quote = None
-        elif not heredoc and not quote and char in {'"', "'"}:
-            quote = char
-        elif not heredoc and not quote and char == '#' and (not index or command[index - 1] in ' \t\n;&|('):
-            newline = command.find('\n', index)
-            index = len(command) if newline < 0 else newline
-        elif (char == '`' or command.startswith('$(', index) and not command.startswith('$((', index)
-              or not quote and not heredoc and command[index:index + 2] in {'<(', '>('}):
-            start = index + (1 if char == '`' else 2)
-            end = _substitution_end(command, start, '`' if char == '`' else ')')
-            if end is not None:
-                yield command[start:end]
-                index = end
-        index += 1
+        quote, index, found = _substitution_step(command, index, quote, heredoc)
+        if found is not None:
+            yield found
+
+
+def _substitution_step(command, index, quote, heredoc):
+    """Consume one character run; return the quote state, next index and any substitution."""
+    char = command[index]
+    if char == '\\' and quote != "'":
+        return quote, index + 2, None
+    if not heredoc and _quote_syntax(char, quote):
+        return _quote_after(char, quote), index + 1, None
+    if not heredoc and not quote and char == '#' and _comment_start(command, index):
+        newline = command.find('\n', index)
+        return quote, (len(command) if newline < 0 else newline), None
+    opener, closer = _substitution_open(command, index, char, quote, heredoc)
+    end = _substitution_end(command, index + opener, closer) if opener else None
+    if end is None:
+        return quote, index + 1, None
+    return quote, end, command[index + opener:end]
+
+
+def _quote_syntax(char, quote):
+    """Whether this character belongs to the quote state machine.
+
+    Every character inside single quotes is literal, so it must not be read as
+    a substitution opener.
+    """
+    return quote == "'" or char == quote or not quote and char in {'"', "'"}
+
+
+def _quote_after(char, quote):
+    """The quote state after consuming this quote character."""
+    if char == quote:
+        return None
+    return quote or char
+
+
+def _comment_start(command, index):
+    """An unquoted `#` opens a comment only at a word boundary."""
+    return index == 0 or command[index - 1] in ' \t\n;&|('
+
+
+def _substitution_open(command, index, char, quote, heredoc):
+    """Opener length and closing token of a substitution here, else zero length."""
+    if char == '`':
+        return 1, '`'
+    if command.startswith('$(', index) and not command.startswith('$((', index):
+        return 2, ')'
+    if not quote and not heredoc and command[index:index + 2] in {'<(', '>('}:
+        return 2, ')'
+    return 0, ''
 
 
 def executed_commands(command):
@@ -626,22 +733,34 @@ def executed_commands(command):
     pending = [command] if isinstance(command, str) else []
     while pending:
         source = pending.pop()
-        pending.extend(_command_substitutions(_without_heredoc_bodies(source)))
-        for body in _heredoc_bodies(source):
-            content = '\n'.join(body['lines'])
-            if not body['quoted']:
-                pending.extend(_command_substitutions(content, heredoc=True))
-            if body['script']:
-                pending.append(content)
+        pending.extend(_source_fragments(source))
         for tokens in _shell_commands(source):
             tokens = _command_words(tokens)
             if not tokens:
                 continue
             if os.path.basename(tokens[0]) in _SHELLS:
-                if len(tokens) > 2 and re.fullmatch(r'-[A-Za-z]*c', tokens[1]):
-                    pending.append(tokens[2])
+                pending.extend(_shell_scripts(tokens))
             else:
                 yield tokens
+
+
+def _source_fragments(source):
+    """Substitutions and executable heredoc bodies inside one source string."""
+    fragments = list(_command_substitutions(_without_heredoc_bodies(source)))
+    for body in _heredoc_bodies(source):
+        content = '\n'.join(body['lines'])
+        if not body['quoted']:
+            fragments.extend(_command_substitutions(content, heredoc=True))
+        if body['script']:
+            fragments.append(content)
+    return fragments
+
+
+def _shell_scripts(tokens):
+    """Inline `sh -c` script arguments, which become their own sources."""
+    if len(tokens) > 2 and re.fullmatch(r'-[A-Za-z]*c', tokens[1]):
+        return [tokens[2]]
+    return []
 
 
 def _head_read(tokens):
@@ -680,54 +799,112 @@ def _runs_checks(command):
         name, args = os.path.basename(words[0]), words[1:]
         if '--version' in args or '--help' in args:
             continue
-        if name in {'pytest', 'unittest'}:
+        if _check_invocation(name, args):
             return True
-        if re.fullmatch(r'python(?:\d+(?:\.\d+)*)?', name) and '-m' in args:
-            module_index = args.index('-m')
-            if any(arg not in {'-u', '-B', '-I', '-E', '-s', '-S', '-O', '-OO', '-q'}
-                   for arg in args[:module_index]):
-                continue
-            args = args[module_index + 1:]
-            if args and args[0] in {'pytest', 'unittest'}:
-                return True
-            if args and args[0] == 'coverage':
-                name, args = 'coverage', args[1:]
-        if name == 'coverage' and args and args[0] == 'run' and '-m' in args:
-            module_index = args.index('-m')
-            if any(arg not in {'--branch', '--parallel-mode', '-p', '--timid'}
-                   for arg in args[1:module_index]):
-                continue
-            module = args[module_index + 1:]
-            if module and module[0] in {'pytest', 'unittest'}:
-                return True
-        if name in {'node', 'nodejs'} and args and args[0] == '--test':
-            return True
-        if name in {'npm', 'pnpm', 'yarn'}:
-            script = args[1:] if args and args[0] in {'run', 'run-script'} else args
-            if script and re.fullmatch(r'test(?::[\w-]+)?', script[0]):
-                return True
     return False
+
+
+_PYTHON_FLAGS = {'-u', '-B', '-I', '-E', '-s', '-S', '-O', '-OO', '-q'}
+_COVERAGE_FLAGS = {'--branch', '--parallel-mode', '-p', '--timid'}
+_PYTHON_NAME = re.compile(r'python(?:\d+(?:\.\d+)*)?')
+
+
+def _check_invocation(name, args):
+    """Whether these resolved words run a test command."""
+    if name in {'pytest', 'unittest'}:
+        return True
+    if _PYTHON_NAME.fullmatch(name):
+        return _python_module_check(args)
+    if name == 'coverage':
+        return _coverage_check(args)
+    if name in {'node', 'nodejs'} and args and args[0] == '--test':
+        return True
+    return _package_test_check(name, args)
+
+
+def _python_module_check(args):
+    """`python -m pytest|unittest` and `python -m coverage run -m ...`."""
+    if '-m' not in args:
+        return False
+    module_index = args.index('-m')
+    if any(arg not in _PYTHON_FLAGS for arg in args[:module_index]):
+        return False
+    module = args[module_index + 1:]
+    if module and module[0] in {'pytest', 'unittest'}:
+        return True
+    return bool(module and module[0] == 'coverage' and _coverage_check(module[1:]))
+
+
+def _coverage_check(args):
+    """`coverage run` with only runner options before its `-m` module."""
+    if not args or args[0] != 'run' or '-m' not in args:
+        return False
+    module_index = args.index('-m')
+    if any(arg not in _COVERAGE_FLAGS for arg in args[1:module_index]):
+        return False
+    module = args[module_index + 1:]
+    return bool(module and module[0] in {'pytest', 'unittest'})
+
+
+def _package_test_check(name, args):
+    """npm, pnpm and yarn test scripts."""
+    if name not in {'npm', 'pnpm', 'yarn'}:
+        return False
+    script = args[1:] if args and args[0] in {'run', 'run-script'} else args
+    return bool(script and re.fullmatch(r'test(?::[\w-]+)?', script[0]))
+
+
+_TAP_PREFIX = re.compile(r'^\s*ok \d+ - (.*)$')
+_SPEC_PREFIX = '﹣ '
 
 
 def _node_skips(text):
     """Bound skip annotations from native Node TAP/spec reporters."""
-    counts = re.findall(r'(?m)^(?:#|ℹ) skipped (\d+)\s*$', text)
-    skips = []
-    for line in text.splitlines():
-        tap = re.match(r'^\s*ok \d+ - (.*?)\s+# SKIP(?:\s+(.*))?$', line)
-        spec = re.match(r'^\s*﹣ (.*?) \([^)]*\) # (.*)$', line)
-        if tap or spec:
-            name, reason = (tap or spec).groups()
-            reason = reason.strip() if reason else None
-            if spec and reason == 'SKIP':
-                reason = None
-            skips.append({'name': name.strip()[:200], 'reason': reason[:320] if reason else None})
+    counts = re.findall(r'(?m)^[#ℹ] skipped (\d+)\s*$', text)
+    skips = [skip for skip in map(_skip_annotation, text.splitlines()) if skip]
     if not counts and not skips:
         return {}
     count = max(sum(map(int, counts)), len(skips))
     return {'skipCount': count, 'skippedTests': skips[:16],
             'unknownSkipReasons': max(0, count - sum(s['reason'] is not None for s in skips)),
             **({'skipsTruncated': True} if len(skips) > 16 else {})}
+
+
+def _skip_annotation(line):
+    """Name and reason of one TAP or spec skip line, or None."""
+    tap = _tap_skip(line)
+    return tap if tap is not None else _spec_skip(line)
+
+
+def _tap_skip(line):
+    """Name and reason from a TAP `ok N - name # SKIP reason` line."""
+    head, marker, reason = line.partition('# SKIP')
+    if not marker or not head.endswith((' ', '\t')):
+        return None
+    matched = _TAP_PREFIX.match(head)
+    if not matched:
+        return None
+    return _skip_record(matched[1], reason.strip() or None)
+
+
+def _spec_skip(line):
+    """Name and reason from a `﹣ name (file) # reason` spec line."""
+    head, marker, reason = line.rpartition(' # ')
+    if not marker:
+        return None
+    head = head.strip()
+    if not head.startswith(_SPEC_PREFIX) or not head.endswith(')'):
+        return None
+    opening = head.rfind(' (')
+    if opening < 0 or ')' in head[opening + 2:-1]:
+        return None
+    return _skip_record(head[len(_SPEC_PREFIX):opening],
+                        None if reason.strip() == 'SKIP' else reason.strip() or None)
+
+
+def _skip_record(name, reason):
+    """One bounded skip record."""
+    return {'name': name.strip()[:200], 'reason': reason[:320] if reason else None}
 
 
 def _pull_reference(data, arguments):
@@ -789,7 +966,7 @@ def observe_tool_result(name, arguments, output, call_id):
             revision = clone[1].lower()
             exit_code, kind, summary = 0, 'revision', 'Git clone HEAD verified against the requested commit.'
     if name == 'bash':
-        checks = re.search(r'Ran \d+ tests?(?: in [\d.]+s)?|\d+ passed(?:, \d+ failed)?|FAILED \([^\n)]{0,80}\)|(?:#|ℹ) pass \d+', text)
+        checks = _check_summary(text)
         if checks and _runs_checks(command):
             kind, summary = 'checks', checks[0].strip()
             failed_checks = re.search(r'\b[1-9]\d* (?:failed|errors?)\b|FAILED \('
@@ -797,7 +974,7 @@ def observe_tool_result(name, arguments, output, call_id):
                 r'|(?m:^(?:#|ℹ) (?:fail|cancelled) [1-9]\d*\s*$)', text)
             if error or failed_checks:
                 status = 'failed'
-            elif exit_code == 0 and re.search(r'(?m)(?:^OK(?:\s|$))|(?:\d+ passed)|(?:(?:#|ℹ) pass \d+)', text):
+            elif exit_code == 0 and _pass_summary(text):
                 status = 'passed'
         elif exit_code == 0 and re.search(r'\bgit\b[^\n;|&]*\bcommit\b', command) and re.search(r'(?m)^\[[^\]\n]+ [a-f0-9]{7,40}\]', text):
             kind, summary = 'commit', 'Git commit returned successfully; publication is separate.'
@@ -945,3 +1122,25 @@ def reusable_checks(receipts, revision):
             and r.get('kind') == 'checks' and r.get('status') == 'passed'
             and r.get('revision') == revision.lower() and r.get('exitCode') == 0
             and r.get('workingTreeClean') is not False]
+
+_RAN_TESTS = re.compile(r'Ran \d+ tests?(?: in [\d.]+s)?')
+_TESTS_PASSED = re.compile(r'\d+ passed(?:, \d+ failed)?')
+_FAILED_SUMMARY = re.compile(r'FAILED \([^\n)]{0,80}\)')
+_NODE_PASS = re.compile(r'[#ℹ] pass \d+')
+_OK_SUMMARY = re.compile(r'(?m)^OK(?:\s|$)')
+
+
+def _earliest(text, patterns):
+    """The earliest match among several patterns, keeping their declared order on ties."""
+    matches = [match for match in (pattern.search(text) for pattern in patterns) if match]
+    return min(matches, key=lambda match: match.start()) if matches else None
+
+
+def _check_summary(text):
+    """The first test-summary fragment in a check output, if any."""
+    return _earliest(text, (_RAN_TESTS, _TESTS_PASSED, _FAILED_SUMMARY, _NODE_PASS))
+
+
+def _pass_summary(text):
+    """The first success marker in a check output, if any."""
+    return _earliest(text, (_OK_SUMMARY, _TESTS_PASSED, _NODE_PASS))

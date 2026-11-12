@@ -109,45 +109,64 @@ def _bounded_activity(activity, budget: int) -> list[dict]:
 
 def _worker_failure(exc: Exception, stage: str) -> tuple[str, dict]:
     """Expose known diagnostics without forwarding arbitrary exception text."""
-    code, reason = "worker_failed", "delegated AX worker failed; inspect local worker logs"
-    if isinstance(exc, subprocess.TimeoutExpired):
-        code, reason = "ax_command_timeout", "AX command timed out"
-    elif isinstance(exc, WorkerCapacityTimeout):
-        code, reason = 'worker_capacity_unavailable', (
-            'AX worker capacity is unavailable; wait for capacity or release a retained session before retrying')
-    elif isinstance(exc, ConnectionResetError):
-        code, reason = "worker_transport_interrupted", (
-            "AX worker connection reset; reconcile external effects before retrying")
-    elif isinstance(exc, AgentConfigurationError):
-        code, reason = "worker_configuration_failed", "AX worker configuration failed"
-    elif isinstance(exc, AgentRunError):
-        detail = str(exc)
-        model_http = re.fullmatch(r"model endpoint returned HTTP ([0-9]{3})", detail)
-        mcp = re.match(r"MCP server ([a-zA-Z0-9_-]{1,64}) "
-                       r"(failed|timed out) during discovery(?:$|:)", detail)
-        if model_http:
-            code, reason = "model_http_error", model_http[0]
-        elif re.fullmatch(r"(?:\[Errno (?:54|104)\] )?Connection reset by peer", detail):
-            code, reason = "worker_transport_interrupted", (
-                "AX worker connection reset; reconcile external effects before retrying")
-        elif mcp:
-            code = "mcp_discovery_failed"
-            reason = f"MCP server {mcp[1]} {mcp[2]} during discovery"
-        elif 'ActorResumeFailed' in detail:
-            code, reason = 'actor_resume_failed', 'AX actor could not start; inspect physical worker capacity and controller events'
-        elif detail == 'AX task lookup failed':
-            code, reason = 'ax_task_lookup_failed', 'AX task lookup failed; inspect AX API and Kubernetes control plane'
-        elif detail in {"model endpoint is unreachable", "model endpoint returned no answer",
-                        "model endpoint returned an empty answer"}:
-            code, reason = "model_response_failed", detail
+    code, reason = _failure_classification(exc)
     failure = {"stage": stage, "code": code, "error_type": type(exc).__name__}
     diagnostic = getattr(exc, 'diagnostic', None)
     if isinstance(diagnostic, dict):
-        failure['diagnostic'] = {key: diagnostic[key] for key in ('command', 'exit_code', 'stderr', 'task', 'phase', 'reason', 'probe')
-                                 if key in diagnostic}
-        if diagnostic.get('exit_code') and code == 'worker_failed':
-            failure['code'] = 'ax_command_failed'
+        failure['diagnostic'] = _failure_diagnostic(diagnostic, failure)
     return reason, failure
+
+
+_DIAGNOSTIC_FIELDS = ('command', 'exit_code', 'stderr', 'task', 'phase', 'reason', 'probe')
+
+
+def _failure_diagnostic(diagnostic, failure):
+    """Bounded diagnostic fields, promoting a command exit to its own code."""
+    bounded = {key: diagnostic[key] for key in _DIAGNOSTIC_FIELDS if key in diagnostic}
+    if diagnostic.get('exit_code') and failure['code'] == 'worker_failed':
+        failure['code'] = 'ax_command_failed'
+    return bounded
+
+
+def _failure_classification(exc):
+    """Publication-safe code and reason for one worker failure."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "ax_command_timeout", "AX command timed out"
+    if isinstance(exc, WorkerCapacityTimeout):
+        return 'worker_capacity_unavailable', (
+            'AX worker capacity is unavailable; wait for capacity or release a retained session before retrying')
+    if isinstance(exc, ConnectionResetError):
+        return "worker_transport_interrupted", (
+            "AX worker connection reset; reconcile external effects before retrying")
+    if isinstance(exc, AgentConfigurationError):
+        return "worker_configuration_failed", "AX worker configuration failed"
+    if isinstance(exc, AgentRunError):
+        known = _run_error_detail(str(exc))
+        if known:
+            return known
+    return "worker_failed", "delegated AX worker failed; inspect local worker logs"
+
+
+def _run_error_detail(detail):
+    """Known AgentRunError texts as publication-safe codes."""
+    model_http = re.fullmatch(r"model endpoint returned HTTP ([0-9]{3})", detail)
+    if model_http:
+        return "model_http_error", model_http[0]
+    if re.fullmatch(r"(?:\[Errno (?:54|104)\] )?Connection reset by peer", detail):
+        return "worker_transport_interrupted", (
+            "AX worker connection reset; reconcile external effects before retrying")
+    mcp = re.match(r"MCP server ([a-zA-Z0-9_-]{1,64}) "
+                   r"(failed|timed out) during discovery(?:$|:)", detail)
+    if mcp:
+        return "mcp_discovery_failed", f"MCP server {mcp[1]} {mcp[2]} during discovery"
+    if 'ActorResumeFailed' in detail:
+        return 'actor_resume_failed', 'AX actor could not start; inspect physical worker capacity and controller events'
+    if detail == 'AX task lookup failed':
+        return 'ax_task_lookup_failed', 'AX task lookup failed; inspect AX API and Kubernetes control plane'
+    if detail in {"model endpoint is unreachable", "model endpoint returned no answer",
+                  "model endpoint returned an empty answer"}:
+        return "model_response_failed", detail
+    return None
 
 
 class A2AError(ValueError):

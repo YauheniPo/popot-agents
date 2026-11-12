@@ -97,8 +97,7 @@ class ChildResults:
 
     def record_response(self, key, output, *, session_id=None, revision=None, require_evidence=True):
         """Apply a tool response; return the accepted child and optional resolution."""
-        old_failure = self.failed.get(key) or next((value for value in self.failed.values()
-            if session_id and value.get('session_id') == session_id and value.get('role') == key[0]), None)
+        old_failure = self._prior_failure(key, session_id)
         resolution = None
         try:
             completed_answer(output, key[0], session_id=session_id)
@@ -107,43 +106,56 @@ class ChildResults:
                 resolution = self._resolve(old_failure.get('previous_failure', old_failure),
                     child, revision, require_evidence=require_evidence)
         except RuntimeError as exc:
-            try:
-                child = json.loads(output)
-            except (TypeError, ValueError):
-                child = {}
-            child_session = session_id or (child.get('sessionId') if isinstance(child, dict) else None)
-            previous = {}
-            if session_id:
-                for previous_key, value in list(self.failed.items()):
-                    if previous_key[0] == key[0] and value.get('session_id') == child_session:
-                        previous = self.failed.pop(previous_key)
-            failure = {**previous, 'pending': isinstance(child, dict) and child.get('pending') is True,
-                'error': str(exc), 'role': key[0], 'session_id': child_session,
-                'status': child.get('outcome', {}).get('status') if isinstance(child, dict)
-                    and isinstance(child.get('outcome'), dict) else None,
-                'resumable': isinstance(child, dict) and child.get('resumable') is True}
-            if old_failure and (not old_failure.get('pending') or old_failure.get('previous_failure')):
-                failure['previous_failure'] = old_failure.get('previous_failure') or {
-                    name: old_failure.get(name) for name in ('role', 'session_id', 'outcome')}
-            if revision:
-                failure['target_revision'] = revision
-            if isinstance(child, dict) and child.get('role') == key[0] \
-                    and child.get('sessionId') == child_session and isinstance(child.get('answer'), str) \
-                    and child['answer'].strip():
-                failure['answer'] = child['answer']
-                failure['outcome'] = child['outcome'] if isinstance(child.get('outcome'), dict) else {}
-            if old_failure and failure.get('outcome', {}).get('status') == 'completed':
-                failure.update(status='failed', resumable=False)
-                failure['outcome'] = self._rejected_outcome(failure['outcome'], str(exc))
-            self.failed[key] = failure
+            self._record_failure(key, output, session_id, revision, old_failure, exc)
             return None, None
         self.completed[child['sessionId']] = child
-        self.failed.pop(key, None)
-        if session_id:
-            for previous_key, value in list(self.failed.items()):
-                if previous_key[0] == key[0] and value.get('session_id') == session_id:
-                    del self.failed[previous_key]
+        self._drop_failures(key[0], key, session_id)
         return child, resolution
+
+    def _prior_failure(self, key, session_id):
+        """The failure record this response continues, if any."""
+        if key in self.failed:
+            return self.failed[key]
+        if not session_id:
+            return None
+        return next((value for value in self.failed.values()
+                     if value.get('session_id') == session_id and value.get('role') == key[0]), None)
+
+    def _drop_failures(self, role, key, session_id):
+        """Forget the failures this accepted response supersedes."""
+        self.failed.pop(key, None)
+        if not session_id:
+            return
+        stale = [previous_key for previous_key, value in self.failed.items()
+                 if previous_key[0] == role and value.get('session_id') == session_id]
+        for previous_key in stale:
+            del self.failed[previous_key]
+
+    def _pop_failure(self, role, session_id):
+        """Remove and return the failure record for this role and session."""
+        match = next((previous_key for previous_key, value in self.failed.items()
+                      if previous_key[0] == role and value.get('session_id') == session_id), None)
+        return self.failed.pop(match) if match is not None else {}
+
+    def _record_failure(self, key, output, session_id, revision, old_failure, exc):
+        """Store the failure envelope for an unavailable or invalid response."""
+        child = _parsed_child(output)
+        child_session = session_id or (child.get('sessionId') if isinstance(child, dict) else None)
+        previous = self._pop_failure(key[0], child_session) if session_id else {}
+        failure = _failure_envelope(key[0], child, child_session, exc, previous)
+        if old_failure and (not old_failure.get('pending') or old_failure.get('previous_failure')):
+            failure['previous_failure'] = old_failure.get('previous_failure') or {
+                name: old_failure.get(name) for name in ('role', 'session_id', 'outcome')}
+        if revision:
+            failure['target_revision'] = revision
+        if _own_answer(child, key[0], child_session):
+            # Keep a rejected completed answer so a later report cannot hide it.
+            failure['answer'] = child['answer']
+            failure['outcome'] = child['outcome'] if isinstance(child.get('outcome'), dict) else {}
+        if old_failure and failure.get('outcome', {}).get('status') == 'completed':
+            failure.update(status='failed', resumable=False)
+            failure['outcome'] = self._rejected_outcome(failure['outcome'], str(exc))
+        self.failed[key] = failure
 
     def deliver_reports(self, receipts):
         """Apply terminal durable reports after the caller checked ownership.
@@ -153,30 +165,67 @@ class ChildResults:
         Return the reconciled reports for delivery to the parent's conversation.
         """
         receipts = deepcopy(receipts)
-        for key, value in self.failed.items():
-            receipt = receipts.get(value.get('session_id'))
-            if receipt is not None and key[0] != receipt['role']:
-                raise ValueError('Pending child role mismatch')
+        self._reject_role_mismatch(receipts)
         failed = {}
         for key, value in self.failed.items():
             receipt = receipts.get(value.get('session_id'))
             if receipt is None:
                 failed[key] = value
                 continue
-            if receipt['outcome'].get('status') == 'completed' and value.get('previous_failure'):
-                try:
-                    self._resolve(value['previous_failure'], receipt, value.get('target_revision'))
-                except RuntimeError as exc:
-                    receipt.update(resumable=False, error=str(exc))
-                    receipt['outcome'] = self._rejected_outcome(receipt['outcome'], str(exc))
-            if receipt['outcome'].get('status') != 'completed':
-                failed[key] = {**value, 'pending': False, 'answer': receipt['answer'],
-                    'status': receipt['outcome'].get('status'), 'outcome': receipt['outcome'],
-                    'resumable': receipt.get('resumable', False),
-                    'error': receipt.get('error', 'Child returned incomplete work')}
+            failed.update(self._reconciled_failure(key, value, receipt))
         self.failed.clear()
         self.failed.update(failed)
-        for sid, receipt in receipts.items():
+        for session_id, receipt in receipts.items():
             if receipt['outcome'].get('status') == 'completed':
-                self.completed[sid] = receipt
+                self.completed[session_id] = receipt
         return deepcopy(receipts)
+
+    def _reject_role_mismatch(self, receipts):
+        """A pending child's durable report must carry that child's own role."""
+        for key, value in self.failed.items():
+            receipt = receipts.get(value.get('session_id'))
+            if receipt is not None and key[0] != receipt['role']:
+                raise ValueError('Pending child role mismatch')
+
+    def _reconciled_failure(self, key, value, receipt):
+        """Failure records retained after a durable report arrived."""
+        if receipt['outcome'].get('status') == 'completed' and value.get('previous_failure'):
+            try:
+                self._resolve(value['previous_failure'], receipt, value.get('target_revision'))
+            except RuntimeError as exc:
+                receipt.update(resumable=False, error=str(exc))
+                receipt['outcome'] = self._rejected_outcome(receipt['outcome'], str(exc))
+        if receipt['outcome'].get('status') == 'completed':
+            return {}
+        return {key: {**value, 'pending': False, 'answer': receipt['answer'],
+            'status': receipt['outcome'].get('status'), 'outcome': receipt['outcome'],
+            'resumable': receipt.get('resumable', False),
+            'error': receipt.get('error', 'Child returned incomplete work')}}
+
+def _parsed_child(output):
+    """The decoded response payload, or an empty mapping when it cannot be parsed."""
+    try:
+        return json.loads(output)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _child_outcome_status(child):
+    """The reported outcome status of a parsed response, if any."""
+    outcome = child.get('outcome') if isinstance(child, dict) else None
+    return outcome.get('status') if isinstance(outcome, dict) else None
+
+
+def _failure_envelope(role, child, session_id, exc, previous):
+    """The stored failure record for one unusable response."""
+    known = child if isinstance(child, dict) else {}
+    return {**previous, 'pending': known.get('pending') is True, 'error': str(exc),
+            'role': role, 'session_id': session_id, 'status': _child_outcome_status(child),
+            'resumable': known.get('resumable') is True}
+
+
+def _own_answer(child, role, session_id):
+    """Whether the response carries this child's own non-empty answer."""
+    return bool(isinstance(child, dict) and child.get('role') == role
+                and child.get('sessionId') == session_id
+                and isinstance(child.get('answer'), str) and child['answer'].strip())

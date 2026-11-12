@@ -127,25 +127,10 @@ def retained_receipts(messages, completed_children, observations=()):
     """Receipts are attributed observations, never proof of whole-task completion."""
     limit = RUNTIME['limits']['tool_evidence_count']
     chars = RUNTIME['limits']['tool_evidence_chars']
-    receipts = []
     # Check outcomes survive transcript compaction and later file reads. An
     # unbound check remains useful evidence, but cannot verify a specific SHA.
-    for item in reversed(observations):
-        if item.get('source') != 'tool_result' or item.get('kind') not in {'checks', 'ci'}:
-            continue
-        receipt = (f"Observed {item['kind']} {item.get('tool')} ({item.get('callId')}): "
-                   f"{item.get('status')}; {item.get('summary')}; "
-                   f"revision={item.get('revision') or 'unverified'}")
-        if 'exitCode' in item:
-            receipt += f"; exit_code={item['exitCode']}"
-        if 'skipCount' in item:
-            receipt += f"; skipped={item['skipCount']}; unknown_skip_reasons={item.get('unknownSkipReasons', 0)}"
-        receipt += f" [sha256={item.get('outputSha256')}]"
-        if item.get('outputArtifact'):
-            receipt += f" Full output: {item['outputArtifact']}"
-        if item.get('skippedTests'):
-            receipt += '; skip details=' + json.dumps(item['skippedTests'], ensure_ascii=False)
-        receipts.append(scrub(receipt)[:chars])
+    receipts = [_observation_receipt(item, chars) for item in reversed(observations)
+                if item.get('source') == 'tool_result' and item.get('kind') in {'checks', 'ci'}]
     for child in completed_children.values():
         label = f"Child {child['role']} (sessionId={child['sessionId']}) reported: "
         receipts.append(label + scrub(child['answer'])[:chars])
@@ -163,3 +148,20 @@ def retained_receipts(messages, completed_children, observations=()):
         if receipt:
             receipts.append(receipt)
     return list(dict.fromkeys(receipts))[:limit]
+
+
+def _observation_receipt(item, chars):
+    """One attributed check or CI observation, including its skip details."""
+    receipt = (f"Observed {item['kind']} {item.get('tool')} ({item.get('callId')}): "
+               f"{item.get('status')}; {item.get('summary')}; "
+               f"revision={item.get('revision') or 'unverified'}")
+    if 'exitCode' in item:
+        receipt += f"; exit_code={item['exitCode']}"
+    if 'skipCount' in item:
+        receipt += f"; skipped={item['skipCount']}; unknown_skip_reasons={item.get('unknownSkipReasons', 0)}"
+    receipt += f" [sha256={item.get('outputSha256')}]"
+    if item.get('outputArtifact'):
+        receipt += f" Full output: {item['outputArtifact']}"
+    if item.get('skippedTests'):
+        receipt += '; skip details=' + json.dumps(item['skippedTests'], ensure_ascii=False)
+    return scrub(receipt)[:chars]

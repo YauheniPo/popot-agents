@@ -1,6 +1,7 @@
 """Repository guidance discovery and turn-budget validation, exercised in process."""
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -125,9 +126,47 @@ class RepositoryContextTests(unittest.TestCase):
 
 
 class RepositoryContextToolTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        (self.root / '.git').mkdir()
+
     def test_missing_workspace_returns_empty_guidance(self):
         with patch.object(tools, 'WORKSPACE_ROOT', Path('/nonexistent-workspace')):
             self.assertEqual(tools.read_repository_context(), '')
+
+    def test_guidance_read_timeout_returns_empty_guidance(self):
+        timeout = subprocess.TimeoutExpired('file_worker.py', 0.001)
+        with patch.object(tools, 'WORKSPACE_ROOT', self.root), \
+                patch.object(tools, '_file_action', side_effect=timeout):
+            self.assertEqual(tools.read_repository_context(timeout_seconds=0.001), '')
+
+    def test_guidance_read_failures_return_empty_guidance(self):
+        failures = [tools.ToolExecutionError('repository_context failed with exit code 1'),
+                    OSError('worker unavailable'),
+                    ValueError('not json')]
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(tools, 'WORKSPACE_ROOT', self.root), \
+                    patch.object(tools, '_file_action', side_effect=failure):
+                self.assertEqual(tools.read_repository_context(), '')
+
+    def test_guidance_read_recovers_after_a_transient_timeout(self):
+        (self.root / 'AGENTS.md').write_text('RECOVERED_RULES', encoding='utf-8')
+        worker = tools._file_action
+        calls = []
+
+        def flaky(action, arguments, timeout_seconds=None, **options):
+            calls.append(action)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired('file_worker.py', 0.001)
+            return worker(action, arguments, timeout_seconds, **options)
+
+        with patch.object(tools, 'WORKSPACE_ROOT', self.root), \
+                patch.object(tools, '_file_action', side_effect=flaky):
+            self.assertEqual(tools.read_repository_context(), '')
+            self.assertIn('RECOVERED_RULES', tools.read_repository_context())
 
 
 class RunContextValidationTests(unittest.TestCase):

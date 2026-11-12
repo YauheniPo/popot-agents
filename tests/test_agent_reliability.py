@@ -193,6 +193,22 @@ class AgentReliabilityTests(unittest.TestCase):
                 if role == 'code_reviewer':
                     self.assertIn('You own the review', prompt)
 
+    def test_verification_owner_does_not_duplicate_an_already_reported_finding(self):
+        finding = {'description': 'Missing regression test', 'scope': 'in_scope', 'status': 'open'}
+        child = {'role': 'qa_engineer', 'reportedAt': '2026-11-03T10:00:00Z',
+                 'outcome': {'status': 'completed', 'evidence': ['checks'],
+                             'findings': [finding]}}
+        state = {'messages': [{'role': 'user', 'content': 'Verify the PR'}],
+                 'outcome': {'status': 'partial'},
+                 'completed_delegations': {'c' * 16: child}}
+        message = self.result()
+        report = json.loads(message['content'])
+        report['findings'] = [dict(finding)]
+        message['content'] = json.dumps(report)
+        _, state, _ = self.run_sequence([message], state=state,
+            role={'name': 'code_reviewer', '_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(json.dumps(state['outcome']).count('Missing regression test'), 1)
+
     def run_sequence(self, replies, *, delegate=None, clock=None, timeout=900, role=None, state=None, env=None, run_context=None):
         from ax_local.worker.delegation import make_tools
         bodies = []

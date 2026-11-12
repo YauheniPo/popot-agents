@@ -2,7 +2,9 @@
 import io
 import json
 import os
+import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +20,7 @@ class RepositoryContextTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.workspace = Path(directory.name)
         self.requests = []
+        self.model_timeouts = []
 
     def repository(self, name='repo', **documents):
         root = self.workspace / name
@@ -28,13 +31,19 @@ class RepositoryContextTests(unittest.TestCase):
             path.write_text(content, encoding='utf-8')
         return root
 
-    def run_turn(self, responses=None, *, allowed=None, state=None):
+    def run_turn(self, responses=None, *, allowed=None, state=None, timeout_seconds=None,
+                 model_delay=0.0, model_error=None):
         if responses is None:
             responses = [{'content': 'done'}]
         responses = iter(responses)
 
         def model_response(call, **kwargs):
             self.requests.append(json.loads(call.data))
+            self.model_timeouts.append(kwargs.get('timeout'))
+            if model_delay:
+                time.sleep(model_delay)
+            if model_error is not None:
+                raise model_error
             return io.BytesIO(json.dumps({'choices': [{'message': next(responses)}]}).encode())
 
         with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://fake/v1',
@@ -44,7 +53,7 @@ class RepositoryContextTests(unittest.TestCase):
             return run_http('work on the repository', {
                 'instructions': 'Keep the role permissions.',
                 'tools': ['read_file'] if allowed is None else allowed,
-                'max_tool_rounds': 3}, state=state)
+                'max_tool_rounds': 3}, state=state, timeout_seconds=timeout_seconds)
 
     @staticmethod
     def context(request):
@@ -199,3 +208,109 @@ class RepositoryContextTests(unittest.TestCase):
         self.repository(**{'AGENTS.md': 'FILE_READER_ONLY'})
         self.run_turn(allowed=['calculate'])
         self.assertNotIn('FILE_READER_ONLY', self.context(self.requests[0]))
+
+    def test_guidance_read_timeout_does_not_fail_the_coordination_turn(self):
+        self.repository(**{'AGENTS.md': 'UNREACHABLE_GUIDANCE'})
+        timeout = subprocess.TimeoutExpired('file_worker.py', 0.001)
+        with patch.object(tools, '_file_action', side_effect=timeout) as guidance:
+            self.assertEqual(self.run_turn(), 'done')
+        self.assertEqual(len(self.requests), 1)
+        guidance.assert_called_once()
+        context = self.context(self.requests[0])
+        self.assertNotIn('UNREACHABLE_GUIDANCE', context)
+        self.assertIn('Keep the role permissions.', context)
+
+    def test_near_deadline_coordination_turn_returns_partial_answer_without_guidance_read(self):
+        self.repository(**{'AGENTS.md': 'LATE_GUIDANCE'})
+        timeout = subprocess.TimeoutExpired('file_worker.py', 0.001)
+        with patch.object(tools, '_file_action', side_effect=timeout) as guidance:
+            answer = self.run_turn(timeout_seconds=2)
+        self.assertTrue(answer.startswith('Partial result: the model request failed'), answer)
+        guidance.assert_not_called()
+        self.assertEqual(self.requests, [])
+
+    def slow_guidance(self, action, arguments, timeout_seconds=None, **options):
+        """A real child process that outlives its slice, so the timeout is wall-clock."""
+        self.guidance_timeouts.append(timeout_seconds)
+        subprocess.run(['sleep', '10'], timeout=timeout_seconds, check=False)
+        return '{}'
+
+    def test_slow_guidance_read_keeps_the_model_request_reserve(self):
+        self.repository(**{'AGENTS.md': 'SLOW_GUIDANCE_MARKER'})
+        self.guidance_timeouts = []
+        started = time.monotonic()
+        with patch.object(tools, '_file_action', side_effect=self.slow_guidance):
+            answer = self.run_turn(timeout_seconds=6)
+        elapsed = time.monotonic() - started
+        self.assertEqual(answer, 'done')
+        self.assertEqual(len(self.requests), 1)
+        self.assertTrue(self.guidance_timeouts)
+        # The read gets a bounded slice instead of the whole budget:
+        # coordination turn - final-answer reserve - minimum model request - handshake slack.
+        self.assertLessEqual(max(self.guidance_timeouts), 1.05)
+        self.assertGreaterEqual(elapsed, 0.8)
+        self.assertLess(elapsed, 4.0)
+        self.assertNotIn('SLOW_GUIDANCE_MARKER', self.context(self.requests[0]))
+
+    def test_coordination_turn_skips_guidance_when_no_slice_is_left(self):
+        self.repository(**{'AGENTS.md': 'SKIPPED_GUIDANCE_MARKER'})
+        self.guidance_timeouts = []
+
+        def unexpected(action, arguments, timeout_seconds=None, **options):
+            self.guidance_timeouts.append(timeout_seconds)
+            raise AssertionError('guidance must not spend the model request reserve')
+
+        with patch.object(tools, '_file_action', side_effect=unexpected):
+            answer = self.run_turn(timeout_seconds=3)
+        self.assertEqual(self.guidance_timeouts, [])
+        self.assertEqual(len(self.requests), 1)
+        # The whole remaining budget reaches the model instead of the auxiliary read.
+        self.assertGreaterEqual(self.model_timeouts[0], 2.0)
+        self.assertTrue(answer.startswith('Partial result:'), answer)
+        self.assertIn('done', answer)
+        self.assertNotIn('SKIPPED_GUIDANCE_MARKER', self.context(self.requests[0]))
+
+    def test_model_answer_after_the_coordination_deadline_saves_a_partial_checkpoint(self):
+        self.repository(**{'AGENTS.md': 'GUIDANCE'})
+        state = {}
+        started = time.monotonic()
+        self.run_turn(state=state, timeout_seconds=4, model_delay=4.2)
+        self.assertGreaterEqual(time.monotonic() - started, 4.0)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertTrue(state['messages'])
+
+    def test_model_failure_after_the_coordination_deadline_saves_a_partial_checkpoint(self):
+        self.repository(**{'AGENTS.md': 'GUIDANCE'})
+        state = {}
+        self.run_turn(state=state, timeout_seconds=4, model_delay=4.2,
+                      model_error=TimeoutError('read timed out'))
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertEqual(state['outcome']['reason'], 'model_request_failed')
+        self.assertIn('turn deadline exceeded', state['outcome']['errors'])
+        self.assertTrue(state['messages'])
+
+    def test_guidance_read_failures_leave_the_coordination_turn_running(self):
+        self.repository(**{'AGENTS.md': 'FAILED_GUIDANCE_MARKER'})
+        failures = {'timeout': subprocess.TimeoutExpired('file_worker.py', 1),
+                    'tool_failure': tools.ToolExecutionError('exit_code=2'),
+                    'os_error': OSError('checkout unavailable')}
+        for name, failure in failures.items():
+            with self.subTest(failure=name):
+                self.requests.clear()
+
+                def broken(action, arguments, timeout_seconds=None, **options):
+                    raise failure
+
+                with patch.object(tools, '_file_action', side_effect=broken):
+                    self.assertEqual(self.run_turn(), 'done')
+                self.assertEqual(len(self.requests), 1)
+                self.assertNotIn('FAILED_GUIDANCE_MARKER', self.context(self.requests[0]))
+
+    def test_non_json_guidance_leaves_the_coordination_turn_running(self):
+        self.repository(**{'AGENTS.md': 'NON_JSON_GUIDANCE_MARKER'})
+        with patch.object(tools, '_file_action', return_value='not json'):
+            self.assertEqual(self.run_turn(), 'done')
+        self.assertEqual(len(self.requests), 1)
+        self.assertNotIn('NON_JSON_GUIDANCE_MARKER', self.context(self.requests[0]))
