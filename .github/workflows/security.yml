@@ -69,19 +69,24 @@ jobs:
             echo '::error::Set the repository Actions secret GITGUARDIAN_API_KEY.'
             exit 1
           fi
-      - name: Scan pushed commits for secrets
-        uses: GitGuardian/ggshield/actions/secret@4cccd600fd3890a7aba07fd0a45e483f3099fe70 # v1.56.1
-        with:
-          args: --format sarif --output gitguardian.sarif
+      - name: Scan the checkout for secrets
+        # The pinned ggshield action always runs `secret scan ci`, whose SARIF reports
+        # `commit://` locations. GitHub code scanning rejects that scheme against a
+        # `file://` checkout, so the same pinned image runs path mode instead: findings
+        # keep workspace-relative locations and the exit code still gates the job.
         env:
-          GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
-          GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
-          GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/data" \
+            -w /data \
+            -e GITGUARDIAN_API_KEY \
+            gitguardian/ggshield@sha256:363427689cdd746cf7fa3a4bad2e16b41ad4fa5f7ea5ae262711e13ed456f653 \
+            secret scan path . --format sarif --output gitguardian.sarif
       - name: Publish GitGuardian findings to Security
         if: ${{ !cancelled() && hashFiles('gitguardian.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: gitguardian.sarif
+          checkout_path: ${{ github.workspace }}
           category: gitguardian
