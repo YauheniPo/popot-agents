@@ -268,6 +268,8 @@ class _ChildExecution:
         self.service._save(job, 'TASK_STATE_WORKING')
 
     def advance(self, result):
+        """Prepare the next child turn; the shared turn driver passes the turn result."""
+        self.last_result = result
         workflow, job = self.workflow, self.job
         if job.run.persistent:
             self.service.await_children(job.session_id, job.chat, job.messages, job.deadline)

@@ -195,29 +195,19 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
         [sys.executable, "-I", str(Path(__file__).parent / "worker" / "file_worker.py"),
          action], **options)
     if completed.returncode != 0:
-        if action == 'export_artifacts' and completed.returncode == 2:
-            from popot_agents.artifacts import artifact_error_message
-            try:
-                diagnostic = json.loads(completed.stdout)
-            except ValueError:
-                diagnostic = None
-            if isinstance(diagnostic, dict):
-                message = artifact_error_message(diagnostic.get('artifact_error'), diagnostic.get('minimum'))
-                if message:
-                    raise ToolExecutionError('Artifact export failed: ' + message)
-        if action == 'read_tool_output' and b'No such file or directory' in completed.stderr:
-            raise ToolExecutionError('saved tool output is unavailable in this workspace; '
-                                     'verify the source again without repeating writes')
-        raise ToolExecutionError(f"{action} failed with exit code {completed.returncode}; "
-                                 "check the path, file permissions and workspace state before retrying")
+        raise _action_failure(action, completed)
     return completed.stdout.decode('utf-8')
 
 
 def read_repository_context(timeout_seconds=None):
     if not WORKSPACE_ROOT.is_dir():
         return ''
-    context = _file_action('repository_context', {}, timeout_seconds)
-    return context if json.loads(context) else ''
+    # Guidance is auxiliary: a slow or broken checkout must never fail the turn.
+    try:
+        context = _file_action('repository_context', {}, timeout_seconds)
+        return context if json.loads(context) else ''
+    except (OSError, ValueError, subprocess.TimeoutExpired, ToolExecutionError):
+        return ''
 
 
 def export_artifacts(timeout_seconds=None):
@@ -358,3 +348,27 @@ def execute_tool(name: str, arguments: dict, allowed: list[str],
     except (SyntaxError, ZeroDivisionError, OverflowError, RecursionError) as exc:
         raise ToolInputError("invalid arithmetic expression") from exc
     return str(value)
+
+def _action_failure(action, completed):
+    """The error for a failed file-worker action, carrying its diagnostics."""
+    if action == 'export_artifacts' and completed.returncode == 2:
+        message = _artifact_failure(completed.stdout)
+        if message:
+            return ToolExecutionError('Artifact export failed: ' + message)
+    if action == 'read_tool_output' and b'No such file or directory' in completed.stderr:
+        return ToolExecutionError('saved tool output is unavailable in this workspace; '
+                                  'verify the source again without repeating writes')
+    return ToolExecutionError(f"{action} failed with exit code {completed.returncode}; "
+                              "check the path, file permissions and workspace state before retrying")
+
+
+def _artifact_failure(stdout):
+    """The artifact diagnostic message from an export failure, if any."""
+    from popot_agents.artifacts import artifact_error_message
+    try:
+        diagnostic = json.loads(stdout)
+    except ValueError:
+        return None
+    if not isinstance(diagnostic, dict):
+        return None
+    return artifact_error_message(diagnostic.get('artifact_error'), diagnostic.get('minimum'))

@@ -66,64 +66,49 @@ class WorkflowRun:
 
     def record(self, result, checkpoint, *, yield_for_verification=False):
         outcome = result.get('outcome')
-        if not isinstance(outcome, dict) or outcome.get('status') not in {'completed', 'partial', 'blocked', 'failed'}:
-            return self.stop(result, 'workflow_missing_outcome')
-        for key in ('evidence', 'remaining_work', 'errors'):
-            if not isinstance(outcome.get(key), list) or any(not isinstance(x, str) for x in outcome[key]):
-                return self.stop(result, 'workflow_invalid_outcome')
+        invalid = _outcome_rejection(outcome)
+        if invalid:
+            return self.stop(result, invalid)
         status = outcome['status']
-        if status == 'completed' and (not any(x.strip() for x in outcome['evidence'])
-                or any(x.strip() for key in ('remaining_work', 'errors') for x in outcome[key])):
-            return self.stop(result, 'workflow_unverified_completion')
         self.meta['outcome'] = outcome
         self.meta['outcomeRecordedAt'] = datetime.now(timezone.utc).isoformat()
         if status != 'partial':
-            self.meta.update(state=status, phase='finished', finished_at=datetime.now(timezone.utc).isoformat())
-            if status == 'completed':
-                self.meta.pop('checkpoint', None)
-            elif isinstance(checkpoint, dict):
-                self.meta['checkpoint'] = checkpoint
-            return result
+            return self._finish(result, status, checkpoint)
         if not isinstance(checkpoint, dict):
             return self.stop(result, 'workflow_checkpoint_unavailable')
         self.meta['checkpoint'] = checkpoint
-        if outcome.get('reason') == 'child_pending' and any(
-                value.get('pending') for _,value in checkpoint.get('failed_delegations', [])):
-            if self.remaining() < 1:
-                return self.stop(result, 'workflow_deadline_exhausted')
-            self.meta.update(state='running', phase='checkpoint', awaiting_children=True)
-            return None
+        if outcome.get('reason') == 'child_pending' and _pending_child_reports(checkpoint):
+            return self._await_children(result)
         if yield_for_verification:
-            outcome = {**outcome, 'reason': 'verification_reserve'}
-            self.meta.update(state='partial', phase='checkpoint', outcome=outcome)
-            return {**result, 'outcome': outcome}
-        material = {key: sorted(outcome[key]) for key in ('evidence', 'remaining_work', 'errors')}
-        receipts = []
-        failures = set()
-        used_tools = False
-        for item in checkpoint.get('messages', []):
-            if not isinstance(item, dict) or item.get('role') != 'tool':
-                continue
-            used_tools = True
-            content = item.get('content','')
-            try: value = json.loads(content)
-            except (ValueError, TypeError): value = {}
-            if isinstance(value, dict) and any(value.get(k) for k in ('outcome_unknown','pending')):
-                continue
-            if (isinstance(value, dict) and any(value.get(k) for k in ('isError','error')) or
-                    isinstance(content, str) and content.startswith('exit_code=') and not content.startswith('exit_code=0\n')):
-                # A new failure can advance diagnosis; retrying the same failure cannot.
-                failures.add(hashlib.sha256(str(content).encode()).hexdigest())
-                continue
-            receipts.append(hashlib.sha256((str(item.get('tool_call_id',''))+str(content)).encode()).hexdigest())
-        children = checkpoint.get('completed_delegations', {})
-        # A rewritten summary cannot substitute for new observations or child work.
-        # Text-only assignments can still advance without invoking tools.
-        if used_tools or children:
-            material = {'completed_delegations': children}
-        material['tool_receipts'] = sorted(receipts)
-        material['failed_observations'] = sorted(failures)
-        material['authorization'] = self.meta['authorization']
+            return self._yield_for_verification(result, outcome)
+        return self._advance_or_stop(result, checkpoint, outcome)
+
+    def _finish(self, result, status, checkpoint):
+        """Record a terminal state, keeping a checkpoint only for a failure."""
+        self.meta.update(state=status, phase='finished',
+                         finished_at=datetime.now(timezone.utc).isoformat())
+        if status == 'completed':
+            self.meta.pop('checkpoint', None)
+        elif isinstance(checkpoint, dict):
+            self.meta['checkpoint'] = checkpoint
+        return result
+
+    def _await_children(self, result):
+        """Keep running while a pending child can still report."""
+        if self.remaining() < 1:
+            return self.stop(result, 'workflow_deadline_exhausted')
+        self.meta.update(state='running', phase='checkpoint', awaiting_children=True)
+        return None
+
+    def _yield_for_verification(self, result, outcome):
+        """Hand the turn to verification without changing the recorded outcome."""
+        outcome = {**outcome, 'reason': 'verification_reserve'}
+        self.meta.update(state='partial', phase='checkpoint', outcome=outcome)
+        return {**result, 'outcome': outcome}
+
+    def _advance_or_stop(self, result, checkpoint, outcome):
+        """Continue the run unless progress, time or the turn budget ran out."""
+        material = _progress_material(checkpoint, outcome, self.meta['authorization'])
         fingerprint = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
         self.meta['no_progress'] = self.meta['no_progress'] + 1 if fingerprint == self.meta.get('fingerprint') else 1
         self.meta['fingerprint'] = fingerprint
@@ -155,11 +140,7 @@ class WorkflowRun:
                 'outcome': outcome}
 
     def continuation(self, *, compact=False):
-        prefix = (((f'Resume coordinator turn {self.meta["turns"]} for verification.\n'
-                    if self.meta.get('verificationPhaseStarted') else
-                    f'Child wait finished; resume coordinator turn {self.meta["turns"]}.\n')
-                   if self.meta.get('awaiting_children') else
-                   f'Coordinator turn {self.meta["turns"]} finished; begin turn {self.meta["turns"] + 1}.\n') +
+        prefix = (_turn_prefix(self) +
                   f'{max(0, self.policy["max_turns"] - self.meta["turns"])} coordinator turns remain; '
                   f'{int(self.remaining())} seconds remain before the workflow deadline.\n' +
                   'Continue the same authorized task from the saved checkpoint. Do not repeat completed '
@@ -280,3 +261,77 @@ def recover_workflows(server, policy, token):
                     thread.start()
         finally:
             lock.release()
+
+def _outcome_rejection(outcome):
+    """The stop reason for an unusable outcome, or None when it can be recorded."""
+    if not isinstance(outcome, dict) or outcome.get('status') not in {'completed', 'partial', 'blocked', 'failed'}:
+        return 'workflow_missing_outcome'
+    for key in ('evidence', 'remaining_work', 'errors'):
+        if not isinstance(outcome.get(key), list) or any(not isinstance(item, str) for item in outcome[key]):
+            return 'workflow_invalid_outcome'
+    if outcome['status'] != 'completed':
+        return None
+    evidence = any(item.strip() for item in outcome['evidence'])
+    unfinished = any(item.strip() for key in ('remaining_work', 'errors') for item in outcome[key])
+    return 'workflow_unverified_completion' if not evidence or unfinished else None
+
+
+def _pending_child_reports(checkpoint):
+    """Whether the checkpoint still carries a pending child report."""
+    return any(value.get('pending') for _, value in checkpoint.get('failed_delegations', []))
+
+
+def _progress_material(checkpoint, outcome, authorization):
+    """Material that decides whether this checkpoint made new progress."""
+    material = {key: sorted(outcome[key]) for key in ('evidence', 'remaining_work', 'errors')}
+    receipts, failures, used_tools = [], set(), False
+    for item in checkpoint.get('messages', []):
+        if not isinstance(item, dict) or item.get('role') != 'tool':
+            continue
+        used_tools = True
+        receipt = _tool_message_receipt(item)
+        if receipt is None:
+            continue
+        kind, value = receipt
+        if kind == 'failure':
+            failures.add(value)
+        else:
+            receipts.append(value)
+    children = checkpoint.get('completed_delegations', {})
+    # A rewritten summary cannot substitute for new observations or child work.
+    # Text-only assignments can still advance without invoking tools.
+    if used_tools or children:
+        material = {'completed_delegations': children}
+    material['tool_receipts'] = sorted(receipts)
+    material['failed_observations'] = sorted(failures)
+    material['authorization'] = authorization
+    return material
+
+
+def _tool_message_receipt(item):
+    """`(kind, digest)` for a tool message, or None when it proves no work."""
+    content = item.get('content', '')
+    try:
+        value = json.loads(content)
+    except (ValueError, TypeError):
+        value = {}
+    if isinstance(value, dict) and any(value.get(key) for key in ('outcome_unknown', 'pending')):
+        return None
+    failed = (isinstance(value, dict) and any(value.get(key) for key in ('isError', 'error'))
+              or isinstance(content, str) and content.startswith('exit_code=')
+              and not content.startswith('exit_code=0\n'))
+    if failed:
+        # A new failure can advance diagnosis; retrying the same failure cannot.
+        return 'failure', hashlib.sha256(str(content).encode()).hexdigest()
+    digest = hashlib.sha256((str(item.get('tool_call_id', '')) + str(content)).encode()).hexdigest()
+    return 'receipt', digest
+
+
+def _turn_prefix(workflow):
+    """The opening line that says which coordination turn this prompt resumes."""
+    turns = workflow.meta['turns']
+    if not workflow.meta.get('awaiting_children'):
+        return f'Coordinator turn {turns} finished; begin turn {turns + 1}.\n'
+    if workflow.meta.get('verificationPhaseStarted'):
+        return f'Resume coordinator turn {turns} for verification.\n'
+    return f'Child wait finished; resume coordinator turn {turns}.\n'

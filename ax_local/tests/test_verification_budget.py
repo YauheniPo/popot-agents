@@ -330,3 +330,24 @@ def test_queued_resume_keeps_previous_checkpoint_evidence_when_window_expires(he
         assert saved['outcome']['reason'] == 'verification_reserve'
         assert saved['resumable'] is True
         assert helper.service.retained[job.session_id][0].files['fix.patch'] == 'saved patch'
+
+
+def test_expired_window_keeps_a_repeated_next_step_once(helper):
+    with workflow(helper) as run:
+        run.metadata['implementationDeadlineAt'] = run.metadata['deadlineAt'] - 3601
+        config = {**helper.roles['backend_engineer'], '_ax_delegation': {
+            'parent_session_id': helper.parent, 'root_session_id': helper.parent,
+            'lineage': ['tech_lead', 'backend_engineer'],
+            'implementationDeadlineAt': run.metadata['implementationDeadlineAt']}}
+        step = 'Arrange review and QA of available artifacts before requesting corrective implementation'
+        prior = {'status': 'partial', 'evidence': ['patch and tests saved'], 'errors': [],
+                 'remaining_work': [step]}
+        checkpoint = {'outcome': prior, 'messages': [{'role': 'tool', 'content': 'tests passed'}]}
+        chat = helper.runner.start_chat('f' * 16, config)
+        chat.get_checkpoint = lambda: checkpoint
+        job = Job('f' * 16, config, 'continue fixes', run, run.deadline, chat=chat)
+        helper.service.jobs[job.session_id] = job
+        helper.service._execute(job)
+        saved = helper.store.get(job.session_id)['roleConfig']['_ax_delegation']
+        assert saved['outcome']['reason'] == 'verification_reserve'
+        assert saved['outcome']['remaining_work'] == [step]
