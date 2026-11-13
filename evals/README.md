@@ -232,8 +232,8 @@ OTLP gauges в существующий Collector через ограничен�
 сценария на каждом варианте; флаг `--repetitions` переопределяет его для матрицы.
 Параметры варианта заменяют параметры всех eval-ролей,
 включая делегатов; рабочие профили не меняются. По умолчанию это flash-max,
-mimo-max, minimax-max и nemotron-free: шесть сценариев × два повтора
-× четыре варианта = 48 root-задач,
+glm-max, mistral-max, minimax-max и nemotron-free: шесть сценариев × два повтора
+× пять вариантов = 60 root-задач,
 плюс делегаты и отдельный judge для каждого измерения. Runtime-аудит исторических
 трейсов повторно для каждого варианта не запускается. Это платные/квотируемые
 вызовы, если провайдер тарифицирует выбранную модель.
@@ -270,8 +270,9 @@ Runner проверяет запас слотов: `параллельные м�
 кейсами, а не мгновенное прерывание запроса. Частичный capture сохраняется.
 Сбой записи cancel marker явно указан в `cancel_errors`.
 
-`mimo-max` использует `ollama-cloud/mimo-v2.6-pro`, `minimax-max` —
-`ollama-cloud/minimax-m3.1-flash`. Оба задают `reasoning_effort=max` и
+`glm-max` использует `ollama-cloud/glm-5.3-flash`, `mistral-max` —
+`ollama-cloud/mistral-large-4`, `minimax-max` — `ollama-cloud/minimax-m3.1-flash`.
+Все три задают `reasoning_effort=max` и
 `max_tokens=65536`, как baseline `flash-max`. Прямые маршруты внесены в
 `apiKey.permissions.allowedModels` deploy-конфига OmniRoute и каталог Ollama Cloud
 в Phoenix; production fallback-комбо задаётся отдельно.
@@ -285,7 +286,7 @@ Runner проверяет запас слотов: `параллельные м�
 Короткая проверка связки на двух моделях:
 
 ```bash
-python3 -m evals.matrix --output reports/evals/models-smoke --variant mimo-max --variant minimax-max --baseline mimo-max --case honest_blocker --repetitions 1
+python3 -m evals.matrix --output reports/evals/models-smoke --variant glm-max --variant mistral-max --baseline glm-max --case honest_blocker --repetitions 1
 ```
 
 Каталог должен быть новым. Можно повторять `--case`, выбирать `--variant` и
