@@ -529,5 +529,13 @@ class AxRunnerTests(unittest.TestCase):
                 self.runner.remote('task', {'action': 'message', 'message': 'hi'}, timeout=10)
 
 
+    def test_worker_error_without_recovery_type_keeps_no_diagnostic(self):
+        chat = AxChat(self.runner, "popot-chat-0123456789abcdef", 12)
+        with patch.object(self.runner, 'remote', return_value={'error': 'worker exploded'}):
+            with self.assertRaisesRegex(AgentRunError, 'worker exploded') as caught:
+                chat.send('continue')
+        self.assertIsNone(getattr(caught.exception, 'diagnostic', None))
+
+
 if __name__ == "__main__":
     unittest.main()

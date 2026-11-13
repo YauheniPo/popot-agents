@@ -100,3 +100,18 @@ class ChunkGuardTests(unittest.TestCase):
             remote_client.main(['--chunk', request_id, '0', 'YWJj'])
             with self.assertRaisesRegex(ValueError, 'differs from the received request'):
                 remote_client.main(['--chunk', request_id, '0', 'ZGVm'])
+
+    def test_invalid_commands_and_chunks_are_rejected(self):
+        import tempfile
+        from unittest.mock import patch
+        from contextlib import redirect_stdout
+        import io
+        from ax_local.worker import remote_client
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(remote_client, 'REQUEST_DIRECTORY', directory), \
+             redirect_stdout(io.StringIO()):
+            request_id = 'd' * 32
+            with self.assertRaisesRegex(ValueError, 'invalid AX request chunk'):
+                remote_client.main(['--chunk', request_id, '0', '***'])
+            with self.assertRaisesRegex(ValueError, 'invalid AX request command'):
+                remote_client.main([])
