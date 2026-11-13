@@ -212,29 +212,42 @@ class AxAgentRunner:
         deadline = time.monotonic() + timeout
         recovering, attempt = False, 0
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout)
+            remaining = self._remote_remaining(deadline, timeout)
             try:
-                result = self._remote_payload(task_name,
+                result = self._remote_payload(
+                    task_name,
                     {'action': 'recover', 'request_id': request_id} if recovering else payload,
                     remaining, on_progress=on_progress)
             except AxCommandError as exc:
-                if 'rpc error: code = Unavailable' not in exc.diagnostic.get('stderr', ''):
-                    raise
-                recovering = not getattr(exc, 'request_not_sent', False)
-                attempt += 1
-                if on_progress:
-                    on_progress(format_progress('worker_reconnecting', attempt=attempt,
-                                                reason='ax_transport_unavailable'))
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout) from exc
-                time.sleep(min(2, .5 * attempt, remaining))
+                recovering, attempt = self._remote_recovery(exc, attempt, deadline, timeout, on_progress)
                 continue
             if attempt and not result.get('error') and on_progress:
                 on_progress(format_progress('worker_reconnected', attempt=attempt))
             return result
+
+    @staticmethod
+    def _remote_remaining(deadline: float, timeout: int) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout)
+        return remaining
+
+    @staticmethod
+    def _remote_recovery(exc: AxCommandError, attempt: int, deadline: float, timeout: int,
+                         on_progress=None) -> tuple:
+        """Return the recovery state for the next attempt or re-raise a non-transport error."""
+        if 'rpc error: code = Unavailable' not in exc.diagnostic.get('stderr', ''):
+            raise exc
+        recovering = not getattr(exc, 'request_not_sent', False)
+        attempt += 1
+        if on_progress:
+            on_progress(format_progress('worker_reconnecting', attempt=attempt,
+                                        reason='ax_transport_unavailable'))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout) from exc
+        time.sleep(min(2, .5 * attempt, remaining))
+        return recovering, attempt
 
     def _remote_payload(self, task_name: str, payload: dict, timeout: int = 60, *, on_progress=None) -> dict:
         raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')

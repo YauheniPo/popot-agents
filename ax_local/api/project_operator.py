@@ -202,32 +202,39 @@ class ProjectOperations:
             'resources': [{'container': c['name'], 'resources': c.get('resources', {})}
                           for c in r['spec']['containers']]} for r in rows]
 
+    def _metric_range(self, params):
+        start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
+        if any(type(value) not in {int, float} for value in (start, end, step)) \
+                or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
+            raise ValueError('range must be <=7d, step>=15s and <=1500 points')
+        return {'start': start, 'end': end, 'step': step}
+
+    @staticmethod
+    def _metric_availability(result):
+        data = result.get('data', {})
+        if result.get('status') != 'success' or not isinstance(data.get('result'), list):
+            return 'unknown'
+        samples = data['result']
+        if data.get('resultType') == 'matrix':
+            return 'available' if any(row.get('values') or row.get('histograms')
+                                      for row in samples) else 'no_data'
+        if data.get('resultType') in ('vector', 'scalar', 'string'):
+            return 'available' if samples else 'no_data'
+        return 'unknown'
+
     def _metrics(self, params):
         query = params.get('query', '')
         if not isinstance(query, str) or not query.strip() or len(query) > 3000:
             raise ValueError('PromQL query of 1..3000 characters is required')
-        args = {'query': query, 'timeout':'5s'}
+        args = {'query': query, 'timeout': '5s'}
         if 'start' in params or 'end' in params:
-            start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
-            if any(type(v) not in {int, float} for v in (start, end, step)) \
-                    or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
-                raise ValueError('range must be <=7d, step>=15s and <=1500 points')
-            args.update(start=start, end=end, step=step)
+            args.update(self._metric_range(params))
         endpoint = 'query_range' if 'start' in args else 'query'
         result = self._proxy('prometheus', '/api/v1/' + endpoint + '?' + urlencode(args))
-        data = result.get('data', {})
-        availability = 'unknown'
-        if result.get('status') == 'success' and isinstance(data.get('result'), list):
-            samples = data['result']
-            if data.get('resultType') == 'matrix':
-                availability = 'available' if any(row.get('values') or row.get('histograms')
-                                                  for row in samples) else 'no_data'
-            elif data.get('resultType') in ('vector', 'scalar', 'string'):
-                availability = 'available' if samples else 'no_data'
         return {**result, 'observation': {
             'source_type': 'observation', 'observed_at': datetime.now(timezone.utc).isoformat(),
             'query': query, 'range': {key: args[key] for key in ('start', 'end', 'step') if key in args},
-            'availability': availability,
+            'availability': self._metric_availability(result),
             'interpretation': 'no_data means no samples for this query and scope, not zero utilization; '
                               'unknown means availability could not be established.',
         }}

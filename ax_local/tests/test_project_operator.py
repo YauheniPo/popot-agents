@@ -503,6 +503,19 @@ class OperatorInspectionTests(unittest.TestCase):
         self.ops.store = None
         self.assertEqual(self.ops.inspect('sessions', {})['postgres'], {'backend': 'file'})
 
+
+    def test_metrics_reject_partial_or_out_of_bounds_ranges(self):
+        for params in ({'query': 'up', 'end': 300}, {'query': 'up', 'start': 0},
+                       {'query': 'up', 'start': 0, 'end': 300, 'step': 5}):
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                self.ops.inspect('metrics', params)
+
+    def test_metrics_unrecognised_result_type_stays_unknown(self):
+        from unittest.mock import patch
+        response = {'status': 'success', 'data': {'resultType': 'histogram', 'result': []}}
+        with patch.object(self.ops, '_proxy', return_value=response):
+            result = self.ops.inspect('metrics', {'query': 'up'})
+        self.assertEqual(result['observation']['availability'], 'unknown')
     def test_overview_is_partial_when_one_service_fails_and_redacts_service_details(self):
         self.ops.roles = {'test': {'agent': 'omniroute_free', 'env_names': ['SECRET']}}
         with patch.object(self.ops, '_api_health', return_value={'status': 'ok'}), \

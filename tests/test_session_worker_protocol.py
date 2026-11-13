@@ -141,6 +141,15 @@ class ResultDetailsProtocolTests(unittest.TestCase):
         self.assertEqual(result['error_type'], 'RecoveryUnavailable')
         run.assert_not_called()
 
+    def test_invalid_request_ids_are_rejected_for_message_and_recover(self):
+        self._serve(mode='http')
+        with patch.object(session_worker, 'run_http') as run:
+            message = self._request({'action': 'message', 'message': 'work', 'request_id': 'nope'})
+            recovery = self._request({'action': 'recover', 'request_id': 'nope'})
+        self.assertEqual(message, {'error': 'invalid worker request ID'})
+        self.assertEqual(recovery, {'error': 'invalid worker request ID'})
+        run.assert_not_called()
+
     def test_ax_reconnect_recovers_over_the_real_worker_socket(self):
         from ax_local.api.ax_runner import AxAgentRunner
         self._serve(mode='http')

@@ -77,3 +77,26 @@ class ChunkedHistoryTests(unittest.TestCase):
             self.assertEqual(received, payload)
             from pathlib import Path
             self.assertEqual(list(Path(directory).iterdir()), [])
+
+
+class ChunkGuardTests(unittest.TestCase):
+    def test_chunk_guards_reject_invalid_offsets_incomplete_writes_and_conflicts(self):
+        import tempfile
+        from unittest.mock import patch
+        from contextlib import redirect_stdout
+        import io
+        from ax_local.worker import remote_client
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(remote_client, 'REQUEST_DIRECTORY', directory), \
+             redirect_stdout(io.StringIO()):
+            request_id = 'c' * 32
+            with self.assertRaisesRegex(ValueError, 'invalid AX chunk offset'):
+                remote_client.main(['--chunk', request_id, 'x', 'YWJj'])
+            with self.assertRaisesRegex(ValueError, 'past the received request'):
+                remote_client.main(['--chunk', request_id, '5', 'YWJj'])
+            with patch.object(remote_client.os, 'pwrite', return_value=1):
+                with self.assertRaisesRegex(OSError, 'incomplete AX request chunk'):
+                    remote_client.main(['--chunk', request_id, '0', 'YWJj'])
+            remote_client.main(['--chunk', request_id, '0', 'YWJj'])
+            with self.assertRaisesRegex(ValueError, 'differs from the received request'):
+                remote_client.main(['--chunk', request_id, '0', 'ZGVm'])

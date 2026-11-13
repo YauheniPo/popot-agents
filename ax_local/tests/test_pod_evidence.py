@@ -104,3 +104,16 @@ def test_snapshot_keeps_complete_json_within_the_context_budget():
     assert result['truncated'] is True
     assert result['total_pods'] == 100
     assert result['pods']
+
+
+def test_module_entry_point_prints_the_namespace_snapshot():
+    import runpy
+    from ax_local.holmes import pod_evidence
+
+    completed = subprocess.CompletedProcess([], 0, json.dumps({'items': [pod()]}), '')
+    with patch('sys.argv', ['pod_evidence.py', 'otel-system']), \
+         patch('subprocess.run', return_value=completed) as run, \
+         redirect_stdout(io.StringIO()) as output:
+        runpy.run_path(pod_evidence.__file__, run_name='__main__')
+    assert json.loads(output.getvalue())['namespace'] == 'otel-system'
+    assert run.call_args.args[0][:4] == ['kubectl', '--request-timeout=20s', '-n', 'otel-system']

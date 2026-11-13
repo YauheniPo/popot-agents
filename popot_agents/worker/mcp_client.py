@@ -53,13 +53,15 @@ async def _streams(config: dict):
         import httpx2
         from mcp.client.streamable_http import streamable_http_client
 
-        async with httpx2.AsyncClient(headers=headers,
-                                     follow_redirects=False,
-                                     # Outer discovery/tool deadlines still apply.
-                                     timeout=httpx2.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
-                                         read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client:
-            async with streamable_http_client(config["url"], http_client=client) as (read, write):
-                yield read, write
+        async with (
+            httpx2.AsyncClient(headers=headers,
+                               follow_redirects=False,
+                               # Outer discovery/tool deadlines still apply.
+                               timeout=httpx2.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
+                                   read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client,
+            streamable_http_client(config["url"], http_client=client) as (read, write),
+        ):
+            yield read, write
     else:
         from mcp.client.stdio import stdio_client
 

@@ -50,7 +50,7 @@ def main(args: list[str]) -> None:
             chunk = args[-1].encode('ascii')
             if not re.fullmatch(rb"[A-Za-z0-9_=-]{1,48000}", chunk):
                 raise ValueError("invalid AX request chunk")
-            if len(args) == 4 and not re.fullmatch(r'[0-9]{1,10}', args[2]):
+            if len(args) == 4 and not re.fullmatch(r'\d{1,10}', args[2]):
                 raise ValueError('invalid AX chunk offset')
             flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(path, flags, 0o600)

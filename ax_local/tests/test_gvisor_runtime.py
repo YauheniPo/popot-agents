@@ -10,11 +10,12 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE = b'fixture release archive'
-FIXTURE_SECRET = 'fixture-secret'
+FIXTURE_SECRET = uuid.uuid4().hex
 
 
 class GvisorRuntimeTests(unittest.TestCase):
