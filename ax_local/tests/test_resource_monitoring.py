@@ -11,6 +11,12 @@ from ax_local.cluster.resource_dashboard import dashboard
 
 
 class ResourceMonitoringTests(unittest.TestCase):
+    def test_prometheus_deploy_has_headroom_above_observed_512_mib_oom(self):
+        from ax_local.resource_config import load_monitoring, memory_mib
+        resources = load_monitoring(monitoring.ROOT)['prometheus']['resources']
+        self.assertGreaterEqual(memory_mib(resources['requests']['memory']), 512)
+        self.assertGreaterEqual(memory_mib(resources['limits']['memory']), 2048)
+
     def test_grafana_provisions_both_dashboards_without_replacing_storage(self):
         from ax_local.resource_config import load_monitoring
         cluster = MagicMock()
