@@ -9,10 +9,18 @@ def dashboard():
     paired = scope + ',experiment=~"${experiment:regex}",baseline=~"${baseline:regex}"'
 
     def names(selector):
-        return (f'(last_over_time(popot_eval_info{{{selector},display_name!="",series_display_name!=""}}[$__range]) '
-                f'or on(series,experiment) last_over_time(popot_eval_info{{{selector},display_name!="",series_display_name=""}}[$__range]) '
-                f'or on(series,experiment) label_replace(last_over_time(popot_eval_info{{{selector},display_name=""}}[$__range]),'
-                '"display_name","$1","experiment","(.+)"))')
+        # Labels survive in history after a rename. Pick one latest alias and
+        # normalize its timestamp to 1 before multiplying measured values.
+        latest = (f'clamp_max(topk by(series,experiment) (1, last_over_time(popot_eval_info{{{selector},'
+                  'metric="display_name_updated_at_seconds",display_name!=""}[$__range])), 1)')
+        return (f'({latest} or on(series,experiment) '
+                f'((last_over_time(popot_eval_info{{{selector},metric="configuration",display_name!="",series_display_name!=""}}[$__range]) '
+                f'or on(series,experiment) last_over_time(popot_eval_info{{{selector},metric="configuration",display_name!="",series_display_name=""}}[$__range]) '
+                f'or on(series,experiment) label_replace(last_over_time(popot_eval_info{{{selector},metric="configuration",display_name=""}}[$__range]),'
+                '"display_name","$1","experiment","(.+)")) '
+                f'or on(series,experiment) label_replace(max by(series,experiment) '
+                f'(last_over_time(popot_eval_progress{{{selector},metric="planned_runs"}}[$__range])), '
+                '"display_name","$1","experiment","(.+)")))')
 
     def named(expression):
         # Info aliases preserve the stored keys and old dashboard links.
@@ -89,7 +97,9 @@ def dashboard():
         'fieldConfig': {'defaults': {}, 'overrides': [{'matcher': {'id': 'byName', 'options': 'phoenix_url'},
             'properties': [{'id': 'links', 'value': [{'title': 'Открыть Phoenix', 'url': '${__value.raw}', 'targetBlank': True}]}]}]},
         'transformations': [{'id': 'organize', 'options': {'excludeByName': {'Time': True, 'Value': True, 'experiment': True},
-            'indexByName': {'display_name': 0, 'model': 1, 'harness': 2, 'parameters': 3, 'source_revision': 4}}}]})
+            'indexByName': {'display_name': 0, 'model': 1, 'harness': 2, 'parallel_models': 3,
+                            'parameters': 4, 'source_revision': 5},
+            'renameByName': {'parallel_models': 'Параллельных моделей'}}}]})
     sections = [('Обзор запуска', [panels[1:4], panels[4:6]])]
     for title, metrics in [
         ('Качество результата', ['objective_score', 'functional_success', 'false_completion']),

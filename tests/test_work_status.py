@@ -75,7 +75,7 @@ class WorkStatusTests(unittest.TestCase):
         self.assertEqual(failure['errno'], 13)
         self.assertNotIn('childSessionIds', failure)
 
-    def test_reports_are_bounded_redacted_and_truncation_is_explicit(self):
+    def test_reports_are_bounded_preserve_values_and_truncation_is_explicit(self):
         from popot_agents.orchestrator.work_status import build_work_status
         root = {'sessionId':'a'*16,'role':'planner','updatedAt':'2026-10-31T20:00:00Z','roleConfig':{}}
         children = [{'sessionId':format(i,'016x'), 'role':'backend_engineer', 'updatedAt':str(i),
@@ -89,6 +89,6 @@ class WorkStatusTests(unittest.TestCase):
             self.assertEqual(focused['tasks'][0]['sessionId'], children[-1]['sessionId'])
         encoded = json.dumps(result,ensure_ascii=False).encode()
         self.assertLessEqual(len(encoded), 16384)
-        self.assertNotIn('test-secret-value', encoded.decode())
+        self.assertIn('test-secret-value', encoded.decode())
         self.assertTrue(result['truncated'])
         self.assertLessEqual(len(result['tasks']), 8)

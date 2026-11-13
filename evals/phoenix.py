@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 
+from evals import exclusive
 from popot_agents.telemetry import VERSION, payload_attributes
 
 
@@ -222,11 +223,11 @@ def build_spans(row, events, experiment, *, model_records=()):
     return spans
 
 
-def configure_metrics(key):
+def configure_metrics(key, *, endpoint='http://127.0.0.1:6006'):
     from evals.metrics import METRICS
     from evals.runtime import API
 
-    api = API('http://127.0.0.1:6006', key)
+    api = API(endpoint, key)
     configs, params = {}, {'limit': 100}
     cursors = set()
     while True:
@@ -257,7 +258,38 @@ def configure_metrics(key):
                 response.read()
 
 
-def export(directory, *, baseline=False):
+def model_records(path, session_ids):
+    if path.exists():
+        with path.open() as capture:
+            for line in capture:
+                record = json.loads(line)
+                if record['attributes'].get('popot.agent_session_id') in session_ids:
+                    yield record
+
+
+def recorded_run(endpoint, key, experiment, example, repetition, trace):
+    from evals.runtime import API
+    api = API(endpoint, key)
+    params, cursors = {'limit': 100}, set()
+    while True:
+        page = api.call('/v1/experiments/' + experiment + '/runs', params=params)
+        for run in page['data']:
+            if (run['dataset_example_id'] == example and run['repetition_number'] == repetition
+                    and run.get('trace_id') == trace and not run.get('error')):
+                return run
+        cursor = page.get('next_cursor')
+        if not cursor or cursor in cursors:
+            raise RuntimeError('Phoenix run conflict does not match the saved trace')
+        cursors.add(cursor)
+        params['cursor'] = cursor
+
+
+def export(directory, *, baseline=False, endpoint='http://127.0.0.1:6006'):
+    with exclusive(directory / '.phoenix.lock'):
+        return _export(directory, baseline=baseline, endpoint=endpoint)
+
+
+def _export(directory, *, baseline, endpoint):
     # Import heavy SDKs only for export, not for offline scorer tests.
     from opentelemetry.trace import SpanContext, TraceFlags, Status, StatusCode
     from opentelemetry.sdk.resources import Resource
@@ -265,6 +297,7 @@ def export(directory, *, baseline=False):
     from opentelemetry.sdk.util.instrumentation import InstrumentationScope
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from phoenix.client import Client
+    from httpx import HTTPStatusError
     from evals import save
 
     report = json.loads((directory / 'report.json').read_text())
@@ -272,9 +305,9 @@ def export(directory, *, baseline=False):
     cases = config.get('cases') or json.loads((Path(__file__).parent / 'cases.json').read_text())
     fingerprint = hashlib.sha256((directory / 'config.json').read_bytes()).hexdigest()
     key = os.environ['PHOENIX_ADMIN_SECRET']
-    client = Client(base_url='http://127.0.0.1:6006', api_key=key)
+    client = Client(base_url=endpoint, api_key=key)
     if config.get('suite_sha256'):
-        configure_metrics(key)
+        configure_metrics(key, endpoint=endpoint)
     journal_path = directory / 'phoenix.json'
     if journal_path.exists():
         journal = json.loads(journal_path.read_text())
@@ -291,84 +324,110 @@ def export(directory, *, baseline=False):
                                        'followup': c.get('followup')} for c in cases],
             outputs=[{'criterion': 'Objective artifact and runtime checks in evals.baseline.evaluate'} for c in cases],
             metadata=[{'case_id': c['id'], 'cases_sha256': case_hash} for c in cases])
-        experiment = client.experiments.create(dataset_id=dataset.id, dataset_version_id=dataset.version_id,
-            experiment_name=config.get('experiment_name', directory.name), repetitions=report.get('planned_repetitions', max(r['repetition'] for r in report['results'])),
-            experiment_description=('Judge v2 re-evaluation of saved AX outputs; original execution preserved, no agent replay.'
-                                    if config.get('evaluation') else
-                                    'Real AX execution with objective checks, fixed independent judge and separate agent self-assessment.'),
-            experiment_metadata={'source_revision': config['source_revision'], 'worker_image': config['worker_image'],
-                                 'model': config['primary_model'], 'harness': config['harness'],
-                                 'memory_mode': config.get('memory_mode', 'enabled'),
-                                 'config_sha256': fingerprint, 'method': config['method'],
-                                 'model_parameters': config.get('profiles'),
-                                 'workflow': config.get('evals', config.get('baseline', {})).get('workflow'),
-                                 'suite_sha256': config.get('suite_sha256'),
-                                 'judge_fingerprint': config.get('judge_fingerprint'),
-                                 'scoring': config.get('scoring'), 'evaluation': config.get('evaluation'),
-                                 'telemetry_version': config.get('telemetry_version', 'legacy'),
-                                 'payload_limit_bytes': config.get('payload_limit_bytes')})
+        experiment = next((item for item in client.experiments.list(dataset_id=dataset.id)
+                           if (item.get('metadata') or {}).get('config_sha256') == fingerprint), None)
+        if experiment:
+            dataset = client.datasets.get_dataset(dataset=dataset.id,
+                                                   version_id=experiment['dataset_version_id'])
+        else:
+            experiment = client.experiments.create(dataset_id=dataset.id, dataset_version_id=dataset.version_id,
+                experiment_name=config.get('experiment_name', directory.name), repetitions=report.get('planned_repetitions', max(r['repetition'] for r in report['results'])),
+                experiment_description=('Judge v2 re-evaluation of saved AX outputs; original execution preserved, no agent replay.'
+                                        if config.get('evaluation') else
+                                        'Real AX execution with objective checks, fixed independent judge and separate agent self-assessment.'),
+                experiment_metadata={'source_revision': config['source_revision'], 'worker_image': config['worker_image'],
+                                     'run_id': config.get('run_id'),
+                                     'parallel_models': config.get('evals', {}).get('parallel_models', 1),
+                                     'model': config['primary_model'], 'harness': config['harness'],
+                                     'memory_mode': config.get('memory_mode', 'enabled'),
+                                     'config_sha256': fingerprint, 'method': config['method'],
+                                     'model_parameters': config.get('profiles'),
+                                     'workflow': config.get('evals', config.get('baseline', {})).get('workflow'),
+                                     'suite_sha256': config.get('suite_sha256'),
+                                     'judge_fingerprint': config.get('judge_fingerprint'),
+                                     'scoring': config.get('scoring'), 'evaluation': config.get('evaluation'),
+                                     'telemetry_version': config.get('telemetry_version', 'legacy'),
+                                     'payload_limit_bytes': config.get('payload_limit_bytes')})
         journal = {'config_sha256': fingerprint, 'dataset_id': dataset.id, 'dataset_version_id': dataset.version_id,
                    'experiment_id': experiment['id'], 'runs': {}}
         save(journal_path, journal)
     resource = Resource({'openinference.project.name': experiment['project_name'], 'service.name': 'popot-baseline'})
-    exporter = OTLPSpanExporter(endpoint='http://127.0.0.1:6006/v1/traces', headers={'Authorization': 'Bearer ' + key})
+    exporter = OTLPSpanExporter(endpoint=endpoint + '/v1/traces', headers={'Authorization': 'Bearer ' + key})
     examples = {e['input']['case_id']: e['id'] for e in dataset.examples}
     capture_path = directory / 'model-spans.jsonl'
-    model_records = [json.loads(line) for line in capture_path.read_text().splitlines()] if capture_path.exists() else []
-    for row in report['results']:
-        row_key = row['case_id'] + '/' + str(row['repetition'])
-        records = build_spans(row, [json.loads(line) for line in (directory / row['trace_file']).read_text().splitlines()],
-                              experiment['id'], model_records=model_records)
-        contexts = {s['id']: SpanContext(int(s['trace'], 16), int(s['id'], 16), False, TraceFlags(1)) for s in records}
-        spans = [ReadableSpan(name=s['name'], context=contexts[s['id']], parent=contexts.get(s['parent']),
-                  resource=resource, attributes={**s['attributes'], 'openinference.span.kind': s['kind']},
-                  events=[Event(e['name'], e['attributes'], e['time']) for e in s['events']],
-                  start_time=s['start'], end_time=s['end'], status=Status(StatusCode.ERROR if s['error'] else StatusCode.OK),
-                  instrumentation_scope=InstrumentationScope('popot.baseline', '1')) for s in records]
-        if row_key in journal['runs']:
-            continue
-        if exporter.export(spans).name != 'SUCCESS':
-            raise RuntimeError('Phoenix span export failed')
-        run = client.experiments.log_run(experiment_id=experiment['id'], dataset_example_id=examples[row['case_id']],
-            output={'session_id': row['session_id'], 'status': row['outcome'].get('status'),
-                    'checks': row['checks'], 'answer': row['result'].get('answer'),
-                    'tokens': row.get('tokens'), 'tokens_known': row.get('tokens_known'),
-                    'usage_complete': row.get('usage_complete'), 'gateway_calls': row.get('gateway_calls', []),
-                    'observed': row['observed'], 'runner_error': row['result'].get('runner_error')},
-            start_time=datetime.fromtimestamp(row['started_at_ns'] / 1e9, timezone.utc),
-            end_time=datetime.fromtimestamp(row['finished_at_ns'] / 1e9, timezone.utc),
-            repetition_number=row['repetition'], trace_id=records[0]['trace'])
-        for name, value in {'success': row['passed'], 'functional_success': row['functional_passed'],
-                            'false_completion': row['false_completion'], **row['checks']}.items():
-            client.experiments.log_evaluation(experiment_run_id=run['id'], name=name, score=float(value),
-                                             label=str(value).lower(), trace_id=records[0]['trace'])
-        for name, value in {'latency_seconds': row['elapsed_seconds'], 'total_tokens': row.get('tokens'),
-                            'tokens_known': row.get('tokens_known')}.items():
-            if value is not None:
-                client.experiments.log_evaluation(experiment_run_id=run['id'], name=name, score=float(value), trace_id=records[0]['trace'])
-        from evals.metrics import METRICS
-        sources = {'judge_score': row.get('judge', {}), 'self_score': row.get('self_assessment', {})}
-        for name, value in row.get('metrics', {}).items():
-            if name not in METRICS:
+    try:
+        for row in report['results']:
+            row_key = row['case_id'] + '/' + str(row['repetition'])
+            checkpoint = journal['runs'].get(row_key)
+            if checkpoint and checkpoint.get('evaluations_complete', True):
                 continue
-            source = sources.get(name, {})
-            judge_trace = next((s['trace'] for s in records if s['attributes'].get('popot.evaluation') == 'judge_score'), records[0]['trace'])
-            client.experiments.log_evaluation(experiment_run_id=run['id'], name='popot.eval.' + name,
-                annotator_kind='LLM' if name in {'judge_score', 'self_score'} else 'CODE',
-                score=float(value) if value is not None else None,
-                error='Measurement unavailable' if value is None else None,
-                explanation=source.get('explanation'),
-                metadata={'optimization_direction': METRICS[name][0], 'source': name,
-                          'judge_fingerprint': config.get('judge_fingerprint'),
-                          'measurement_status': source.get('status'), 'error_type': source.get('error_type')},
-                trace_id=judge_trace if name == 'judge_score' else records[0]['trace'])
-        journal['runs'][row_key] = {'run_id': run['id'], 'trace_id': records[0]['trace'], 'spans': len(spans)}
-        save(journal_path, journal)
-        print('PHOENIX_IMPORTED', row_key, 'spans', len(spans), flush=True)
-    exporter.shutdown()
+            with (directory / row['trace_file']).open() as source:
+                events = [json.loads(line) for line in source]
+            sessions = {row.get('session_id'), *(e.get('agent_session_id') for e in events)}
+            records = build_spans(row, events, experiment['id'],
+                                  model_records=model_records(capture_path, sessions))
+            contexts = {s['id']: SpanContext(int(s['trace'], 16), int(s['id'], 16), False, TraceFlags(1)) for s in records}
+            spans = [ReadableSpan(name=s['name'], context=contexts[s['id']], parent=contexts.get(s['parent']),
+                      resource=resource, attributes={**s['attributes'], 'openinference.span.kind': s['kind']},
+                      events=[Event(e['name'], e['attributes'], e['time']) for e in s['events']],
+                      start_time=s['start'], end_time=s['end'], status=Status(StatusCode.ERROR if s['error'] else StatusCode.OK),
+                      instrumentation_scope=InstrumentationScope('popot.baseline', '1')) for s in records]
+            if checkpoint:
+                run = {'id': checkpoint['run_id']}
+            else:
+                for offset in range(0, len(spans), 16):
+                    if exporter.export(spans[offset:offset + 16]).name != 'SUCCESS':
+                        raise RuntimeError('Phoenix span export failed')
+                try:
+                    run = client.experiments.log_run(experiment_id=experiment['id'], dataset_example_id=examples[row['case_id']],
+                        output={'session_id': row['session_id'], 'status': row['outcome'].get('status'),
+                                'checks': row['checks'], 'answer': row['result'].get('answer'),
+                                'tokens': row.get('tokens'), 'tokens_known': row.get('tokens_known'),
+                                'usage_complete': row.get('usage_complete'), 'gateway_calls': row.get('gateway_calls', []),
+                                'observed': row['observed'], 'runner_error': row['result'].get('runner_error')},
+                        start_time=datetime.fromtimestamp(row['started_at_ns'] / 1e9, timezone.utc),
+                        end_time=datetime.fromtimestamp(row['finished_at_ns'] / 1e9, timezone.utc),
+                        repetition_number=row['repetition'], trace_id=records[0]['trace'])
+                except HTTPStatusError as exc:
+                    if exc.response.status_code != 409:
+                        raise
+                    run = recorded_run(endpoint, key, experiment['id'], examples[row['case_id']],
+                                       row['repetition'], records[0]['trace'])
+                journal['runs'][row_key] = {'run_id': run['id'], 'trace_id': records[0]['trace'],
+                                            'spans': len(spans), 'evaluations_complete': False}
+                save(journal_path, journal)
+            for name, value in {'success': row['passed'], 'functional_success': row['functional_passed'],
+                                'false_completion': row['false_completion'], **row['checks']}.items():
+                client.experiments.log_evaluation(experiment_run_id=run['id'], name=name, score=float(value),
+                                                 label=str(value).lower(), trace_id=records[0]['trace'])
+            for name, value in {'latency_seconds': row['elapsed_seconds'], 'total_tokens': row.get('tokens'),
+                                'tokens_known': row.get('tokens_known')}.items():
+                if value is not None:
+                    client.experiments.log_evaluation(experiment_run_id=run['id'], name=name, score=float(value), trace_id=records[0]['trace'])
+            from evals.metrics import METRICS
+            sources = {'judge_score': row.get('judge', {}), 'self_score': row.get('self_assessment', {})}
+            for name, value in row.get('metrics', {}).items():
+                if name not in METRICS:
+                    continue
+                source = sources.get(name, {})
+                judge_trace = next((s['trace'] for s in records if s['attributes'].get('popot.evaluation') == 'judge_score'), records[0]['trace'])
+                client.experiments.log_evaluation(experiment_run_id=run['id'], name='popot.eval.' + name,
+                    annotator_kind='LLM' if name in {'judge_score', 'self_score'} else 'CODE',
+                    score=float(value) if value is not None else None,
+                    error='Measurement unavailable' if value is None else None,
+                    explanation=source.get('explanation'),
+                    metadata={'optimization_direction': METRICS[name][0], 'source': name,
+                              'judge_fingerprint': config.get('judge_fingerprint'),
+                              'measurement_status': source.get('status'), 'error_type': source.get('error_type')},
+                    trace_id=judge_trace if name == 'judge_score' else records[0]['trace'])
+            journal['runs'][row_key]['evaluations_complete'] = True
+            save(journal_path, journal)
+            print('PHOENIX_IMPORTED', row_key, 'spans', len(spans), flush=True)
+    finally:
+        exporter.shutdown()
     from evals.names import rename, dataset_label
     from evals.phoenix_providers import API
-    api = API('http://127.0.0.1:6006', key)
+    api = API(endpoint, key)
     journal['display_name'] = rename(api, config, experiment['id'])
     journal['series_display_name'] = dataset_label(api, dataset.id)
     if baseline:
@@ -376,6 +435,8 @@ def export(directory, *, baseline=False):
             'mutation($id:ID!){setExperimentBaseline(experimentId:$id,baseline:true){experiment{id}}}',
             {'id': experiment['id']})
     journal['url'] = client.experiments.get_experiment_url(dataset.id, experiment['id'])
+    if journal['url'].startswith(endpoint):
+        journal['url'] = 'http://127.0.0.1:6006' + journal['url'][len(endpoint):]
     save(journal_path, journal)
     print('PHOENIX_EXPERIMENT', journal['url'], flush=True)
 
@@ -384,5 +445,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     parser.add_argument('--baseline', action='store_true')
+    parser.add_argument('--endpoint', default='http://127.0.0.1:6006')
     args = parser.parse_args()
-    export(args.directory, baseline=args.baseline)
+    export(args.directory, baseline=args.baseline, endpoint=args.endpoint.rstrip('/'))

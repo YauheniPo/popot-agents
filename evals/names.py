@@ -20,9 +20,7 @@ def rename(api, config, experiment_id):
     number = identity.removeprefix('Experiment:')
     if identity == number or not number.isdecimal():
         raise ValueError('Expected a native Phoenix Experiment ID')
-    profile = next(iter(config['profiles'].values()))
-    name = experiment_name(config['primary_model'], profile.get('model_parameters', {}),
-                           'judge-v2' if config.get('evaluation') else 'evals', number)
+    name = from_config(config, 'judge-v2' if config.get('evaluation') else 'evals') + '-' + number
     api.query('mutation($input:PatchExperimentInput!){patchExperiment(input:$input){__typename}}',
               {'input': {'experimentId': experiment_id, 'name': name}})
     result = api.query('query($id:ID!){node(id:$id){... on Experiment{name}}}', {'id': experiment_id})

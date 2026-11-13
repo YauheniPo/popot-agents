@@ -79,6 +79,8 @@ class WorkerPoolController:
                     return
                 try:
                     snapshot = self.backend.inspect()
+                    if snapshot['busy'] or self.pending or self.admitted:
+                        self.last_demand = self.clock()
                     external = snapshot['busy'] - self.admitted
                     self.ready = max(0, snapshot['ready'] - len(external))
                     target = min(self.max_workers, max(self.warm_workers,

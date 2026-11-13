@@ -7,10 +7,13 @@ from popot_agents.runtime_config import RUNTIME, validate_model_parameters, vali
 
 
 def validate_config(settings):
-    if not isinstance(settings, dict) or set(settings) != {
+    if not isinstance(settings, dict) or set(settings) - {'parallel_models'} != {
             'baseline', 'variants', 'repetitions', 'workflow',
             'request_timeout_seconds', 'inspection_timeout_seconds'}:
         raise ValueError('evals config has invalid x-evals fields')
+    parallel = settings.get('parallel_models', 1)
+    if type(parallel) is not int or not 1 <= parallel <= 5:
+        raise ValueError('x-evals.parallel_models must be between 1 and 5')
     variants = settings['variants']
     if not isinstance(variants, list) or not variants:
         raise ValueError('x-evals.variants must be a nonempty list')

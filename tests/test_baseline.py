@@ -19,6 +19,35 @@ def artifact(name, data, *, binary=False):
 
 
 class BaselineTests(unittest.TestCase):
+    def test_code_snapshot_hashes_actual_staged_evaluator_sources(self):
+        from evals import baseline
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for name in ('config.json', 'cases.json'):
+                (directory / name).write_bytes((baseline.ROOT / 'evals' / name).read_bytes())
+            staged = directory / 'baseline.py'
+            staged.write_text('# isolated evaluator snapshot\n')
+            with patch('evals.baseline.__file__', str(staged)):
+                config = baseline.frozen_config({}, {}, 'fixture', 'fixture')
+            self.assertEqual(config['source_sha256']['evals/baseline.py'],
+                             hashlib.sha256(staged.read_bytes()).hexdigest())
+
+    def test_cancelled_capture_stops_before_another_case_and_closes_server(self):
+        from evals.baseline import main
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch('evals.baseline.start_server') as start, \
+                patch('evals.baseline.call') as call, patch('builtins.print'):
+            directory = Path(tmp)
+            cancel = directory / 'cancel'
+            cancel.touch()
+            start.return_value = (Mock(), Mock(), Mock(), {'evals': {}})
+            with patch('sys.argv', ['baseline', '--output', str(directory / 'run'),
+                                   '--cancel-file', str(cancel)]), self.assertRaises(InterruptedError):
+                main()
+            call.assert_not_called()
+            start.return_value[0].server_close.assert_called_once()
+            self.assertIn('cancelled_at', json.loads((directory / 'run/report.json').read_text()))
+
     def test_independent_pagination_checks_reject_wrong_types_and_mutation(self):
         from evals.baseline import PAGINATION_CHECKS
         source = ('def paginate(items, page, size):\n'

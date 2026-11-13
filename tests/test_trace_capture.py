@@ -8,6 +8,21 @@ from unittest.mock import Mock, patch
 
 
 class TraceCaptureTests(unittest.TestCase):
+    def test_payload_and_digest_use_original_credentials_and_echoes(self):
+        import hashlib
+        from ax_local.api.phoenix import Span
+        request_body = {'password': 'fixture-secret', 'messages': [
+            {'role': 'user', 'content': '{"token":"fixture-token"}'}]}
+        with patch.dict(os.environ, {'TEST_API_KEY': 'fixture-secret'}):
+            span = Span(Mock(), 'model', 'LLM')
+            span.model_input(json.dumps(request_body).encode())
+            span.model_result(200, b'{"choices":[{"message":{"content":"fixture-secret"}}]}')
+        attrs = span.data['attributes']
+        self.assertEqual(json.loads(attrs['input.value']), request_body)
+        self.assertIn('fixture-secret', attrs['output.value'])
+        encoded = json.dumps(request_body, ensure_ascii=False, separators=(',', ':')).encode()
+        self.assertEqual(attrs['popot.input.sha256'], hashlib.sha256(encoded).hexdigest())
+
     def test_eval_child_startup_failure_uses_saved_state_and_stays_distinct_from_recovery(self):
         from evals.phoenix import build_spans
         row = {'case_id': 'delegation', 'repetition': 1, 'session_id': 'root',
@@ -37,7 +52,7 @@ class TraceCaptureTests(unittest.TestCase):
                 '/v1/chat/completions', 'Bearer key', b'{"model":"fixed"}', error_observer=span.upstream_error)
         self.assertEqual((status, body), (429, b'{}'))
         self.assertIn('quota', span.data['attributes']['error.value'])
-        self.assertNotIn('hidden-value', json.dumps(span.data))
+        self.assertIn('hidden-value', json.dumps(span.data))
 
     def test_tool_rejection_retains_actual_error_result(self):
         from ax_local.api.phoenix import AgentSpan
@@ -81,19 +96,19 @@ class TraceCaptureTests(unittest.TestCase):
         self.assertEqual(report['audit']['harness_event_chunks'], 1)
         self.assertEqual(report['summary']['retained_event_counts']['context_compacted'], 1)
 
-    def test_nested_json_credentials_and_echoes_are_redacted(self):
+    def test_nested_json_credentials_and_echoes_are_preserved(self):
         from ax_local.api.phoenix import Span
         span = Span(Mock(), 'fixed', 'LLM')
         span.model_input(json.dumps({'messages': [{'role': 'tool', 'content': '{"apiKey":"hidden-value"}'}]}).encode())
         span.model_result(200, b'{"choices":[{"message":{"role":"assistant","content":"hidden-value"}}]}')
-        self.assertNotIn('hidden-value', json.dumps(span.data))
+        self.assertIn('hidden-value', json.dumps(span.data))
 
-    def test_payloads_are_valid_bounded_json_and_secrets_do_not_enter_digests(self):
+    def test_payloads_are_valid_bounded_json_with_original_values(self):
         from popot_agents.telemetry import payload_attributes
         with patch.dict(os.environ, {'TEST_API_KEY': 'private-value'}):
             value = {'text': 'hello private-value', 'accessToken': 'another-private-value', 'number': 1234}
             attrs = payload_attributes('input', value)
-            self.assertNotIn('private-value', attrs['input.value'])
+            self.assertEqual(json.loads(attrs['input.value']), value)
             self.assertEqual(json.loads(attrs['input.value'])['number'], 1234)
             self.assertFalse(attrs['popot.input.truncated'])
             large = payload_attributes('input', {'text': 'я' * 10000}, limit=1024)
@@ -121,9 +136,9 @@ class TraceCaptureTests(unittest.TestCase):
         self.assertEqual(attrs['llm.input_messages.0.message.role'], 'system')
         self.assertEqual(attrs['llm.token_count.total'], 10)
         self.assertEqual(attrs['popot.request_id'], 'a' * 32)
-        self.assertNotIn('private-input', json.dumps(attrs))
+        self.assertIn('private-input', json.dumps(attrs))
 
-    def test_tool_io_control_chunks_and_skills_are_retained_without_secret_echoes(self):
+    def test_tool_io_control_chunks_and_skills_retain_original_values(self):
         from ax_local.api.phoenix import AgentSpan
         tracer = Mock()
         root = AgentSpan(tracer, 'a' * 16, 'backend_engineer', {'skills': ['engineering/tdd']}, None)
@@ -140,7 +155,7 @@ class TraceCaptureTests(unittest.TestCase):
         tool = next(s for s in spans if s['span_kind'] == 'TOOL')
         self.assertIn('pytest -q', tool['attributes']['input.value'])
         self.assertIn('2 passed', tool['attributes']['output.value'])
-        self.assertNotIn('private-input', json.dumps(spans))
+        self.assertIn('private-input', json.dumps(spans))
         compact = [e for s in spans for e in s.get('events', []) if e['name'] == 'context_compacted']
         self.assertEqual(len(compact), 200)
         self.assertEqual(root.data['attributes']['popot.skills.loaded'], ['engineering/tdd'])

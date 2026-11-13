@@ -23,18 +23,14 @@ from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunErro
 from popot_agents.role_env import selected_role_env
 from ax_local.config import AX_CONFIG
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
-from popot_agents.progress import is_progress_message, emit_progress, progress_observer, redact_text, format_progress
+from popot_agents.progress import is_progress_message, emit_progress, progress_observer, format_progress
 from ..worker.remote_client import RESPONSE_PREFIX, PROGRESS_PREFIX
 from .worker_queue import WorkerQueue
 
 
 class AxCommandError(AgentRunError):
-    def __init__(self, command, result, secrets=()):
-        stderr = redact_text(result.stderr or '')
-        for secret in secrets:
-            if isinstance(secret, str) and len(secret) >= 4:
-                stderr = stderr.replace(secret, '[REDACTED]')
-        stderr = stderr[-2000:]
+    def __init__(self, command, result):
+        stderr = (result.stderr or '')[-2000:]
         self.diagnostic = {'command': command, 'exit_code': result.returncode, 'stderr': stderr}
         super().__init__(stderr.splitlines()[-1] if stderr.strip() else 'AX command failed: ' + command)
 
@@ -73,11 +69,7 @@ class AxAgentRunner:
         self._cleanup_lock = threading.RLock()
 
     def _command_error(self, command, result):
-        secrets = [self.proxy_token, *self.harness2_environment.values()]
-        if self.delegation:
-            for grant in self.delegation.tokens.copy().values():
-                secrets.extend((grant.token, grant.probe_token))
-        return AxCommandError(command, result, secrets)
+        return AxCommandError(command, result)
 
     def _run(self, *args: str, input: str | None = None,
              timeout: int = AX_CONFIG["cli_timeout_seconds"],
@@ -299,7 +291,7 @@ class AxAgentRunner:
                             selector.unregister(key.fileobj)
                             continue
                         if key.data == 'err':
-                            # Keep a bounded tail; _command_error redacts capabilities
+                            # Keep a bounded tail of the original diagnostic output
                             # before any diagnostic leaves the adapter.
                             stderr = (stderr + chunk)[-8192:]
                             continue
@@ -353,6 +345,21 @@ class AxAgentRunner:
                         and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", fields[2]):
                     reason = fields[2]
         return phase, reason
+
+    def _capacity_unavailable(self, task_name, timeout):
+        result = self._run('describe', 'task', task_name, timeout=timeout, allow_failure=True)
+        if result.returncode:
+            return False
+        conditions = False
+        for line in result.stdout.splitlines():
+            if line == 'Conditions:':
+                conditions = True
+            elif conditions:
+                fields = line.split(maxsplit=3)
+                if len(fields) == 4 and fields[:3] == ['Ready', 'False', 'ActorResumeFailed']:
+                    return ('code = ResourceExhausted' in fields[3]
+                            and 'no free workers available' in fields[3])
+        return False
 
     def _reject_ungranted_delegation(self, chat_id: str, role_config: dict | None) -> None:
         if (role_config or {}).get('_ax_delegation') and self.delegation \
@@ -458,6 +465,7 @@ class AxAgentRunner:
         last_phase = None
         last_reason = None
         last_report = None
+        capacity_retry_at, capacity_attempt = 0, 0
         while True:
             try:
                 if chat.is_alive(timeout_seconds=remaining(AX_CONFIG["probe_timeout_seconds"])):
@@ -476,6 +484,23 @@ class AxAgentRunner:
                 last_report = report
             if phase:
                 last_phase, last_reason = phase, reason
+            if phase == 'Failed' and reason == 'ActorResumeFailed':
+                if time.monotonic() >= deadline:
+                    break
+                if self._capacity_unavailable(task_name, remaining(min(
+                        AX_CONFIG['probe_timeout_seconds'], deadline-time.monotonic()))):
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    if now >= capacity_retry_at:
+                        # Resume was rejected before allocation; no agent message
+                        # has been submitted, so retry the same Task and deadline.
+                        self._run('resume', 'task', task_name, timeout=remaining(min(
+                            AX_CONFIG['cli_timeout_seconds'], deadline-now)))
+                        capacity_attempt += 1
+                        capacity_retry_at = now + 1
+                        emit_progress('worker_capacity_wait', task=task_name, attempt=capacity_attempt)
+                    phase = 'Pending'
             if phase in {"Failed", "Completed", "Terminating"}:
                 if not resuming:
                     chat.close()

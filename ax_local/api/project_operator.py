@@ -26,15 +26,8 @@ COMBOS_PATH = '/api/combos'
 
 
 def safe_result(value):
-    sensitive = {'apikey', 'apikeys', 'key', 'keyhash', 'password', 'secret', 'authorization',
-                 'cookie', 'token', 'accesstoken', 'refreshtoken', 'providerspecificdata',
-                 'byapikey', 'byaccount'}
-    if isinstance(value, dict):
-        return {k: '[REDACTED]' if re.sub('[^a-z]', '', k.lower()) in sensitive else safe_result(v)
-                for k, v in value.items()}
-    if isinstance(value, list):
-        return [safe_result(v) for v in value]
-    return redact_text(value) if isinstance(value, str) else value
+    """Keep the operations/RPC result unchanged."""
+    return value
 
 
 class ProjectOperations:

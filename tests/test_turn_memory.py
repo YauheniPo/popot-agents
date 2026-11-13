@@ -112,7 +112,7 @@ class TurnMemoryTests(unittest.TestCase):
                 memory.observe(call_id, 'bash', {}, call_id + ' private-password')
             memory.observe('error', 'bash', {}, '{"isError": true}')
             self.assertEqual(memory.evidence, {'user': TASK,
-                'second': 'second [REDACTED]', 'third': 'third [REDACTED]'})
+                'second': 'second private-password', 'third': 'third private-password'})
             self.assertEqual(memory.tools, [{'name': 'bash', 'status': 'success',
                                             'output_chars': len('first private-password')}])
 
@@ -203,7 +203,7 @@ class TurnMemoryTests(unittest.TestCase):
             self.assertNotIn('private output', json.dumps(event))
             self.assertNotIn('private task', json.dumps(event))
 
-    def test_partial_model_failure_remains_failed_with_redacted_reason(self):
+    def test_partial_model_failure_remains_failed_with_original_reason(self):
         client = Mock()
         with patch.dict(os.environ, ENV, clear=True):
             memory = TurnMemory(ROLE, [{'role': 'user', 'content': TASK}], client=client)
@@ -215,7 +215,7 @@ class TurnMemoryTests(unittest.TestCase):
         self.assertEqual(event['status'], 'failed')
         self.assertEqual(event['outcome'], 'partial')
         self.assertIn('model timeout', event['errors'][0])
-        self.assertNotIn('private-password', json.dumps(event))
+        self.assertIn('private-password', json.dumps(event))
 
     def test_returned_partial_is_forwarded_to_memory(self):
         client = Mock()
@@ -636,11 +636,11 @@ class TurnMemoryTests(unittest.TestCase):
         self.assertNotEqual(dataset('https://github.com/a-b/c'),
                             dataset('https://github.com/a/b-c'))
 
-    def test_secrets_are_removed_from_queries_and_summaries(self):
+    def test_queries_and_summaries_preserve_original_values(self):
         with patch.dict(os.environ, {'GITHUB_PERSONAL_ACCESS_TOKEN': 'test-secret'}, clear=True):
             result = scrub('token test-secret password=unknown-secret ghp_abcdefghijklmnopqrstuvwx')
         for secret in ('test-secret', 'unknown-secret', 'ghp_abcdefghijklmnopqrstuvwx'):
-            self.assertNotIn(secret, result)
+            self.assertIn(secret, result)
 
     def test_only_supported_durable_items_are_saved_with_provenance(self):
         with patch.dict(os.environ, ENV, clear=True):
@@ -773,7 +773,7 @@ class TurnMemoryTests(unittest.TestCase):
         client.remember.assert_not_called()
         self.assertEqual(client.session_event.call_args.args[0]['status'], 'failed')
 
-    def test_recall_failure_reports_redacted_cause_and_remains_optional(self):
+    def test_recall_failure_reports_original_cause_and_remains_optional(self):
         client = Mock()
         client.recall.side_effect = RuntimeError('HTTP 503 private-password')
         with patch.dict(os.environ, ENV, clear=True), \
@@ -782,7 +782,7 @@ class TurnMemoryTests(unittest.TestCase):
             self.assertEqual(memory.context(10), '')
         event = next(c.kwargs for c in trace.call_args_list if c.args[0] == 'memory_recall_failed')
         self.assertIn('HTTP 503', event['error'])
-        self.assertNotIn('private-password', event['error'])
+        self.assertIn('private-password', event['error'])
 
     def test_optional_model_recall_failure_is_recoverable(self):
         client = Mock()

@@ -357,7 +357,7 @@ class DelegationRoutingTests(unittest.TestCase):
             self.assertNotIn('Everything succeeded', answer)
             self.assertNotIn('budget exhausted', answer)
 
-    def test_failed_delegation_preserves_redacted_child_diagnostic(self):
+    def test_failed_delegation_preserves_original_child_diagnostic(self):
         from popot_agents.worker.delegation_policy import completed_answer
 
         output = json.dumps({'role': 'code_reviewer', 'sessionId': '0123456789abcdef',
@@ -368,7 +368,7 @@ class DelegationRoutingTests(unittest.TestCase):
                 completed_answer(output, 'code_reviewer')
         self.assertIn('TASK_STATE_CANCELED', str(caught.exception))
         self.assertIn('delegation deadline exceeded', str(caught.exception))
-        self.assertNotIn('fixture-private-token', str(caught.exception))
+        self.assertIn('fixture-private-token', str(caught.exception))
 
     def test_success_of_another_subtask_cannot_clear_failure_for_the_same_role(self):
         replies = [

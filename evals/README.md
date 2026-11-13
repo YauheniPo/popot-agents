@@ -73,14 +73,14 @@ tools, настройки бюджетов и SHA-256 harness. Skills получ
 
 Payload ограничен 1 MiB на сторону, детали одного управляющего события — 16 KiB.
 `popot.input/output.truncated`, `.bytes`, `.sha256` показывают усечение, размер и
-отпечаток после redaction. Усечённый JSON остаётся валидным envelope с preview.
+отпечаток исходного payload. Усечённый JSON остаётся валидным envelope с preview.
 Индексированные сообщения ограничены 32 сообщениями и 16000 символами на поле;
-используйте полный JSON при более длинной истории. Заголовки авторизации не
-записываются; значения известных credentials и чувствительных полей скрываются.
-Произвольный секрет без имени или узнаваемого формата может не распознаться:
-доступ к Phoenix и его storage остаётся доступом к содержимому задач.
+используйте полный JSON при более длинной истории. Значения credentials и
+чувствительных полей сохраняются без маскирования. HTTP/MCP-логи также сохраняют
+исходные поля, включая переданные заголовки. Доступ к Phoenix и его storage
+остаётся доступом к содержимому задач.
 Произвольное поле `error` управляющих событий исключено; ошибки HTTP и tool
-results сохраняются отдельно после redaction.
+results сохраняются отдельно без подмены значений.
 
 Токены относятся к LLM-запросу. Точный расход на отдельный tool или skill
 провайдер не сообщает: результат tool увеличивает последующий контекст, а один
@@ -136,7 +136,7 @@ bash ax_local/rebuild-worker.sh
 ```
 
 Ошибки доставки видны в логах API как `phoenix_export_failed` без payload и ключей.
-Очередь содержит redacted payload и метаданные; файлы создаются с правами `0600`.
+Очередь содержит исходный payload и метаданные; файлы создаются с правами `0600`.
 Controlled evals пишут такие же proxy spans в `baseline/model-spans.jsonl` (`0600`),
 затем импортируют их в Phoenix вместе с событиями worker. Request ID связывает
 HTTP-вызов с gateway receipts: совпавшие gateway LLM spans не дублируются,
@@ -224,36 +224,87 @@ OTLP gauges в существующий Collector через ограничен�
 Нужен настроенный локальный kind-контекст; без мониторинга данные измерений
 сохраняются, ошибка отправки явно записывается в `report.json → monitoring`.
 
-Матрица последовательно запускает варианты `x-evals.variants`, начиная с
-`x-evals.baseline`. Общее `x-evals.repetitions` задаёт число повторов каждого
+Матрица запускает варианты `x-evals.variants` параллельно: `x-evals.parallel_models`
+задаёт предел одновременно выполняемых вариантов (по умолчанию 3).
+Внутри каждого варианта кейсы выполняются последовательно. Baseline включается
+в первую группу; сравнение готового кандидата публикуется после завершения baseline.
+Общее `x-evals.repetitions` задаёт число повторов каждого
 сценария на каждом варианте; флаг `--repetitions` переопределяет его для матрицы.
 Параметры варианта заменяют параметры всех eval-ролей,
 включая делегатов; рабочие профили не меняются. По умолчанию это flash-max,
-flash-low, glm-max, north-free и nemotron-free: шесть сценариев × два повтора
-× пять вариантов = 60 root-задач,
+mimo-max, minimax-max и nemotron-free: шесть сценариев × два повтора
+× четыре варианта = 48 root-задач,
 плюс делегаты и отдельный judge для каждого измерения. Runtime-аудит исторических
 трейсов повторно для каждого варианта не запускается. Это платные/квотируемые
 вызовы, если провайдер тарифицирует выбранную модель.
 
-`north-free` закреплён за `openrouter/cohere/north-mini-code:free` с нулевыми
-тарифами входа/выхода в каталоге OpenRouter. `nemotron-free` использует прямой
+Предел можно переопределить флагом `--parallel-models`, например:
+
+```bash
+python3 -m evals.matrix --output reports/evals/parallel-models --parallel-models 3
+```
+
+Runner проверяет запас слотов: `параллельные модели × (max_depth + 1) + warm_workers`
+должен укладываться в `max_workers`. При текущих значениях `3 × 3 + 3 = 12 ≤ 14`.
+Реальные воркеры берутся из общего AX WorkerPool; его контроллеры учитывают
+назначенные акторы других runner и расширяют пул по спросу. Это расчёт резерва,
+а не гарантия скорости: квоты провайдера и конкуренция за CPU/память влияют на замеры.
+Условия записаны в `config.json → evals.parallel_models`, metadata Phoenix и
+колонке «Параллельных моделей» в Grafana. Сравнение сохраняет их в `parameter_changes`.
+Для сравнения задержек с прежними последовательными запусками используйте
+`--parallel-models 1` или учитывайте изменение условий нагрузки.
+
+Каждый вариант получает отдельную копию кода evals, proxy, сессии, capture и
+журнал публикации. При старте матрица сохраняет исходники и launchers в
+`.launcher/evals/`; все варианты используют эту неизменяемую копию. Shell также
+фиксирует тело скрипта в памяти перед выполнением длительных команд: последующее
+редактирование рабочего checkout не меняет выполняющийся launcher.
+Консоль печатает старт и завершение вариантов; подробный
+вывод находится в `<variant>.log` рядом с `matrix.json`. Один координатор
+записывает общий manifest. Ошибка одного варианта сохраняется в `failures`;
+остальные варианты продолжают выполнение, а итоговая команда возвращает ошибку.
+При Ctrl+C новые варианты не стартуют. Уже запущенные завершают текущий кейс
+и освобождают свои sandbox; launcher изолирован от сигнала терминала, координатор
+ждёт его завершения. Один workflow ограничен 600s, `session_resume` содержит два
+последовательных workflow, затем вызывается judge (до 90s). Это отмена между
+кейсами, а не мгновенное прерывание запроса. Частичный capture сохраняется.
+Сбой записи cancel marker явно указан в `cancel_errors`.
+
+`mimo-max` использует `ollama-cloud/mimo-v2.6-pro`, `minimax-max` —
+`ollama-cloud/minimax-m3.1-flash`. Оба задают `reasoning_effort=max` и
+`max_tokens=65536`, как baseline `flash-max`. Прямые маршруты внесены в
+`apiKey.permissions.allowedModels` deploy-конфига OmniRoute и каталог Ollama Cloud
+в Phoenix; production fallback-комбо задаётся отдельно.
+`nemotron-free` использует прямой
 маршрут `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` в рамках доступа NVIDIA NIM
-для разработки/тестирования; фактическая квота зависит от аккаунта. Оба маршрута
-уже разрешены действующим ключом шлюза. В матрице нет переключения между ними.
-Для этих двух вариантов задан `max_tokens=64000` (лимит North), reasoning —
-по умолчанию провайдера, без `reasoning_effort`; интерфейс показывает `default`.
-Параметры трёх исходных вариантов сохранены. Это разные настройки моделей,
+для разработки/тестирования; фактическая квота зависит от аккаунта.
+Для него задан `max_tokens=64000`, reasoning — по умолчанию провайдера,
+без `reasoning_effort`; интерфейс показывает `default`. Это разные настройки моделей,
 а не сравнение при идентичном reasoning. Независимый judge остаётся прежним.
 
 Короткая проверка связки на двух моделях:
 
 ```bash
-python3 -m evals.matrix --output reports/evals/models-smoke --variant flash-low --variant glm-max --baseline flash-low --case honest_blocker --repetitions 1
+python3 -m evals.matrix --output reports/evals/models-smoke --variant mimo-max --variant minimax-max --baseline mimo-max --case honest_blocker --repetitions 1
 ```
 
 Каталог должен быть новым. Можно повторять `--case`, выбирать `--variant` и
 переопределять `--baseline`, сохраняя его среди выбранных вариантов. Один запуск
 тоже принимает флаги: `bash evals/run-all.sh flash-low-check --model ollama-cloud/deepseek-v4.1-flash:1017 --parameters '{"max_tokens":65536,"reasoning_effort":"low"}'`.
+
+При сбое матрица записывает `status: failed`, вариант, тип ошибки и код выхода
+в `matrix.json`. Продолжить ту же матрицу с теми же параметрами:
+
+```bash
+python3 -m evals.matrix --output reports/evals/models-before-harness --resume
+```
+
+Завершённые измерения повторно не запускаются: runner продолжает публикацию из
+сохранённого `baseline/`, затем запускает ещё не измеренные варианты. При
+незавершённом capture он останавливается, чтобы не повторять обращения к модели
+незаметно для пользователя. Параллельное продолжение одной папки блокируется.
+Для старой матрицы, созданной до введения параллельности, добавьте к `--resume`
+флаг `--parallel-models 1`. Изменять режим нагрузки посреди матрицы runner не позволяет.
 
 В [Grafana Evals](http://127.0.0.1:3002/d/popot-evals) выберите набор задач,
 эксперименты и baseline. Видны план/завершённые кейсы, средние токены входа/выхода,
@@ -261,6 +312,9 @@ python3 -m evals.matrix --output reports/evals/models-smoke --variant flash-low 
 coordination turns и оценки. Прогресс обновляется после завершения кейса и judge;
 открытый запрос внутри кейса не считается завершённым. Токены присоединяются из
 gateway после варианта, затем импортируются подробные Experiments/traces Phoenix.
+Запуск появляется в списке Grafana сразу по метрикам прогресса, даже если импорт
+Phoenix ещё не начался или завершился ошибкой. Трейсы Phoenix публикуются после
+всех кейсов варианта модели; потокового показа текущего запроса в этом runner нет.
 Таблица параметров содержит ссылку на Phoenix, модель, harness, параметры и ревизию.
 Панели сгруппированы в сворачиваемые разделы: обзор запуска, качество результата,
 оценки judge и агента, токены, время выполнения, действия harness, ошибки и повторы,
@@ -304,7 +358,7 @@ docker exec -i popot-ax-local-api-1 python -m evals.regrade /tmp/baseline-origin
 ```
 
 Команда использует ключ `PHOENIX_API_KEY`, создаёт новый каталог для эксперимента
-`<model>-<reasoning>-judge-v2-<Phoenix number>`. Исходные отчёты, самооценки, traces и результаты задач
+`<model>-<reasoning>-judge-v2-<run-id>-<Phoenix number>`. Исходные отчёты, самооценки, traces и результаты задач
 сохраняются. Новые вызовы делает только judge; агенты повторно не запускаются.
 После копирования результата импортируйте его обычной командой `evals.phoenix`.
 В metadata нового эксперимента сохраняются источник и хеши пересчёта. Старые
@@ -333,13 +387,18 @@ python3 -m evals.compare reports/evals/previous/flash-max/baseline reports/evals
 Неизвестный usage не становится нулём; процент относительно нулевого baseline
 не вычисляется. Полный benchmark при deploy автоматически не запускается.
 
-Итоговое имя в Phoenix и Grafana: `<model>-<reasoning>-evals-<Phoenix number>`;
-копия с новым judge — `<model>-<reasoning>-judge-v2-<Phoenix number>`.
-Например, `deepseek-v4.1-flash:1017-max-judge-v2-11`.
+Итоговое имя в Phoenix и Grafana: `<model>-<reasoning>-evals-<run-id>-<Phoenix number>`;
+копия с новым judge — `<model>-<reasoning>-judge-v2-<run-id>-<Phoenix number>`.
+Например, `deepseek-v4.1-flash:1017-max-evals-20261113T143602-9a12d9-30`.
+`run-id` содержит дату и время старта матрицы в UTC и её короткий ID; он общий
+для всех вариантов этой матрицы. Повторный импорт сохраняет этот ID. Для новых
+экспериментов он также записывается в metadata `run_id`.
 Номер появляется после создания эксперимента; до импорта используется временное
 имя с ID запуска. Финальное имя и URL сохраняются в `phoenix.json`.
 Исторические ключи Prometheus и frozen config сохраняются: `popot_eval_info.display_name`
-связывает их с именем Phoenix. В Grafana [именованные text/value группы](https://grafana.com/docs/grafana/latest/visualizations/dashboards/variables/advanced-variables/)
+связывает их с именем Phoenix. После переименования Grafana выбирает последнюю
+подпись по `display_name_updated_at_seconds`, чтобы исторические labels не
+дублировали эксперимент и не меняли значения метрик. В Grafana [именованные text/value группы](https://grafana.com/docs/grafana/latest/visualizations/dashboards/variables/advanced-variables/)
 показывают это имя, сохраняя исходное значение фильтра и работоспособность старых ссылок.
 «Набор задач» показывает имя dataset Phoenix и дату его создания в UTC:
 `popot-harness-local-782a0561684e · 2026-11-12 23:39:00 UTC`.
@@ -367,7 +426,7 @@ store. Worker удаляются после сохранения результ�
 `--repetition-start` и повторяемый `--case`, сохранив исходный batch и причину
 исключения измерения. Не заменяйте реальные неудачи агентов удачными повторами.
 Точные wire-кадры сохраняются в приватных `*.wire.ndjson` с правами `0600`;
-JSONL для анализа исключает reasoning и повторно маскирует поля событий.
+JSONL для анализа исключает reasoning и сохраняет поля событий без маскирования.
 
 ### Метрики шлюза
 
@@ -390,8 +449,8 @@ python3 -m evals.report reports/evals/baseline-unique-id reports/evals/baseline-
 шлюза; ответ, пришедший после дедлайна turn, всё равно учитывается при наличии
 usage. `usage_audit` показывает метод и число отсутствующих квитанций.
 Для старых captures без ID остаётся консервативная проверка событий.
-ID попытки выбирается так, чтобы фильтр секретов не менял его случайным
-совпадением; фильтр для содержимого остаётся активным. Суммы входных и выходных
+ID попытки сохраняется без подмены или повторной генерации из-за совпадения
+с credentials; маскирование содержимого также отключено. Суммы входных и выходных
 токенов также остаются неизвестными, если захват запросов неполон.
 В старых экспериментах суммы входных/выходных токенов при неизвестном полном
 usage могли включать только известные вызовы; это ограничение исторических
@@ -515,14 +574,20 @@ initial password в `.env` не сбрасывает пароль пользов
 
 ```bash
 bash evals/up.sh
-docker exec popot-evals-phoenix-1 python -c "from pathlib import Path; Path('/tmp/popot-eval-code/popot_agents').mkdir(parents=True, exist_ok=True)"
-docker cp evals popot-evals-phoenix-1:/tmp/popot-eval-code/
-docker cp popot_agents/telemetry.py popot-evals-phoenix-1:/tmp/popot-eval-code/popot_agents/telemetry.py
-docker cp popot_agents/progress.py popot-evals-phoenix-1:/tmp/popot-eval-code/popot_agents/progress.py
-docker cp reports/evals/baseline-unique-id popot-evals-phoenix-1:/tmp/
-docker exec -i -w /tmp/popot-eval-code popot-evals-phoenix-1 python -u -m evals.phoenix /tmp/baseline-unique-id
-docker cp popot-evals-phoenix-1:/tmp/baseline-unique-id/phoenix.json reports/evals/baseline-unique-id/phoenix.json
+bash evals/publish.sh reports/evals/models-before-harness/flash-max/baseline --baseline
 ```
+
+`run-all.sh` автоматически вызывает `publish.sh`. Он использует отдельный
+одноразовый контейнер `phoenix-import` из того же закреплённого образа с собственным
+лимитом памяти 1 GiB; сервер Phoenix не делит этот лимит с импортёром. Capture
+читается по строкам для текущего кейса, spans отправляются пакетами до 16.
+Журнал `phoenix.json` записывается прямо в папку отчёта на хосте. Повторная
+публикация сохраняет experiment/run IDs и продолжает недостающие оценки; новых
+вызовов модели или judge нет. Ошибка импорта возвращает ненулевой код. Импорт
+одной папки одновременно из двух процессов блокируется. Если журнал утрачен,
+импортёр ищет существующий эксперимент по хешу замороженной конфигурации и
+восстанавливает его runs по example, repetition и trace ID. Несовпадение этих
+данных завершает импорт ошибкой.
 
 `ax_local/up.sh` также запускает Phoenix и его bootstrap. В
 `config.json → x-providers` заданы OpenRouter, NVIDIA NIM, Ollama Cloud и Nous:
@@ -597,12 +662,10 @@ node --test tests/baseline-gateway.mjs
 ```
 
 Контракт экспорта проверяется с SDK из закреплённого Phoenix image, без
-обращений к модели. Сначала скопируйте `evals` по инструкции выше, затем:
+обращений к модели, в отдельном контейнере:
 
 ```bash
-docker exec popot-evals-phoenix-1 python -c "from pathlib import Path; Path('/tmp/popot-eval-tests').mkdir(exist_ok=True)"
-docker cp tests/test_phoenix_export.py popot-evals-phoenix-1:/tmp/popot-eval-tests/
-docker exec -w /tmp/popot-eval-code popot-evals-phoenix-1 python -m unittest discover -s /tmp/popot-eval-tests -p test_phoenix_export.py -v
+bash compose.sh --env-file .env -f evals/compose.yaml run --rm --no-deps -T --volume "$PWD/tests:/tests:ro" phoenix-import -m unittest discover -s /tests -p test_phoenix_export.py -v
 ```
 
 Небольшое число повторов даёт начальную точку сравнения, но не доказывает статистическое

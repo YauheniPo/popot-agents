@@ -71,7 +71,7 @@ class OperatorBoundaryTests(unittest.TestCase):
         result=json.loads(call({'kind':'overview'},timeout_seconds=2,call_id='expired'))
         self.assertTrue(result.get('isError'),result)
 
-    def test_http_operations_preserve_authorization_errors_redaction_and_output_bounds(self):
+    def test_http_operations_preserve_authorization_original_results_and_output_bounds(self):
         from ax_local.api.delegation import start_a2a_server
         from popot_agents.runtime_config import RUNTIME
         self.service.operations = Mock()
@@ -96,7 +96,7 @@ class OperatorBoundaryTests(unittest.TestCase):
                     self.assertEqual(call(body)[0], 400)
             self.service.operations.propose.return_value = {'plan_id': 'test-plan', 'token': 'hidden'}
             status, body = call({'method': 'propose_change', 'params': {'action': 'restart_service'}})
-            self.assertEqual((status, body), (200, {'plan_id': 'test-plan', 'token': '[REDACTED]'}))
+            self.assertEqual((status, body), (200, {'plan_id': 'test-plan', 'token': 'hidden'}))
             self.service.operations.propose.assert_called_once_with(self.actor, {'action': 'restart_service'})
             self.service.operations.apply.return_value = {'status': 'applied'}
             self.assertEqual(call({'method': 'apply_change', 'params': {'plan_id': 'test-plan'}})[0], 200)
@@ -239,7 +239,7 @@ class OperatorChangeTests(unittest.TestCase):
             self.assertEqual(results[0],results[1])
             write.assert_called_once()
 
-    def test_http_secrets_are_removed_and_arbitrary_paths_and_shell_are_not_supported(self):
+    def test_http_values_are_preserved_and_arbitrary_paths_and_shell_are_not_supported(self):
         with self.assertRaises(ValueError):
             self.ops.inspect('shell', {'command':'kubectl delete pods --all'})
         with self.assertRaises(ValueError):
@@ -247,8 +247,8 @@ class OperatorChangeTests(unittest.TestCase):
         from ax_local.api.project_operator import safe_result
         result = safe_result({'apiKey':'private-key','provider':'openrouter',
             'nested':{'accessToken':'secret','password':'hidden'},'message':'api_key=abc123'})
-        self.assertNotIn('private-key', json.dumps(result))
-        self.assertNotIn('secret', json.dumps(result))
+        self.assertIn('private-key', json.dumps(result))
+        self.assertIn('secret', json.dumps(result))
 
     def test_holmes_uses_real_pinned_job_manifests_and_returns_its_report(self):
         from ax_local.cluster.holmes import IMAGE
@@ -413,7 +413,7 @@ class OperatorInspectionTests(unittest.TestCase):
                                              'container': 'agent', 'previous': True})
             self.assertIn('--previous', kube.call_args.args)
             self.assertIn('worker restarted', result['logs'])
-            self.assertNotIn('hidden', result['logs'])
+            self.assertIn('hidden', result['logs'])
         for params in ({'namespace': 'unrelated'}, {'pod': '../escape', 'container': 'agent'},
                        {'pod': 'ax-worker', 'container': '--all-containers'}):
             with self.subTest(params=params), self.assertRaises(ValueError):
@@ -491,7 +491,7 @@ class OperatorInspectionTests(unittest.TestCase):
             gateway.return_value.request.return_value = {'token': 'hidden'}
             models = self.ops.inspect('models', {})
             self.assertEqual(set(models), {'combos', 'health', 'usage', 'combo_metrics'})
-            self.assertNotIn('hidden', json.dumps(models))
+            self.assertIn('hidden', json.dumps(models))
         with patch.object(self.ops, '_memory') as memory:
             memory.return_value._request.return_value = {'count': 2}
             self.assertEqual(self.ops.inspect('memory', {'range': '7d'})['stats'], {'count': 2})
@@ -507,7 +507,7 @@ class OperatorInspectionTests(unittest.TestCase):
         self.ops.store = None
         self.assertEqual(self.ops.inspect('sessions', {})['postgres'], {'backend': 'file'})
 
-    def test_overview_is_partial_when_one_service_fails_and_redacts_service_details(self):
+    def test_overview_is_partial_when_one_service_fails_and_preserves_service_details(self):
         self.ops.roles = {'test': {'agent': 'omniroute_free', 'env_names': ['SECRET']}}
         with patch.object(self.ops, '_api_health', return_value={'status': 'ok'}), \
              patch.object(self.ops, '_mcp_status', side_effect=TimeoutError), \
@@ -524,7 +524,7 @@ class OperatorInspectionTests(unittest.TestCase):
         self.assertEqual(overview['worker_pool']['max_workers'], 12)
         self.assertEqual(overview['worker_pool']['source_type'], 'configuration')
         self.assertEqual(overview['prometheus']['observation']['availability'], 'unknown')
-        self.assertNotIn('hidden', json.dumps(overview))
+        self.assertIn('hidden', json.dumps(overview))
 
     def test_restart_preserves_annotations_and_uses_an_optimistic_resource_version_check(self):
         deployment = {'metadata': {'resourceVersion': '42'}, 'spec': {'template': {

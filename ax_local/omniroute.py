@@ -176,6 +176,13 @@ def provision(api, config, combos, environ):
     credentials = {provider: secret(environ, item['apiKeyEnv'])
                    for provider, item in providers.items()}
     models = configured_models(providers, combos)
+    direct_models = key_config['permissions'].get('allowedModels', [])
+    if not isinstance(direct_models, list) or any(
+            not isinstance(model, str) or '*' in model or any(char.isspace() for char in model)
+            or model.partition('/')[0] not in providers or not model.partition('/')[2]
+            for model in direct_models):
+        raise ProvisionError('Direct allowedModels must reference explicit models of configured providers')
+    models.extend(direct_models)
 
     api.request('POST', '/api/auth/login', {'password': password})
     # The native export is kept only in memory. It lets us match an existing

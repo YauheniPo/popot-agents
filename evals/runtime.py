@@ -33,7 +33,7 @@ ATTRIBUTES = {
 }
 LIMITATIONS = [
     'completed — заявление агента; качество задачи и false completion по этим spans неизвестны.',
-    'Этот отчёт сохраняет только метаданные. В Phoenix v2 payload содержит запросы/ответы и tool IO после redaction; legacy spans могут не иметь содержимого.',
+    'Этот отчёт сохраняет только метаданные. В Phoenix v2 payload содержит исходные запросы/ответы и tool IO; исторические spans могут содержать маскирование или не иметь содержимого.',
     'V2 фиксирует параметры запроса, хеш harness и загруженных skills; полный source/role provenance заморожен в controlled eval config, а не во всех рабочих traces.',
     'Нет подтверждённой стоимости, TTFT, причин fallback и отдельных budget/retry settings.',
     'Legacy AGENT хранит последние 64 события; v2 выносит предыдущие блоки в CHAIN Harness events. Окно и потерянные при аварии события всё ещё ограничивают счётчики.',

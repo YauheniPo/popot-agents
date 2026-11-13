@@ -5,11 +5,10 @@
   },
   "x-evals": {
     "baseline": "flash-max",
+    "parallel_models": 3,
     "variants": [
       {"name": "flash-max", "model": "ollama-cloud/deepseek-v4.1-flash:1017", "parameters": {"max_tokens": 65536, "reasoning_effort": "max"}},
-      {"name": "flash-low", "model": "ollama-cloud/deepseek-v4.1-flash:1017", "parameters": {"max_tokens": 65536, "reasoning_effort": "low"}},
-      {"name": "glm-max", "model": "ollama-cloud/glm-5.3-flash", "parameters": {"max_tokens": 65536, "reasoning_effort": "max"}},
-      {"name": "north-free", "model": "openrouter/cohere/north-mini-code:free", "parameters": {"max_tokens": 64000}},
+      {"name": "minimax-max", "model": "ollama-cloud/minimax-m3.1-flash", "parameters": {"max_tokens": 65536, "reasoning_effort": "max"}},
       {"name": "nemotron-free", "model": "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b", "parameters": {"max_tokens": 64000}}
     ],
     "repetitions": 2,
@@ -52,7 +51,7 @@
     {
       "name": "Ollama Cloud", "provider": "ollama",
       "base_url": "https://ollama.com/v1", "api_key_env": "OLLAMA_API_KEY",
-      "models": ["deepseek-v4.1-flash:1017", "glm-5.3-flash", "deepseek-v4-pro:0813"]
+      "models": ["deepseek-v4.1-flash:1017", "glm-5.3-flash", "deepseek-v4-pro:0813", "mimo-v2.6-pro", "minimax-m3.1-flash"]
     },
     {
       "name": "Nous Research", "provider": "nous",

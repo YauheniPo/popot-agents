@@ -22,11 +22,11 @@ from ax_local.api.phoenix import Span
 from popot_agents.telemetry import VERSION, PAYLOAD_LIMIT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get('POPOT_EVAL_SOURCE_ROOT', Path(__file__).resolve().parents[1]))
 
 
 class ModelCapture:
-    """Record the proxy's redacted spans without network I/O on model calls."""
+    """Record the proxy's original spans without network I/O on model calls."""
 
     def __init__(self, path):
         self.path = Path(path)
@@ -128,21 +128,24 @@ def summarize(results):
 
 
 def frozen_config(roles, profiles, model, image):
-    paths = [ROOT / 'pyproject.toml', ROOT / 'ax_local/config.json', ROOT / 'evals/config.json',
+    paths = [ROOT / 'pyproject.toml', ROOT / 'ax_local/config.json',
              ROOT / 'memory/config.json',
              *sorted((ROOT / 'config').rglob('*.json')),
              *sorted((ROOT / 'config/prompts').rglob('*.md')),
              *sorted((ROOT / 'popot_agents').rglob('*.py')),
              *sorted((ROOT / 'ax_local/api').glob('*.py')),
              *sorted((ROOT / 'ax_local/worker').glob('*.py')),
-             *sorted((ROOT / 'skills').rglob('*.md')), *sorted((ROOT / 'evals').glob('*.py')), ROOT / 'evals/cases.json']
+             *sorted((ROOT / 'skills').rglob('*.md'))]
     hashes = {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    evaluator = Path(__file__).parent
+    for path in [*sorted(evaluator.glob('*.py')), evaluator / 'config.json', evaluator / 'cases.json']:
+        hashes['evals/' + path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return {'harness': 'popot-http', 'worker_image': image, 'primary_model': model, 'memory_mode': 'disabled',
             'telemetry_version': VERSION, 'payload_limit_bytes': PAYLOAD_LIMIT,
             'evals': SETTINGS,
             'profiles': {k: {'model_parameters': v.get('model_parameters', {})} for k, v in profiles.items()},
             'roles': roles, 'source_sha256': hashes, 'python': os.sys.version,
-            'method': 'Controlled local-toolset baseline without project memory. Fixed direct model; Harness2 disabled; all MCP except local git removed from evaluation role snapshots. Cognee credentials removed from all role snapshots; automatic recall, capture and session journal disabled. Native role tools and delegation remain. Sequential runs; '
+            'method': 'Controlled local-toolset baseline without project memory. Fixed direct model; Harness2 disabled; all MCP except local git removed from evaluation role snapshots. Cognee credentials removed from all role snapshots; automatic recall, capture and session journal disabled. Native role tools and delegation remain. Sequential cases within each model; '
                       f"{SETTINGS['workflow']['total_seconds']}s workflow, {SETTINGS['workflow']['turn_seconds']}s turn. Production configuration unchanged."}
 
 
@@ -290,11 +293,13 @@ def main():
     parser.add_argument('--experiment', help='Unique experiment label')
     parser.add_argument('--run-id', help='Shared execution identifier across model variants')
     parser.add_argument('--monitor', action='store_true', help='Publish progress and metrics through the existing collector')
+    parser.add_argument('--matrix-parallelism', type=int, default=1, choices=range(1, 6))
+    parser.add_argument('--cancel-file', type=Path, help='Stop after the current case when this marker exists')
     args = parser.parse_args()
     from popot_agents.runtime_config import validate_model_parameters
     args.parameters = validate_model_parameters(args.parameters)
     args.output.mkdir(parents=True, exist_ok=False)
-    cases = json.loads((ROOT / 'evals/cases.json').read_text())
+    cases = json.loads(Path(__file__).with_name('cases.json').read_text())
     if args.case:
         cases = [c for c in cases if c['id'] in args.case]
         if len(cases) != len(set(args.case)):
@@ -314,7 +319,8 @@ def main():
         args.model, args.parameters, 'evals', config['run_id'])
     config['monitoring_enabled'] = args.monitor
     config['source_revision'] = args.source_revision
-    config['evals'] = {**config['evals'], 'repetitions': args.repetitions}
+    config['evals'] = {**config['evals'], 'repetitions': args.repetitions,
+                       'parallel_models': args.matrix_parallelism}
     save(args.output / 'config.json', config)
     report = {'started_at': datetime.now(timezone.utc).isoformat(), 'config': 'config.json', 'results': [],
               'planned_runs': len(cases) * args.repetitions,
@@ -324,6 +330,10 @@ def main():
             report['monitoring'] = publish_report(report, config)
         for repetition in range(args.repetition_start - 1, args.repetition_start - 1 + args.repetitions):
             for case in cases:
+                if args.cancel_file and args.cancel_file.exists():
+                    report['cancelled_at'] = datetime.now(timezone.utc).isoformat()
+                    save(args.output / 'report.json', report)
+                    raise InterruptedError('Evaluation cancelled between cases; partial capture retained')
                 name = f"{case['id']}-{repetition + 1}"
                 print('BASELINE_START', name, flush=True)
                 events, result, observed = [], {}, {}

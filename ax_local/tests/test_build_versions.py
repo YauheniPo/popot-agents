@@ -86,16 +86,17 @@ class BuildVersionTests(unittest.TestCase):
             (scripts / '__init__.py').touch()
             source = ROOT / 'ax_local/cluster'
             for name in ('build_versions.py', 'controller_tools.py', 'worker_health.py',
-                         'worker_pool.py', 'substrate_cleanup.py', 'holmes.py'):
+                         'worker_pool.py', 'substrate_cleanup.py', 'substrate_api.py', 'holmes.py'):
                 shutil.copyfile(source / name, scripts / name)
             (root / 'pyproject.toml').write_text(PINS)
             (root / 'config').mkdir()
             shutil.copyfile(ROOT / 'config/holmes.json', root / 'config/holmes.json')
             code = (f'import sys; sys.path.append({str(ROOT)!r}); '
-                    'from ax_local.cluster import controller_tools, worker_health, substrate_cleanup, holmes; '
+                    'from ax_local.cluster import controller_tools, worker_health, substrate_cleanup, substrate_api, holmes; '
                     'assert controller_tools.AX_COMMIT == "a" * 40; '
                     'assert worker_health.SUBSTRATE_COMMIT == "b" * 40; '
                     'assert substrate_cleanup.PIN == "b" * 40; '
+                    'assert substrate_api.PIN == "b" * 40; '
                     'assert holmes.IMAGE == "robustadev/holmes:0.99.0"; '
                     'assert holmes.investigation_job("Check AX", "test-model")["spec"]'
                     '["template"]["spec"]["containers"][0]["image"] == holmes.IMAGE')

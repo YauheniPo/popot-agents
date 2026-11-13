@@ -21,6 +21,18 @@ from popot_agents.orchestrator.main import create_server, AgentRunError
 
 
 class ProgressTests(unittest.TestCase):
+    def test_progress_preserves_credentials_and_request_ids_verbatim(self):
+        from popot_agents.progress import trace_output
+        request_id = 'a' * 14 + '1234' + 'a' * 14
+        payload = {'request_id': request_id, 'token': 'fixture-token',
+                   'input': {'password': '1234'}, 'content': 'password=1234'}
+        output = io.StringIO()
+        with patch.dict(os.environ, {'TEST_API_KEY': '1234'}), redirect_stderr(output):
+            event = json.loads(format_progress('model_request', **payload))
+            trace_output('password=1234')
+        self.assertEqual(event, {'event': 'model_request', **payload})
+        self.assertEqual(output.getvalue(), 'password=1234\n')
+
     def test_scoped_progress_keeps_root_source_and_immediate_parent_through_nested_forwarding(self):
         from popot_agents.progress import scoped_progress, TurnProgress
         root, parent, child = 'a' * 16, 'b' * 16, 'c' * 16
@@ -64,7 +76,7 @@ class ProgressTests(unittest.TestCase):
         def execute(*args, **kwargs):
             events = [json.loads(message) for message in received]
             self.assertIn({'event': 'assistant_reasoning', 'round': 1,
-                           'reasoning': 'Provider explanation. [REDACTED]',
+                           'reasoning': 'Provider explanation. test-reasoning-secret',
                            'reasoning_details': first['reasoning_details']}, events)
             return 'tool-result'
 
@@ -79,7 +91,7 @@ class ProgressTests(unittest.TestCase):
         events = [json.loads(message) for message in received]
         self.assertIn({'event': 'assistant_reasoning', 'round': 2,
                        'reasoning_content': 'Provider final explanation.'}, events)
-        self.assertNotIn('test-reasoning-secret', '\n'.join(received))
+        self.assertIn('test-reasoning-secret', '\n'.join(received))
 
     def test_no_reasoning_event_is_invented_when_provider_omits_it(self):
         from popot_agents.worker.http_harness import run_http
@@ -108,8 +120,8 @@ class ProgressTests(unittest.TestCase):
             {'event': 'new_harness_event', 'phase': 'inspect', 'percent': 12, 'details': {'file': 'app.py'}},
             {'event': 'assistant_message', 'content': 'Проверяю обработку ошибок в PR.'},
             {'event': 'tool_error', 'name': 'mcp__github__pull_request_read', 'status': 404,
-             'error': 'not found', 'token': '[REDACTED]'},
-            {'event': 'assistant_answer', 'content': 'Готово. [REDACTED]'}])
+             'error': 'not found', 'token': 'test-secret-value'},
+            {'event': 'assistant_answer', 'content': 'Готово. test-secret-value'}])
 
     def test_forwarded_progress_keeps_native_fields_and_rejects_invalid_frames(self):
         messages = []
@@ -418,7 +430,7 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                                 self.assertTrue(result['isError'])
                                 text = '\n'.join(item['text'] for item in result['content'] if item['type'] == 'text')
                                 self.assertIn('HTTP 502: review failed sessionId=0123456789abcdef', text)
-                                self.assertNotIn('test-error-secret', text)
+                                self.assertIn('test-error-secret', text)
                 finally:
                     finish.set()
                     process.terminate()

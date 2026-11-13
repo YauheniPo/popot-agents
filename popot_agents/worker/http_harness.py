@@ -18,7 +18,7 @@ from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import MEMORY, RUNTIME, validate_model_parameters
 from popot_agents.progress import trace_event, trace_output, redact_text
 from popot_agents.skills import prepare_role_config
-from popot_agents.telemetry import payload_attributes, safe_value, sensitive_values, VERSION
+from popot_agents.telemetry import payload_attributes, VERSION
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env, export_artifacts, read_repository_context
 from popot_agents.artifacts import ArtifactError, MAX_ARTIFACTS, validate_artifacts
 from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks
@@ -65,8 +65,8 @@ def _trace(event: str, **fields) -> None:
     trace_event(event, **fields)
 
 
-def _trace_payload(side, value, extra_secrets=()):
-    attrs = payload_attributes(side, value, extra_secrets=extra_secrets)
+def _trace_payload(side, value):
+    attrs = payload_attributes(side, value)
     return {side: json.loads(attrs[side + '.value']),
             **{key.removeprefix('popot.').replace('.', '_'): value
                for key, value in attrs.items() if key.startswith('popot.' + side + '.')}}
@@ -138,9 +138,6 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
             raise _ModelRequestError('Insufficient model request budget', retryable=True)
         started_at = time.monotonic()
         request_id = uuid.uuid4().hex
-        # Correlation must survive the same redaction applied to trace events.
-        while redact_text(request_id) != request_id:
-            request_id = uuid.uuid4().hex
         call.add_header('X-Popot-Request-Id', request_id)
         _trace("model_request", round=round_number, attempt=attempt, message_count=len(messages),
                request_id=request_id,
@@ -284,13 +281,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
            harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
            input_sha256=payload_attributes('input', task)['popot.input.sha256'],
            role_sha256=payload_attributes('role', role_config or {})['popot.role.sha256'],
-           config=safe_value({
+           config={
                'role': (role_config or {}).get('_ax_role'),
                'tools': (role_config or {}).get('tools', []),
                'permissions': (role_config or {}).get('permissions', {}),
                'coordination': (role_config or {}).get('coordination', {}),
                'turn_timeout_seconds': turn_timeout, 'runtime': RUNTIME,
-               'resuming': bool(state), 'run_id': (run_context or {}).get('run_id')}))
+               'resuming': bool(state), 'run_id': (run_context or {}).get('run_id')})
 
     def remaining_seconds() -> float:
         remaining = deadline - time.monotonic()
@@ -935,8 +932,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         reasoning_fields = {name: message[name] for name in
                             ('reasoning', 'reasoning_content', 'reasoning_details') if message.get(name)}
         if reasoning_fields:
-            # Trace a redacted copy; preserve provider blocks unchanged in the
-            # assistant message sent back after tool execution.
+            # Preserve provider reasoning in both traces and model history.
             _trace('assistant_reasoning', round=round_number, **reasoning_fields)
         if calls and forced_final:
             _trace('turn_partial', reason='final_model_requested_tools', round=round_number)
@@ -1188,7 +1184,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                       else {'argument_type': type(arguments).__name__}),
                            error=('bash execution failed; details retained in tool result'
                                   if name == 'bash' and isinstance(exc, ToolExecutionError)
-                                  else safe_value(str(exc), sensitive_values(arguments))),
+                                  else str(exc)),
                            recoverable=True)
                     output = json.dumps({
                         "isError": True, "error": str(exc),
@@ -1233,7 +1229,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 for item in completed_child['outcome']['evidence'])):
                     delegated_work_finished = True
                     _trace('delegated_work_completed', session_id=completed_child['sessionId'])
-                result_fields = {**_trace_payload('output', output, sensitive_values(arguments)),
+                result_fields = {**_trace_payload('output', output),
                                  'output_chars': len(output)}
                 _trace("tool_result", round=round_number, name=name, call_id=call_id,
                        elapsed_seconds=round(time.monotonic() - tool_started_at, 1),

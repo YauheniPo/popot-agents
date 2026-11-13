@@ -23,17 +23,29 @@ def unified_settings():
 
 
 class EvalSettingsTests(unittest.TestCase):
-    def test_managed_matrix_includes_separately_pinned_free_models_with_supported_limits(self):
+    def test_parallel_model_limit_is_validated_and_defaults_to_three_in_deploy(self):
+        from evals.settings import load_config
+        settings = unified_settings()
+        settings['parallel_models'] = 3
+        self.assertEqual(self.load({'x-evals': settings})['parallel_models'], 3)
+        self.assertEqual(load_config()['parallel_models'], 3)
+        for invalid in (True, 0, -1, 6, 1.5):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.load({'x-evals': {**settings, 'parallel_models': invalid}})
+
+    def test_managed_matrix_pins_current_models_and_new_ollama_max_variants(self):
         from evals.settings import load_config
         settings = load_config()
         variants = {v['name']: v for v in settings['variants']}
-        self.assertEqual(variants['north-free']['model'], 'openrouter/cohere/north-mini-code:free')
         self.assertEqual(variants['nemotron-free']['model'], 'nvidia/nvidia/nemotron-3.5-lightning-30b-a3b')
-        for name in ('north-free', 'nemotron-free'):
-            self.assertEqual(variants[name]['parameters'], {'max_tokens': 64000})
+        self.assertEqual(variants['nemotron-free']['parameters'], {'max_tokens': 64000})
+        for name, model in [('glm-max', 'glm-5.3-flash'), ('mistral-max', 'mistral-large-4'),
+                            ('minimax-max', 'minimax-m3.1-flash')]:
+            self.assertEqual(variants[name]['model'], 'ollama-cloud/' + model)
+            self.assertEqual(variants[name]['parameters'], {'max_tokens': 65536, 'reasoning_effort': 'max'})
         self.assertEqual(settings['baseline'], 'flash-max')
         self.assertEqual(settings['repetitions'], 2)
-        self.assertEqual(set(variants), {'flash-max', 'flash-low', 'glm-max', 'north-free', 'nemotron-free'})
+        self.assertEqual(set(variants), {'flash-max', 'glm-max', 'mistral-max', 'minimax-max', 'nemotron-free'})
 
     def load(self, document):
         from evals.settings import load_config

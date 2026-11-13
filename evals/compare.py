@@ -11,6 +11,7 @@ def parameters(config):
     return {'model': config.get('primary_model'), 'harness': config.get('harness'),
             'model_parameters': config.get('profiles'),
             'workflow': config.get('evals', config.get('baseline', {})).get('workflow'),
+            'parallel_models': config.get('evals', {}).get('parallel_models', 1),
             'worker_image': config.get('worker_image'), 'source_revision': config.get('source_revision')}
 
 

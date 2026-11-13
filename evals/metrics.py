@@ -99,11 +99,12 @@ def publish_info(config, *, phoenix_url, display_name='', series_display_name=''
     identity = labels(config)
     params = json.dumps({k: v.get('model_parameters') for k, v in config.get('profiles', {}).items()}, sort_keys=True)
     info = {**identity, 'display_name': display_name or identity['experiment'],
+            'parallel_models': str(config.get('evals', {}).get('parallel_models', 1)),
             'parameters': params, 'parameter_hash': hashlib.sha256(params.encode()).hexdigest()[:12],
             'source_revision': config.get('source_revision', 'unknown'), 'phoenix_url': phoenix_url}
     if series_display_name:
         info['series_display_name'] = series_display_name
-    return emit(info, {'configuration': 1}, kind='info')
+    return emit(info, {'configuration': 1, 'display_name_updated_at_seconds': time.time()}, kind='info')
 
 
 def publish_comparison(result, baseline, candidate):

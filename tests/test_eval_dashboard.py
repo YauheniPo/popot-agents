@@ -2,6 +2,19 @@ import unittest
 
 
 class EvalDashboardTests(unittest.TestCase):
+    def test_renamed_experiments_select_latest_alias_before_joining_panels(self):
+        from ax_local.cluster.eval_dashboard import dashboard
+        variable = next(v for v in dashboard()['templating']['list'] if v['name'] == 'experiment')
+        self.assertIn('display_name_updated_at_seconds', variable['query'])
+        self.assertIn('topk by(series,experiment)', variable['query'])
+        self.assertIn('clamp_max(', variable['query'])
+
+    def test_experiment_picker_includes_progress_before_phoenix_publication(self):
+        from ax_local.cluster.eval_dashboard import dashboard
+        variable = next(v for v in dashboard()['templating']['list'] if v['name'] == 'experiment')
+        self.assertIn('popot_eval_progress', variable['query'])
+        self.assertIn('on(series,experiment)', variable['query'])
+
     def test_metrics_are_categorized_with_raw_and_delta_side_by_side(self):
         from ax_local.cluster.eval_dashboard import dashboard
         from evals.metrics import METRICS
@@ -54,10 +67,14 @@ class EvalDashboardTests(unittest.TestCase):
         from evals.metrics import publish_info
         label = 'popot-harness-local-782a0561684e · 2026-11-12 23:39:00 UTC'
         with patch('evals.metrics.emit', return_value={'ok': True}) as emit:
-            publish_info({'suite_sha256': '782a0561684e6c21', 'experiment_name': 'stored-key'},
+            publish_info({'suite_sha256': '782a0561684e6c21', 'experiment_name': 'stored-key',
+                          'evals': {'parallel_models': 3}},
                          phoenix_url='http://localhost/compare', display_name='model-max-evals-16',
                          series_display_name=label)
+        self.assertGreater(emit.call_args.args[1]['display_name_updated_at_seconds'], 0)
+        self.assertEqual(emit.call_args.args[1]['configuration'], 1)
         labels = emit.call_args.args[0]
+        self.assertEqual(labels['parallel_models'], '3')
         self.assertEqual(labels['series_display_name'], label)
         self.assertEqual(labels['series'], '782a0561684e6c21')
         self.assertEqual(labels['experiment'], 'stored-key')

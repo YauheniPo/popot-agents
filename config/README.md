@@ -69,8 +69,10 @@
 `x-tracing` в том же JSON управляет постоянным экспортом всех рабочих ролей
 в отдельный проект. После его изменения пересоберите API/worker через
 `bash ax_local/rebuild-worker.sh`; подробности — в [гайде](../evals/README.md#постоянные-трейсы-ax).
-Код v2 включает redacted LLM/tool payload и управляющие события harness без
-отдельной ручной настройки Phoenix. Исторические spans сохраняют прежнюю полноту.
+Код v2 включает исходные LLM/tool payload и управляющие события harness без
+маскирования значений, включая credentials. Логи HTTP/MCP также сохраняют исходные
+поля; `credentialRedactionEnabled=false` закреплён в deploy-конфиге OmniRoute.
+Исторические spans сохраняют прежнюю полноту и уже записанные подмены.
 Email для входа — `admin@localhost`; пароль — значение
 `PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD`. Это initial password: его изменение
 в конфиге не сбрасывает пароль уже существующего пользователя.

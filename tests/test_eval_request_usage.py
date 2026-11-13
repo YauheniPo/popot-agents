@@ -22,7 +22,7 @@ class EvalRequestUsageTests(unittest.TestCase):
         metrics = measure(row, [])
         self.assertEqual((metrics['prompt_tokens'], metrics['completion_tokens']), (5, 2))
 
-    def test_generated_request_id_survives_secret_redaction_without_bypassing_it(self):
+    def test_generated_request_id_is_not_regenerated_or_masked(self):
         from popot_agents.worker import http_harness as harness
         from popot_agents.progress import observe_progress, format_progress
         events = []
@@ -35,9 +35,10 @@ class EvalRequestUsageTests(unittest.TestCase):
                 patch.object(harness, 'trace_output'), \
                 observe_progress(lambda message: events.append(json.loads(message))):
             harness._model_request(call, round_number=1, messages=[], schemas=[], remaining_seconds=lambda: 100)
-            self.assertNotIn('1234', format_progress('output', content='secret 1234'))
-        self.assertEqual(call.get_header('X-popot-request-id'), 'b' * 32)
-        self.assertEqual([e['request_id'] for e in events], ['b' * 32, 'b' * 32])
+            self.assertEqual(json.loads(format_progress('output', content='secret 1234'))['content'], 'secret 1234')
+        expected = candidates[0].hex
+        self.assertEqual(call.get_header('X-popot-request-id'), expected)
+        self.assertEqual([e['request_id'] for e in events], [expected, expected])
 
     def test_transport_failure_has_a_correlated_error_receipt(self):
         from popot_agents.worker import http_harness as harness

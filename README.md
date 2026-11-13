@@ -82,7 +82,13 @@ runtime-evals описаны в [руководстве evals](evals/README.md).
 python3 -m evals.matrix --output reports/evals/models-before-harness
 ```
 
-Варианты, baseline, повторы и бюджеты заданы в `evals/config.json → x-evals`. Результаты
+После сбоя: та же команда с `--resume` продолжает публикацию сохранённых
+результатов и ещё не запущенные варианты. Завершённые измерения не повторяются;
+незавершённый capture требует отдельного решения. Причина сбоя — в `matrix.json`.
+
+Варианты, baseline, повторы и бюджеты заданы в `evals/config.json → x-evals`.
+По умолчанию параллельно выполняются 3 варианта модели; предел задаёт
+`x-evals.parallel_models` или флаг `--parallel-models`. Результаты
 публикуются в Phoenix Experiments и в [Grafana Evals](http://127.0.0.1:3002/d/popot-evals):
 зелёное Δ означает улучшение с учётом направления метрики, красное — ухудшение.
 Проверенный успех, фиксированный judge и самооценка агента показаны отдельно.
@@ -332,7 +338,7 @@ passed literally:
 
 ```bash
 TASK="$(cat <<'TASK_TEXT'
-https://github.com/YauheniPo/popot-agents/pull/61 порешай проблемы и подготовь к merge и sonarqube все порешай
+https://github.com/YauheniPo/popot-agents/pull/62 порешай проблемы и подготовь к merge и sonarqube все порешай и GitGuardian
 TASK_TEXT
 )" ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
@@ -490,7 +496,7 @@ A nonempty `progressToken` enables MCP progress notifications carrying harness
 and delegated-agent events. An empty or omitted token disables those notifications;
 SSE keepalive `ping` comments may still appear. The final result includes the
 answer, `sessionId` and activity. Continue with `send_message` and that `sessionId`.
-Upstream HTTP failures return `isError=true` with the HTTP status and redacted
+Upstream HTTP failures return `isError=true` with the HTTP status and original
 diagnostic message, including child session IDs when supplied by the API.
 
 For clients that hide MCP notifications, monitor a pending task with `list_chats`
@@ -527,7 +533,7 @@ and are retained in compact progress snapshots. An ID that is not known yet,
 such as on a rejection before session allocation, is `null`.
 `eventsAfterLastError` counts subsequent activity and does
 not establish that the error was resolved. Recoverable delegation-input and
-MCP errors include a short redacted message. The top-level `turns` still counts
+MCP errors include a short original message. The top-level `turns` still counts
 saved conversation answers; `workflow.turns` and each task's `coordinatorTurns`
 represent coordinator turns.
 
@@ -830,7 +836,7 @@ and logs `mcp_cleanup_failed`; the runtime never automatically retries the write
 ### Offline authentication checks
 
 `tests/test_mcp_remote.py` checks token forwarding, refusal when a token is
-missing or not selected by the role, and redaction in authentication errors.
+missing or not selected by the role, and original diagnostics in authentication errors.
 The tests isolate the process environment, use a fake token and mocked MCP
 responses, and fail on DNS or socket connection attempts. No GitHub secret or
 repository write permission is needed in CI.
@@ -918,9 +924,9 @@ Ollama Cloud final requests disable thinking, as memory extraction already does,
 without changing the work requests. `final_result_invalid` reports the validation
 reason, finish reason and content length; `final_result_recovered` confirms recovery.
 If correction fails, the response retains attributed child results and bounded,
-redacted tool receipts in `answer` and `evidence`, without promoting the task to
+original tool receipts in `answer` and `evidence`, without promoting the task to
 completed. Raw invalid responses stay in the checkpoint; reasoning is not used as
-a substitute for an answer. Memory recall failures include a redacted diagnostic
+a substitute for an answer. Memory recall failures include an original diagnostic
 message and remain nonfatal.
 Blank result-list entries are removed, but an explicit partial status is never
 promoted to completed. Parent answers include concise child status, evidence and
@@ -998,7 +1004,7 @@ write** in addition to code read access; comments use the token owner's account.
 The last tool round is reserved for a partial status answer when the work is incomplete.
 Unknown or disallowed tool names return a recoverable error listing the available
 tools. They are never executed; other results in the same batch are preserved.
-Recoverable tool-error progress events include the redacted diagnostic message.
+Recoverable tool-error progress events include the original diagnostic message.
 The parent model chooses specialists from the delegation tool's role descriptions
 using the task and conversation context. There is no keyword or language-based
 routing before the model request. Explicit no-delegation and analysis-only

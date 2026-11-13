@@ -22,6 +22,19 @@ services:
       timeout: 4s
       retries: 24
 
+  phoenix-import:
+    profiles: ["tools"]
+    image: ${PHOENIX_IMAGE:?Use bash compose.sh to load pyproject.toml versions}
+    entrypoint: ["python"]
+    working_dir: /opt/popot
+    mem_limit: 1g
+    environment:
+      PHOENIX_ADMIN_SECRET: ${PHOENIX_ADMIN_SECRET:?Generate private Phoenix environment first}
+    volumes:
+      - .:/opt/popot/evals:ro
+      - ../popot_agents/telemetry.py:/opt/popot/popot_agents/telemetry.py:ro
+      - ../popot_agents/progress.py:/opt/popot/popot_agents/progress.py:ro
+
   phoenix-init:
     profiles: ["bootstrap"]
     image: ${PHOENIX_IMAGE:?Use bash compose.sh to load pyproject.toml versions}

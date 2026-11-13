@@ -1,5 +1,8 @@
 """A matrix preserves exact parameters and compares only against its selected baseline."""
 from pathlib import Path
+import json
+import fcntl
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -10,6 +13,90 @@ from tests.test_eval_settings import unified_settings
 
 
 class EvalMatrixTests(unittest.TestCase):
+    def test_concurrent_resume_is_rejected_before_launch(self):
+        from evals.matrix import run
+        config = unified_settings()
+        config['variants'] = [v for v in config['variants'] if v['name'] == config['baseline']]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            save(output / 'matrix.json', {'configuration': config, 'cases': [], 'run_id': 'saved',
+                                          'runs': {}, 'comparisons': {}})
+            with (output / '.matrix.lock').open('a') as lock, \
+                    patch('evals.matrix.subprocess.run') as launch:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(BlockingIOError):
+                    run(output, config, resume=True)
+                launch.assert_not_called()
+
+    def test_failed_comparison_is_retried_without_repeating_completed_variants(self):
+        from evals.matrix import run
+        config = {**unified_settings(), 'baseline': 'a', 'variants': [
+            {'name': name, 'model': 'provider/' + name, 'parameters': {}} for name in ('a', 'b')]}
+
+        def launch(command, **kwargs):
+            directory = Path(kwargs['env']['POPOT_EVAL_OUTPUT']) / 'baseline'
+            for key, value in experiment().items():
+                save(directory / (key + '.json'), value)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'matrix'
+            with patch('evals.matrix.subprocess.run', side_effect=launch), \
+                    patch('evals.metrics.publish_comparison', return_value={'ok': False}):
+                with self.assertRaisesRegex(RuntimeError, 'comparison'):
+                    run(output, config)
+            self.assertEqual(json.loads((output / 'matrix.json').read_text())['status'], 'failed')
+            with patch('evals.matrix.subprocess.run') as launcher, \
+                    patch('evals.metrics.publish_comparison', return_value={'ok': True}):
+                result = run(output, config, resume=True)
+                launcher.assert_not_called()
+            self.assertEqual(result['status'], 'completed')
+            self.assertIn('b', result['comparisons'])
+
+    def test_publication_failure_is_recorded_and_resume_does_not_repeat_agents(self):
+        from evals.matrix import run
+        config = {**unified_settings(), 'baseline': 'a', 'variants': [
+            {'name': 'a', 'model': 'provider/a', 'parameters': {}}]}
+        commands = []
+
+        def fail_publication(command, **kwargs):
+            commands.append(command)
+            directory = Path(kwargs['env']['POPOT_EVAL_OUTPUT']) / 'baseline'
+            save(directory / 'report.json', {'finished_at': 'now', 'planned_runs': 1, 'results': [{}]})
+            raise subprocess.CalledProcessError(137, command)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'matrix'
+            with patch('evals.matrix.subprocess.run', side_effect=fail_publication):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    run(output, config)
+            failed = json.loads((output / 'matrix.json').read_text())
+            self.assertEqual(failed['status'], 'failed')
+            self.assertEqual(failed['failed_variant'], 'a')
+            self.assertEqual(failed['exit_code'], 137)
+            with patch('evals.matrix.subprocess.run') as launch:
+                result = run(output, config, resume=True)
+                command = launch.call_args.args[0]
+                self.assertTrue(command[1].endswith('/evals/publish.sh'))
+                self.assertIn('--baseline', command)
+            self.assertEqual(result['status'], 'completed')
+            self.assertEqual(result['run_id'], failed['run_id'])
+            self.assertNotIn('failed_variant', result)
+
+    def test_resume_rejects_config_changes_and_incomplete_capture(self):
+        from evals.matrix import run
+        config = {**unified_settings(), 'baseline': 'a', 'variants': [
+            {'name': 'a', 'model': 'provider/a', 'parameters': {}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'matrix'
+            save(output / 'matrix.json', {'configuration': config, 'cases': [], 'run_id': 'saved', 'runs': {}})
+            save(output / 'a/baseline/report.json', {'planned_runs': 2, 'results': [{}]})
+            with patch('evals.matrix.subprocess.run') as launch:
+                with self.assertRaisesRegex(ValueError, 'incomplete'):
+                    run(output, config, resume=True)
+                with self.assertRaisesRegex(ValueError, 'configuration'):
+                    run(output, {**config, 'repetitions': 3}, resume=True)
+                launch.assert_not_called()
+
     def test_dataset_label_uses_native_creation_datetime_in_utc(self):
         from evals.names import dataset_label
         api = Mock()
@@ -22,10 +109,11 @@ class EvalMatrixTests(unittest.TestCase):
     def test_phoenix_number_is_the_shared_visual_name_and_is_read_back(self):
         from evals.names import rename
         config = {'primary_model': 'ollama-cloud/deepseek-v4.1-flash:1017',
+                  'run_id': '20261113T143602-9a12d9',
                   'profiles': {'agent': {'model_parameters': {'reasoning_effort': 'max'}}},
                   'evaluation': {'version': 'popot-evals-v2'}}
         api = Mock()
-        expected = 'deepseek-v4.1-flash:1017-max-judge-v2-11'
+        expected = 'deepseek-v4.1-flash:1017-max-judge-v2-20261113T143602-9a12d9-11'
         api.query.side_effect = [{}, {'node': {'name': expected}}]
         self.assertEqual(rename(api, config, 'RXhwZXJpbWVudDoxMQ=='), expected)
         self.assertEqual(api.query.call_args_list[0].args[1]['input'],
@@ -33,6 +121,16 @@ class EvalMatrixTests(unittest.TestCase):
         api.query.side_effect = [{}, {'node': {'name': 'not-updated'}}]
         with self.assertRaises(RuntimeError):
             rename(api, config, 'RXhwZXJpbWVudDoxMQ==')
+
+    def test_legacy_matrix_label_keeps_original_run_id_in_display_name(self):
+        from evals.names import rename
+        config = {'primary_model': 'ollama-cloud/glm-5.3-flash',
+                  'profiles': {'agent': {'model_parameters': {'reasoning_effort': 'max'}}},
+                  'experiment_name': 'matrix-20261112T211439-e7e39f-glm-max'}
+        expected = 'glm-5.3-flash-max-evals-20261112T211439-e7e39f-11'
+        api = Mock()
+        api.query.side_effect = [{}, {'node': {'name': expected}}]
+        self.assertEqual(rename(api, config, 'RXhwZXJpbWVudDoxMQ=='), expected)
 
     def test_experiment_names_start_with_exact_model_effort_and_measurement_kind(self):
         from evals.names import experiment_name
@@ -91,3 +189,4 @@ class EvalMatrixTests(unittest.TestCase):
         self.assertEqual(launch.call_args.args[1]['baseline'], 'flash-low')
         self.assertEqual([v['name'] for v in launch.call_args.args[1]['variants']], ['flash-low'])
         self.assertEqual(launch.call_args.kwargs['repetitions'], 3)
+        self.assertFalse(launch.call_args.kwargs['resume'])

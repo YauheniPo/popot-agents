@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Bash otherwise keeps reading this file after long-running commands return.
+if [[ "${POPOT_EVAL_SCRIPT_SNAPSHOT:-}" != "$0" ]]; then
+  export POPOT_EVAL_SCRIPT_SNAPSHOT="$0"
+  exec bash -c "$(< "$0")" "$0" "$@"
+fi
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${POPOT_EVAL_REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+EVALS="${POPOT_EVAL_LAUNCHER_ROOT:-$ROOT/evals}"
 cd "$ROOT"
 RUN_NAME="${1:-full-$(date -u +%Y%m%dT%H%M%SZ)}"
 if (( $# )); then shift; fi
@@ -23,9 +29,11 @@ if [[ "${POPOT_EVAL_SKIP_RUNTIME:-0}" != 1 ]]; then
   docker cp "popot-evals-phoenix-1:/tmp/$RUN_NAME-runtime" "$OUTPUT/runtime"
 fi
 
-docker exec popot-ax-local-api-1 python -c "from pathlib import Path; Path('/app/evals').mkdir(exist_ok=True)"
-docker cp "$ROOT/evals/." popot-ax-local-api-1:/app/evals/
-if docker exec -i popot-ax-local-api-1 python -u -m evals.baseline \
+CODE="/tmp/$RUN_NAME-code"
+docker exec popot-ax-local-api-1 python -c "from pathlib import Path; Path('$CODE').mkdir(exist_ok=True)"
+docker cp "$EVALS" "popot-ax-local-api-1:$CODE/"
+if docker exec -i -w "$CODE" -e "PYTHONPATH=$CODE:/app" -e POPOT_EVAL_SOURCE_ROOT=/app \
+    popot-ax-local-api-1 python -u -m evals.baseline \
     --output "/tmp/$RUN_NAME-baseline" --source-revision "$SOURCE_REVISION" --monitor "$@"; then
   docker cp "popot-ax-local-api-1:/tmp/$RUN_NAME-baseline" "$OUTPUT/baseline"
 else
@@ -34,21 +42,6 @@ else
   exit "$result"
 fi
 
-docker cp "$ROOT/evals/gateway.mjs" "popot-ax-local-omniroute-1:/tmp/$RUN_NAME-gateway.mjs"
-docker cp "$OUTPUT/baseline/report.json" "popot-ax-local-omniroute-1:/tmp/$RUN_NAME-report.json"
-docker exec popot-ax-local-omniroute-1 node "/tmp/$RUN_NAME-gateway.mjs" "/tmp/$RUN_NAME-report.json" \
-  > "$OUTPUT/baseline/gateway.json"
-python3 -m evals.report "$OUTPUT/baseline" "$OUTPUT/baseline/gateway.json"
-
-docker exec popot-evals-phoenix-1 python -c "from pathlib import Path; Path('/tmp/$RUN_NAME-code/popot_agents').mkdir(parents=True)"
-docker cp "$ROOT/evals" "popot-evals-phoenix-1:/tmp/$RUN_NAME-code/"
-docker cp "$ROOT/popot_agents/telemetry.py" "popot-evals-phoenix-1:/tmp/$RUN_NAME-code/popot_agents/telemetry.py"
-docker cp "$ROOT/popot_agents/progress.py" "popot-evals-phoenix-1:/tmp/$RUN_NAME-code/popot_agents/progress.py"
-docker cp "$OUTPUT/baseline" "popot-evals-phoenix-1:/tmp/$RUN_NAME-baseline"
-PHOENIX_ARGS=(python -u -m evals.phoenix "/tmp/$RUN_NAME-baseline")
+PHOENIX_ARGS=("$EVALS/publish.sh" "$OUTPUT/baseline")
 if [[ "${POPOT_EVAL_BASELINE:-0}" == 1 ]]; then PHOENIX_ARGS+=(--baseline); fi
-docker exec -i -w "/tmp/$RUN_NAME-code" popot-evals-phoenix-1 \
-  "${PHOENIX_ARGS[@]}"
-docker cp "popot-evals-phoenix-1:/tmp/$RUN_NAME-baseline/phoenix.json" "$OUTPUT/baseline/phoenix.json"
-python3 -m evals.metrics "$OUTPUT/baseline"
-printf 'Eval reports: %s\n' "$OUTPUT"
+bash "${PHOENIX_ARGS[@]}"
