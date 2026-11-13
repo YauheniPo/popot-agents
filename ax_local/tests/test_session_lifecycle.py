@@ -487,6 +487,56 @@ class AxLifecycleTests(unittest.TestCase):
             self.chat.resume(timeout_seconds=10)
         self.assertEqual([c.args[0] for c in run.call_args_list], ['suspend', 'resume'])
 
+    def test_unconfirmed_suspend_recovers_atespace_failure_without_replaying_work(self):
+        self.runner.snapshot_mode = 'data'
+        self.runner.worker_pool = RecordingWorkerPool()
+        self.chat.suspended = True
+        self.chat._suspend_pending = True
+        self.chat._snapshot_issue = 'resume_failed'
+        self.chat._messages = [{'role': 'user', 'content': 'saved task'}]
+        self.chat._checkpoint = {'outcome': {'evidence': ['saved child receipts']}}
+        phases = [('Failed', 'AtespaceCreationFailed'), ('Suspended', 'TaskSuspended')]
+        commands = []
+        def command(*args, **kwargs):
+            commands.append(args[0])
+            if args[0] == 'resume':
+                self.assertEqual(phases, [])
+            return subprocess.CompletedProcess([], 0)
+        with patch.object(self.runner, 'task_status', side_effect=lambda *a, **kw: phases.pop(0)), \
+             patch.object(self.runner, '_run', side_effect=command), \
+             patch.object(self.runner, 'remote', return_value={'status': 'ok'}) as remote, \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            self.chat.resume(timeout_seconds=5)
+        self.assertEqual(commands, ['suspend', 'resume'])
+        self.assertEqual([c.args[1]['action'] for c in remote.call_args_list], ['ping', 'restore'])
+        self.assertEqual(remote.call_args.args[1]['checkpoint'], self.chat._checkpoint)
+        self.assertEqual(self.runner.worker_pool.acquired, [self.chat.container_name])
+        self.assertEqual(self.runner.worker_pool.released, [])
+        self.assertEqual(self.chat.status, 'running')
+        self.assertFalse(self.chat._suspend_pending)
+
+    def test_atespace_suspend_retries_stop_at_the_original_deadline(self):
+        self.chat.suspended = True
+        self.chat._snapshot_issue = 'snapshot_unconfirmed'
+        self.chat._checkpoint = {'outcome': {'evidence': ['saved child receipts']}}
+        clock = [100.0]
+        def sleep(seconds):
+            clock[0] += seconds
+        with patch.object(self.runner, 'task_status', return_value=('Failed', 'AtespaceCreationFailed')), \
+             patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)) as run, \
+             patch.object(self.runner, 'remote') as remote, \
+             patch('ax_local.api.ax_runner.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('ax_local.api.ax_runner.time.sleep', side_effect=sleep):
+            with self.assertRaises(orchestrator.AgentResumeError) as caught:
+                self.chat.resume(timeout_seconds=5)
+        self.assertEqual([c.args[0] for c in run.call_args_list], ['suspend'] * 3)
+        self.assertEqual(clock[0], 105)
+        self.assertEqual(caught.exception.diagnostic['reason'], 'AtespaceCreationFailed')
+        self.assertEqual(self.chat._checkpoint['outcome']['evidence'], ['saved child receipts'])
+        self.assertTrue(self.chat._suspend_pending)
+        self.assertFalse(self.chat.closed)
+        remote.assert_not_called()
+
     def test_failed_resume_never_sends_model_turn_and_preserves_checkpoint_for_retry(self):
         self.chat.suspended = True
         with patch.object(self.runner, '_run', side_effect=[
@@ -500,6 +550,27 @@ class AxLifecycleTests(unittest.TestCase):
         self.assertEqual(self.chat.status, 'resume_failed')
         self.assertTrue(self.chat.is_alive())  # Listing cannot erase the saved actor.
         remote.assert_not_called()
+
+    def test_resume_readiness_timeout_preserves_phase_and_transport_diagnostic(self):
+        self.chat.suspended = True
+        self.runner.snapshot_mode = 'data'
+        self.chat._checkpoint = {'outcome': {'evidence': ['saved receipt']}}
+        clock = [100.0]
+        with patch.object(self.runner, '_run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runner, 'remote', side_effect=AgentRunError('private SSH detail')), \
+             patch.object(self.runner, 'task_status', return_value=('Running', 'TaskRunning')), \
+             patch('ax_local.api.ax_runner.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('ax_local.api.ax_runner.time.sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds)):
+            with self.assertRaises(orchestrator.AgentResumeError) as caught:
+                self.chat.send('must not run', timeout_seconds=2)
+        self.assertEqual(clock[0], 102)
+        self.assertEqual(caught.exception.diagnostic['phase'], 'Running')
+        self.assertEqual(caught.exception.diagnostic['reason'], 'TaskRunning')
+        self.assertEqual(caught.exception.diagnostic['operation'], 'wait_for_chat')
+        self.assertEqual(caught.exception.diagnostic['probe'], 'AX ssh failed')
+        self.assertNotIn('private SSH detail', str(caught.exception.diagnostic))
+        self.assertEqual(self.chat._checkpoint['outcome']['evidence'], ['saved receipt'])
+        self.assertEqual(self.chat.status, 'resume_failed')
 
     def test_resumed_task_with_missing_chat_socket_fails_without_full_startup_wait(self):
         self.chat.suspended = True

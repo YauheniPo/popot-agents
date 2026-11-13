@@ -4,7 +4,7 @@ import subprocess
 import time
 from contextlib import ExitStack
 
-from popot_agents.progress import emit_progress, trace_event
+from popot_agents.progress import emit_progress, trace_event, redact_text
 from popot_agents.runtime_config import RUNTIME
 from .errors import AgentRunError
 from .workflow import include_interventions
@@ -142,7 +142,9 @@ class _RootExecution:
         diagnostic = getattr(exc, 'diagnostic', None)
         if isinstance(diagnostic, dict):
             failure['diagnostic'] = {key: diagnostic[key] for key in
-                ('task', 'phase', 'reason', 'operation', 'command', 'exit_code') if key in diagnostic}
+                ('task', 'phase', 'reason', 'operation', 'command', 'exit_code', 'probe') if key in diagnostic}
+            if isinstance(diagnostic.get('stderr'), str):
+                failure['diagnostic']['stderr'] = redact_text(diagnostic['stderr'])[-2000:]
         if isinstance(exc, OSError) and type(exc.errno) is int:
             failure['errno'] = exc.errno
         trace_event('workflow_interrupted', session_id=self.session_id, **failure)

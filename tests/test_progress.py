@@ -21,6 +21,27 @@ from popot_agents.orchestrator.main import create_server, AgentRunError
 
 
 class ProgressTests(unittest.TestCase):
+    def test_scoped_progress_keeps_root_source_and_immediate_parent_through_nested_forwarding(self):
+        from popot_agents.progress import scoped_progress, TurnProgress
+        root, parent, child = 'a' * 16, 'b' * 16, 'c' * 16
+        original = format_progress('tool_call', name='bash', root_session_id='untrusted-root')
+        nested = scoped_progress('qa_engineer', original, session_id=child,
+                                 root_session_id=root, parent_session_id=parent)
+        forwarded = scoped_progress('backend_engineer', nested, session_id=parent,
+                                    root_session_id=root, parent_session_id=root)
+        event = json.loads(forwarded)
+        self.assertEqual(event['root_session_id'], root)
+        self.assertEqual(event['agent_session_id'], child)
+        self.assertEqual(event['parent_session_id'], parent)
+        self.assertEqual(event['agent_role'], 'qa_engineer')
+        self.assertEqual(json.loads(original)['root_session_id'], 'untrusted-root')
+        progress = TurnProgress(root)
+        progress.update(forwarded)
+        self.assertEqual({key: progress.snapshot()['lastAction'][key] for key in
+                          ('root_session_id', 'agent_session_id', 'parent_session_id')},
+                         {key: event[key] for key in
+                          ('root_session_id', 'agent_session_id', 'parent_session_id')})
+
     def test_provider_reasoning_is_reported_before_tools_and_preserved_for_model(self):
         from popot_agents.worker.http_harness import run_http
         first = {
@@ -168,6 +189,85 @@ class SessionWorkerProgressTests(unittest.TestCase):
 
 
 class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mcp_progress_has_session_ids_from_acceptance_through_errors(self):
+        started_ids, received = [], []
+        class Chat:
+            container_name = 'worker-test'
+            def send(self, message):
+                for event in ('model_request', 'output', 'tool_call', 'tool_result'):
+                    emit_progress(event)
+                if message == 'fail':
+                    raise AgentRunError('worker failed')
+                return {'answer': 'done'}
+            def is_alive(self): return True
+            def close(self): pass
+        class Runner:
+            def start_chat(self, sid, *_):
+                started_ids.append(sid)
+                emit_progress('worker_starting')
+                return Chat()
+        class BrokenRunner:
+            def start_chat(self, sid, *_):
+                started_ids.append(sid)
+                emit_progress('worker_starting')
+                raise AgentRunError('startup failed')
+        class Context:
+            request_context = SimpleNamespace(meta={'progress_token': 'session-ids'})
+            def __init__(self, events=None):
+                self.events = received if events is None else events
+            async def report_progress(self, value, total=None, message=None):
+                self.events.append(json.loads(message))
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(io.StringIO()):
+            server = create_server({'test': Runner(), 'broken': BrokenRunner()},
+                session_dir=directory, host='127.0.0.1', port=0)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            client = OrchestratorClient(f'http://127.0.0.1:{server.server_port}')
+            try:
+                result = await stream_call(client, '/tasks', {'agent': 'test', 'task': 'work'}, Context())
+                root = result['sessionId']
+                self.assertEqual(received[0]['event'], 'accepted')
+                self.assertEqual(received[-1]['event'], 'completed')
+                for event in received:
+                    self.assertEqual(event['root_session_id'], root)
+                    self.assertEqual(event['agent_session_id'], root)
+                    self.assertIsNone(event['parent_session_id'])
+                streams = [[], []]
+                results = await asyncio.gather(*(stream_call(client, '/tasks',
+                    {'agent': 'test', 'task': 'work'}, Context(events)) for events in streams))
+                self.assertNotEqual(results[0]['sessionId'], results[1]['sessionId'])
+                for parallel, events in zip(results, streams):
+                    for event in events:
+                        self.assertEqual(event['root_session_id'], parallel['sessionId'])
+                        self.assertEqual(event['agent_session_id'], parallel['sessionId'])
+                        self.assertIsNone(event['parent_session_id'])
+                for path, payload, expected_id in (
+                        ('/messages', {'sessionId': root, 'message': 'fail'}, root),
+                        ('/tasks', {'agent': 'broken', 'task': 'work'}, None)):
+                    received.clear()
+                    context = Context()
+                    with self.assertRaisesRegex(RuntimeError, 'HTTP 502'):
+                        await stream_call(client, path, payload, context)
+                    expected_id = expected_id or started_ids[-1]
+                    self.assertEqual(received[0]['event'], 'accepted')
+                    self.assertEqual(received[-1]['event'], 'failed')
+                    for event in received:
+                        self.assertEqual(event['root_session_id'], expected_id)
+                        self.assertEqual(event['agent_session_id'], expected_id)
+                        self.assertIsNone(event['parent_session_id'])
+                received.clear()
+                context = Context()
+                with self.assertRaisesRegex(RuntimeError, 'HTTP 404'):
+                    await stream_call(client, '/tasks', {'agent': 'missing', 'task': 'work'}, context)
+                self.assertEqual([event['event'] for event in received], ['accepted', 'failed'])
+                for event in received:
+                    for key in ('root_session_id', 'agent_session_id', 'parent_session_id'):
+                        self.assertIsNone(event[key])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
     @unittest.skipUnless(importlib.util.find_spec('mcp'), 'requires the installed MCP SDK')
     async def test_real_mcp_transport_sends_progress_notifications_before_result(self):
         from mcp import Client
@@ -242,10 +342,14 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                                 self.assertFalse(result.is_error, result)
                                 data = result.structured_content or json.loads(next(c.text for c in result.content if c.type == 'text'))
                                 self.assertEqual(data['answer'], 'done')
-                                self.assertIn({'event': 'assistant_message', 'agent_role': 'code_reviewer', 'content': 'Проверяю PR'},
+                                self.assertIn({'event': 'assistant_message', 'agent_role': 'code_reviewer',
+                                               'content': 'Проверяю PR', 'agent_session_id': data['sessionId'],
+                                               'root_session_id': data['sessionId'], 'parent_session_id': None},
                                               [json.loads(item) for item in data['activity']])
                                 self.assertIn({'event': 'assistant_reasoning', 'agent_role': 'code_reviewer',
-                                               'reasoning': 'Provider reasoning fixture.'},
+                                               'reasoning': 'Provider reasoning fixture.',
+                                               'agent_session_id': data['sessionId'],
+                                               'root_session_id': data['sessionId'], 'parent_session_id': None},
                                               [json.loads(item) for item in data['activity']])
                             self.assertTrue(finish.is_set())
                             self.assertEqual([r[0] for r in received], list(range(1,len(received)+1)))
@@ -391,7 +495,9 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(started.is_set())
                 self.assertTrue(context.assert_before_answer)
                 self.assertEqual(result['answer'], 'done')
-                self.assertIn({'event': 'tool_call', 'name': 'read_file'}, [json.loads(item) for item in result['activity']])
+                self.assertIn({'event': 'tool_call', 'name': 'read_file',
+                               'root_session_id': result['sessionId'], 'agent_session_id': result['sessionId'],
+                               'parent_session_id': None}, [json.loads(item) for item in result['activity']])
                 self.assertEqual(sum(json.loads(e[2]).get('event') == 'new_harness_event' for e in context.events), 250)
                 self.assertEqual([e[0] for e in context.events], list(range(1, len(context.events) + 1)))
                 self.assertTrue(all(e[1] is None for e in context.events))

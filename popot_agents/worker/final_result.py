@@ -4,8 +4,18 @@ import json
 import re
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.prompts import render_prompt
 from .turn_memory import scrub
 from .verification import validate_findings
+
+
+def without_format_repairs(messages):
+    """Retire request-only system instructions saved by older workers."""
+    marker = 'FORMAT_ERROR_REASON'
+    prefix, suffix = render_prompt('reporting/repair', reason=marker, result_contract='').split(marker, 1)
+    return [message for message in messages if not (
+        message.get('role') == 'system' and isinstance(message.get('content'), str)
+        and message['content'].startswith(prefix) and suffix in message['content'][len(prefix):])]
 
 
 def evidence_transcript(messages, context=()):
@@ -33,18 +43,61 @@ def evidence_transcript(messages, context=()):
     return transcript
 
 
+def _next_quote_state(quoted, escaped, char):
+    """Track whether the scanner sits inside a JSON string after ``char``."""
+    if not quoted:
+        return char == '"', False
+    if escaped:
+        return True, False
+    if char == '\\':
+        return True, True
+    return char != '"', False
+
+
+def _closes_container(text, index):
+    """Detect a comma whose next non-space character ends an array or object."""
+    following = index + 1
+    while following < len(text) and text[following] in ' \t\r\n':
+        following += 1
+    return following < len(text) and text[following] in '}]'
+
+
+def _without_trailing_commas(text):
+    result = []
+    quoted = escaped = False
+    previous = ''
+    for index, char in enumerate(text):
+        was_quoted = quoted
+        quoted, escaped = _next_quote_state(quoted, escaped, char)
+        if not was_quoted and char == ',' and previous not in '[{,:' and _closes_container(text, index):
+            continue
+        result.append(char)
+        if char not in ' \t\r\n':
+            previous = char
+    return ''.join(result)
+
+
 def parse_result(content, finish_reason=None):
     if finish_reason not in (None, 'stop'):
         raise ValueError('truncated_result' if finish_reason == 'length' else 'unexpected_finish_reason')
     if not isinstance(content, str) or not content.strip():
         raise ValueError('empty_content')
-    text = content.strip()
-    if text.startswith(('```json\n', '```\n')) and text.endswith('\n```'):
-        text = text.split('\n', 1)[1].rsplit('\n', 1)[0]
+    text = content.strip().lstrip('\ufeff').strip()
+    fence = re.fullmatch(r'```(?:json)?[ \t]*\r?\n(.*?)\r?\n```', text, re.I | re.S)
+    if fence:
+        text = fence[1]
     try:
         report = json.loads(text)
     except ValueError:
-        raise ValueError('invalid_json') from None
+        # Normalize only separators and literal text whitespace. Never invent
+        # missing fields, closing delimiters or escapes for ambiguous quotes.
+        text = _without_trailing_commas(text)
+        try:
+            if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', text):
+                raise ValueError('invalid_control_character')
+            report = json.loads(text, strict=False)
+        except ValueError:
+            raise ValueError('invalid_json') from None
     if not isinstance(report, dict):
         raise ValueError('expected_object')
     if report.get('status') not in ('completed', 'partial', 'blocked', 'failed'):
@@ -141,5 +194,3 @@ def _message_receipts(messages, limit, chars):
         if receipt:
             receipts.append(receipt)
     return receipts
-
-

@@ -292,12 +292,49 @@ The gateway exposes `run_task`, `send_message`, `list_chats` and `get_chat`.
 
 ### Run a task with curl
 
-Run this as **one line** in Bash or Zsh. The script prints the complete `curl`
-command, streams progress, then reports the task outcome:
+The script prints the complete `curl` command, streams progress, then reports the
+task outcome. For multiline requests in Bash or Zsh, the quoted heredoc below
+fills `TASK` with the pasted text. Quotes, Markdown and `$()` in the request are
+passed literally:
 
 ```bash
-TASK='https://github.com/YauheniPo/popot-bot-2.0/pull/94 исправь все и подготовь к merge и sonarqube 100% и 0 issues и все комментриии должны быть порезолвлены' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
+TASK="$(cat <<'TASK_TEXT'
+порезолвь конфликты и подтяни main и запуш в https://github.com/YauheniPo/popot-agents/pull/59
+TASK_TEXT
+)" ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
 ```
+
+The closing `TASK_TEXT` marker must stand alone, without indentation, and must not
+occur as a separate line inside the request. Command substitution (`$(...)`)
+removes trailing newlines; the remaining text is preserved.
+
+For interactive pasting through stdin, run the following command, paste the
+request, then press **Ctrl+D on an empty line** to send it. Here `TASK` stays empty
+and the script reads stdin, preserving trailing newlines too:
+
+```bash
+TASK='' ROLE='' SESSION_ID='' bash ax_local/run-mcp-task.sh
+```
+
+An empty or unset `TASK` reads the request from stdin. A nonempty `TASK` takes
+precedence, so existing one-line commands also work:
+
+```bash
+TASK='проверь систему и найди что можно улучшить и исправить' ROLE='project_operator' SESSION_ID='' bash ax_local/run-mcp-task.sh
+```
+
+`TASK` is always one plain-text user message: JSON, XML, Markdown, code, quotes,
+Unicode, backslashes and line endings are preserved. Its contents are not parsed
+as MCP parameters or evaluated as shell commands. The script JSON-encodes the
+message and streams the request body into `curl` rather than putting it in
+command-line arguments. The printed retry command uses a quoted heredoc too.
+
+The shell still parses an inline `TASK=...` assignment before starting the script.
+For arbitrary pasted text, use the quoted heredoc or interactive input above;
+Python-style `TASK='''...'''` does not quote arbitrary shell text safely. Input
+must be nonempty UTF-8 text without NUL characters; invalid input is rejected
+before sending, without dropping or replacing characters. The API's configured
+message length limit still applies (`limits.message_chars`, currently 30000).
 
 `TASK` is the request. Empty `ROLE` uses `config/runtime.json → mcp.default_role`;
 set a role such as `backend_engineer` to select it explicitly. Empty `SESSION_ID`
@@ -390,10 +427,13 @@ Waiting for durable children (`child_pending`) does not trigger memory extractio
 The bash schema advertises the 4000-character command limit; write longer scripts
 with `write_file` and invoke the saved file with a short command.
 
-[config/runtime.json](config/runtime.json) → `workflow` supplies shared defaults: four turns,
-900 seconds per turn, 3600 seconds including startup, two unchanged partial
-outcomes without new tool receipts before stopping, and one concurrent workflow.
-Roles may override `max_turns`, `total_seconds`, `turn_seconds` and `max_no_progress`.
+[config/runtime.json](config/runtime.json) → `workflow` supplies shared defaults: eight turns,
+900 seconds per turn, 7200 seconds including startup, two unchanged partial
+outcomes without new tool receipts before stopping, and four concurrent workflows.
+Roles may override `max_turns`, `total_seconds`, `turn_seconds`, `max_no_progress`,
+`verification_reserve_seconds` and `max_child_recoveries`. The default verification
+reserve is 1800 seconds; a child can recover twice from its turn limit, with new
+check receipts required for the second recovery.
 `max_concurrent` is always server-wide. `partial` resumes internally from the
 checkpoint; blockers and failures return immediately. Completion requires reported
 evidence; delegated implementation also requires completed reviewer and QA receipts.
@@ -441,7 +481,13 @@ The snapshot is capped at 8 tasks and 16 KiB, with explicit truncation markers;
 raw commands, stdout, diffs, prompts and reasoning are excluded.
 
 Progress actions/errors include `observedAt`, sequence and originating
-`agent_session_id`. `eventsAfterLastError` counts subsequent activity and does
+`agent_session_id`. Every streamed progress event also carries `root_session_id`
+for the root session and `parent_session_id` for the source's immediate parent.
+For root events, `agent_session_id` equals `root_session_id` and the parent is
+`null`. IDs remain attached when a nested child's event is forwarded or truncated,
+and are retained in compact progress snapshots. An ID that is not known yet,
+such as on a rejection before session allocation, is `null`.
+`eventsAfterLastError` counts subsequent activity and does
 not establish that the error was resolved. Recoverable delegation-input and
 MCP errors include a short redacted message. The top-level `turns` still counts
 saved conversation answers; `workflow.turns` and each task's `coordinatorTurns`
@@ -453,7 +499,9 @@ authorization from server scope, without nesting prior handoff wrappers. The
 last coordinator turn accepts results instead of starting children. Completed
 implementation requires reviewer and QA receipts for the same observed SHA;
 a newer PR-head read-back invalidates verification of an older revision.
-Repeated identical input errors stop with a blocker and failed tool receipts
+Repeated identical input errors across model responses stop with a blocker;
+duplicates within one response count once so the model can correct its arguments.
+Explicitly non-retryable errors still block immediately. Failed tool receipts
 do not reset the no-progress guard. `delegate_task` returns immediately for
 durable children; the parent continues its own work until `await_tasks` joins
 selected children (`all` or `any`). Child waits resume the same coordinator turn.
@@ -817,8 +865,17 @@ An explicit structured partial result ends the turn without forcing another chil
 execution. Invalid final JSON or a premature completion claim gets one correction;
 repeated invalid output returns a partial checkpoint instead of consuming all rounds.
 The correction is tool-free even when the first invalid answer was already a final
-request; both attempts share the original deadline. Empty content and truncated
-responses are invalid, and JSON wrapped in a single Markdown code fence is accepted.
+request; both attempts share the original deadline.
+The format-only restriction applies to that correction request, not later work
+turns. It is not saved as an active instruction; continuations also remove the
+runtime repair directive from older checkpoints, while keeping user text and
+verification requirements. Unfinished review/QA can use tools in the next turn.
+Empty content and truncated responses are invalid. Before requesting a correction,
+the parser normalizes a leading BOM, a single JSON Markdown fence (including CRLF), literal newlines/tabs
+inside strings and trailing commas outside strings. Text, fields and status are
+preserved; missing values, broken quotes, truncated objects and schema errors
+still require correction. Formatting normalization does not execute tools or
+spend another model request.
 Ollama Cloud final requests disable thinking, as memory extraction already does,
 without changing the work requests. `final_result_invalid` reports the validation
 reason, finish reason and content length; `final_result_recovered` confirms recovery.

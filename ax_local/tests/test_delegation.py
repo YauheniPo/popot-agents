@@ -832,6 +832,11 @@ class DelegationTests(unittest.TestCase):
             event.get('agent_session_id') == self.runner.chats[0].session_id for event in events))
         self.assertTrue(any(event.get('name') == 'mcp__github__pull_request_read' and
             event.get('agent_session_id') == self.runner.chats[1].session_id for event in events))
+        parent_id, child_id = (chat.session_id for chat in self.runner.chats)
+        for event in events:
+            self.assertEqual(event['root_session_id'], self.parent)
+            self.assertEqual(event['parent_session_id'],
+                             parent_id if event['agent_session_id'] == child_id else self.parent)
         self.assertNotIn('PRIVATE', json.dumps(received))
         wait_for(lambda: not self.service.jobs)
         self.assertTrue(all(chat.closed for chat in self.runner.chats))
@@ -932,6 +937,7 @@ class DelegationTests(unittest.TestCase):
             for index in range(10):
                 self.service._record_progress(job, json.dumps({
                     'event': 'assistant_reasoning', 'agent_role': 'qa_engineer', 'agent_session_id': 'd'*16,
+                    'root_session_id': 'a' * 16, 'parent_session_id': 'b' * 16,
                     'reasoning_details': [{'text': '🧪\\"\n' * 5000}], 'index': index}, ensure_ascii=False))
         self.assertTrue(job.activity)
         self.assertLessEqual(len(json.dumps(list(job.activity)).encode()), 2048)
@@ -939,6 +945,8 @@ class DelegationTests(unittest.TestCase):
         event = json.loads(job.activity[-1]['message'])
         self.assertEqual(event['agent_role'], 'qa_engineer')
         self.assertEqual(event['agent_session_id'], 'd'*16)
+        self.assertEqual(event['root_session_id'], 'a' * 16)
+        self.assertEqual(event['parent_session_id'], 'b' * 16)
         self.assertTrue(event['truncated'])
 
 
@@ -990,6 +998,60 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(parent.checkpoint['failed_delegations'],[])
             self.assertEqual(parent.checkpoint['completed_delegations'][task['id']]['outcome']['status'],'completed')
             self.assertEqual(json.loads(parent.checkpoint['messages'][0]['content'])['state'],'TASK_STATE_COMPLETED')
+
+    def test_parent_readiness_retry_keeps_the_child_receipt_and_does_not_repeat_work(self):
+        from popot_agents.orchestrator.main import AgentResumeError
+        failure = AgentResumeError('readiness timeout')
+        failure.diagnostic = {'phase': 'Running', 'reason': 'TaskRunning',
+                              'operation': 'wait_for_chat', 'probe': 'AX ssh timed out'}
+        self.runner.callback = lambda *_: {'answer': 'published once', 'outcome': {
+            'status': 'completed', 'evidence': ['one verified publication'], 'errors': [], 'remaining_work': []}}
+        with self.service.workflow(self.parent, time.monotonic()+5, max_turns=4):
+            with self.service.turn(self.parent, .1): task = self.send()
+            self.wait_task_internal(task['id'])
+            parent = SimpleNamespace(runner=SimpleNamespace(worker_pool=object()),
+                after_turn=Mock(), resume=Mock(side_effect=[failure, None]), restore=Mock(), send=Mock(),
+                get_checkpoint=lambda: {'failed_delegations': [[['backend_engineer', 'implement'],
+                    {'session_id': task['id'], 'pending': True}]]})
+            self.assertTrue(self.service.await_children(self.parent, parent, [], time.monotonic()+3))
+            self.assertEqual(parent.resume.call_count, 2)
+            parent.restore.assert_called_once()
+            parent.send.assert_not_called()
+            checkpoint = parent.restore.call_args.kwargs['checkpoint']
+            self.assertEqual(checkpoint['completed_delegations'][task['id']]['answer'], 'published once')
+            self.assertEqual(len(self.runner.chats), 1)
+
+    def test_parent_readiness_retry_is_bounded_by_failure_kind_deadline_and_cancel(self):
+        from popot_agents.orchestrator.main import AgentResumeError
+        self.runner.callback = lambda *_: {'answer': 'checked', 'outcome': {
+            'status': 'completed', 'evidence': ['receipt'], 'errors': [], 'remaining_work': []}}
+        for case in ('exhausted', 'terminal', 'unknown', 'restore', 'deadline', 'canceled'):
+            with self.subTest(case=case), self.service.workflow(self.parent, time.monotonic()+5, max_turns=4):
+                with self.service.turn(self.parent, .1): task = self.send(message_id=case)
+                self.wait_task_internal(task['id'])
+                failure = AgentResumeError('retained worker')
+                failure.diagnostic = {'phase': 'Failed' if case == 'terminal' else 'Running',
+                    'operation': 'restore_history' if case == 'restore' else 'wait_for_chat',
+                    'probe': 'AX chat socket unavailable' if case == 'unknown' else 'AX ssh timed out'}
+                clock = [100.0]
+                calls = []
+                def resume(**options):
+                    calls.append(options['timeout_seconds'])
+                    if case == 'deadline': clock[0] = 105
+                    if case == 'canceled': self.service.grants[self.parent].run.canceled.set()
+                    raise failure
+                parent = SimpleNamespace(runner=SimpleNamespace(worker_pool=object()),
+                    after_turn=Mock(), resume=Mock(side_effect=resume), restore=Mock(), send=Mock(),
+                    get_checkpoint=lambda: {'failed_delegations': [[['backend_engineer', case],
+                        {'session_id': task['id'], 'pending': True}]]})
+                with patch('ax_local.api.delegation.time.monotonic', side_effect=lambda: clock[0]):
+                    with self.assertRaises((AgentResumeError, TimeoutError)):
+                        self.service.await_children(self.parent, parent, [], 105)
+                self.assertEqual(len(calls), 2 if case == 'exhausted' else 1)
+                self.assertTrue(all(0 < timeout <= 5 for timeout in calls))
+                parent.restore.assert_not_called()
+                parent.send.assert_not_called()
+                self.assertEqual(self.store.get(task['id'])['roleConfig']['_ax_delegation']['outcome']['evidence'], ['receipt'])
 
     def wait_task_internal(self, sid):
         deadline=time.monotonic()+2

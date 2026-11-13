@@ -290,6 +290,61 @@ class AgentReliabilityTests(unittest.TestCase):
             role={'tools': ['read_file']})
         self.assertEqual(state['outcome']['reason'], 'non_retryable_tool_input')
 
+    def test_invalid_revision_batch_can_be_corrected_before_delegating(self):
+        from unittest.mock import Mock
+        revision = '200e93f97d18b7cef2f5c6c3da5c701cb3f23d73'
+        for invalid in (revision.replace('cef', 'ce', 1), 'g' * 40, 123):
+            with self.subTest(invalid=invalid):
+                def batch(value, label):
+                    return {'tool_calls': [{'id': label + str(index), 'function': {
+                        'name': 'delegate_task', 'arguments': json.dumps({'role': 'qa_engineer',
+                            'task': 'Verify component ' + str(index), 'revision': value})}}
+                        for index in range(2)]}
+                delegate = Mock(side_effect=[json.dumps({'sessionId': name * 16,
+                    'role': 'qa_engineer', 'state': 'TASK_STATE_COMPLETED', 'answer': 'Verified',
+                    'outcome': {'status': 'completed', 'revision': revision, 'evidence': ['checked'],
+                                'remaining_work': [], 'errors': []}}) for name in ('a', 'b')])
+                with patch('popot_agents.worker.http_harness._trace') as trace:
+                    _, state, bodies = self.run_sequence([
+                        batch(invalid, 'bad'), batch(revision, 'corrected'), self.result()], delegate=delegate)
+                self.assertEqual(state['outcome']['status'], 'completed')
+                self.assertEqual(len(bodies), 3)
+                self.assertEqual(delegate.call_count, 2)
+                for call in delegate.call_args_list:
+                    self.assertEqual(call.args[0]['_scope_revision'], revision)
+                    self.assertNotIn('revision', call.args[0])
+                errors = [json.loads(message['content']) for message in bodies[1]['messages']
+                          if message['role'] == 'tool']
+                self.assertEqual(len(errors), 2)
+                self.assertTrue(all(item['isError'] and '40' in item['error'] for item in errors))
+                rejected = [call.kwargs for call in trace.call_args_list
+                            if call.args[0] == 'tool_error' and call.kwargs.get('name') == 'delegate_task']
+                self.assertEqual(len(rejected), 2)
+                self.assertTrue(all('revision' in item['arguments']['argument_keys'] for item in rejected))
+
+    def test_invalid_revision_batches_still_block_after_an_opportunity_to_correct(self):
+        from unittest.mock import Mock
+        delegate = Mock(side_effect=AssertionError('Invalid revisions must not execute children'))
+        replies = [{'tool_calls': [{'id': str(round_number) + str(index), 'function': {
+            'name': 'delegate_task', 'arguments': json.dumps({'role': 'qa_engineer',
+                'task': 'Verify component ' + str(index), 'revision': 'c' * 39})}}
+            for index in range(2)]} for round_number in range(2)]
+        _, state, bodies = self.run_sequence(replies, delegate=delegate)
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(state['outcome']['reason'], 'non_retryable_tool_input')
+        delegate.assert_not_called()
+
+    def test_explicitly_non_retryable_input_still_blocks_in_the_first_round(self):
+        from popot_agents.tools import ToolInputError
+        failure = ToolInputError('Structural input is invalid')
+        failure.retryable, failure.code = False, 'invalid_input'
+        call = {'tool_calls': [{'id': 'invalid', 'function': {
+            'name': 'calculate', 'arguments': '{"expression":"1+1"}'}}]}
+        with patch('popot_agents.worker.http_harness.execute_tool', side_effect=failure):
+            _, state, bodies = self.run_sequence([call])
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(state['outcome']['reason'], 'non_retryable_tool_input')
+
     def test_unassigned_publication_owner_prompt_explains_child_assignment(self):
         _, _, bodies = self.run_sequence([self.result()], run_context={
             'publication_owner': None, 'session_id': 'a' * 16})
@@ -578,6 +633,48 @@ class AgentReliabilityTests(unittest.TestCase):
         self.assertEqual(reused['answer'], done['answer'])
         self.assertIn('no new work', reused['notice'])
         self.assertEqual(state['outcome']['status'], 'completed')
+
+    def test_cached_replacement_reconciles_only_an_explicitly_selected_failed_assignment(self):
+        from unittest.mock import Mock
+        old, new, revision = 'a' * 16, 'b' * 16, 'c' * 40
+        task = 'Verify the artifact'
+        for case in ('explicit', 'submission', 'submission_legacy', 'unrelated', 'no_evidence', 'wrong_revision',
+                     'resumable', 'resumable_same_task', 'pending'):
+            with self.subTest(case=case):
+                submission = case.startswith('submission')
+                accepted = case == 'explicit' or submission
+                failure = {'role': 'qa_engineer', 'session_id': None if submission else old,
+                    'pending': case == 'pending', 'resumable': case.startswith('resumable'), 'status': 'incomplete',
+                    'error': 'Earlier attempt did not complete', 'outcome': {}}
+                done = {'sessionId': new, 'role': 'qa_engineer', 'state': 'TASK_STATE_COMPLETED',
+                    'answer': 'Artifact verified', 'outcome': {'status': 'completed',
+                        'revision': 'd' * 40 if case == 'wrong_revision' else revision,
+                        'evidence': [] if case == 'no_evidence' else ['artifact read-back'],
+                        'remaining_work': [], 'errors': []}}
+                state = {'messages': [{'role': 'user', 'content': 'Verify the requested work'}],
+                    'outcome': {'status': 'partial'}, 'completed_delegations': {new: done},
+                    'failed_delegations': [[['qa_engineer', task + '\nTarget revision: ' + revision
+                                            if case == 'submission_legacy' else task], failure]]}
+                arguments = {'role': 'qa_engineer', 'task': task if submission or case == 'resumable_same_task' else 'Reconcile read-back',
+                             'session_id': new, 'revision': revision}
+                if not submission and case not in ('unrelated', 'resumable_same_task'):
+                    arguments['replaces_session_id'] = old
+                call = {'tool_calls': [{'id': 'reconcile', 'function': {'name': 'delegate_task',
+                    'arguments': json.dumps(arguments)}}]}
+                delegate = Mock(side_effect=AssertionError('Cached reconciliation must not execute a child'))
+                _, state, _ = self.run_sequence([call, self.result(
+                    'completed' if accepted else 'partial', remaining=[] if accepted else ['verify remaining work'])],
+                    delegate=delegate, state=state)
+                delegate.assert_not_called()
+                if accepted:
+                    self.assertEqual(state['failed_delegations'], [])
+                    self.assertEqual(state['outcome']['status'], 'completed')
+                    self.assertEqual(state['resolved_delegations'][0]['session_id'], failure['session_id'])
+                    self.assertEqual(state['resolved_delegations'][0]['resolved_by'], new)
+                    self.assertEqual(state['resolved_delegations'][0]['revision'], revision)
+                else:
+                    self.assertEqual(len(state['failed_delegations']), 1)
+                    self.assertNotEqual(state['outcome']['status'], 'completed')
 
     def test_completed_child_result_survives_parent_checkpoint(self):
         from unittest.mock import Mock

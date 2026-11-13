@@ -74,6 +74,7 @@ if ! kubectl --context "kind-${CLUSTER}" get service api -n ate-system >/dev/nul
   (cd "$LOCAL/src/substrate" && KIND_CLUSTER_NAME="$CLUSTER" \
     KUBECTL_CONTEXT="kind-${CLUSTER}" hack/install-ate-kind.sh --deploy-ate-system)
 fi
+python3 "$ROOT/ax_local/cluster/gvisor_runtime.py"
 if [[ -z "$(kubectl --context "kind-${CLUSTER}" get workerpool -n "$ATESPACE" -o name 2>/dev/null || true)" ]]; then
   if [[ "$ATESPACE" != "ate-demo-counter" ]]; then
     echo "Configure a WorkerPool in AX atespace $ATESPACE before bootstrapping" >&2

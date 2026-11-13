@@ -44,14 +44,15 @@ def make_tools(environ: dict | None = None, *, probe: dict | None = None) -> dic
             "role": {"type": "string", "enum": allowed},
             "task": {"type": "string", "description": "Task or corrective instructions with requirements and relevant input data"},
             "session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
-                           "description": "Existing unfinished child sessionId; omit only for a new task"},
+                           "description": "Existing unfinished child sessionId, or retained completed child result to reuse; omit for a new task"},
             "depends_on": {"type":"array","items":{"type":"string","pattern":"^[0-9a-f]{16}$"},
                 "uniqueItems":True,"maxItems":16,
                 "description":"Direct child sessionIds that must complete successfully before this task starts. Omit for independent work."},
             "replaces_session_id": {"type": "string", "pattern": "^[0-9a-f]{16}$",
                 "description": "Failed non-resumable child being replaced for the same subtask. "
                                "Runtime carries its prior result and resolves that failure on success. "
-                               "Never combine with session_id; resumable children must be continued."}},
+                               "Combine with session_id only to reuse a retained completed replacement. "
+                               "Resumable children must be continued."}},
             "required": ["role", "task"], "additionalProperties": False}}}
     poll_interval = float(environ.get("AX_DELEGATION_POLL_SECONDS", "0.5"))
 

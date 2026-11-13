@@ -417,6 +417,39 @@ class OperatorInspectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'object'):
             self.ops.inspect('pods', [])
 
+    def test_pod_filter_narrows_kubernetes_response_before_the_size_limit(self):
+        namespace = self.ops.namespaces[0]
+        for kind, selector in (('pods', 'metadata.name=ax-worker'),
+                               ('events', 'involvedObject.name=ax-worker')):
+            with self.subTest(kind=kind):
+                row = ({'metadata': {'name': 'ax-worker'}, 'status': {'phase': 'Running'},
+                        'spec': {'containers': []}} if kind == 'pods' else
+                       {'reason': 'BackOff', 'involvedObject': {'name': 'ax-worker'}})
+                def kubectl(command, **kwargs):
+                    output = (json.dumps({'items': [row]}) if '--field-selector=' + selector in command
+                              else 'x' * (512 * 1024 + 1))
+                    return SimpleNamespace(returncode=0, stdout=output)
+                with patch('ax_local.api.project_operator.subprocess.run', side_effect=kubectl):
+                    result = self.ops.inspect(kind, {'namespace': namespace, 'pod': 'ax-worker'})
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]['pod' if kind == 'pods' else 'object'], 'ax-worker')
+
+    def test_pod_filters_reject_invalid_names_before_kubernetes_access(self):
+        with patch.object(self.ops, '_kube', return_value='{"items": []}') as kube:
+            for kind in ('pods', 'events'):
+                for pod in ('../escape', '--all-namespaces', 123):
+                    with self.subTest(kind=kind, pod=pod), self.assertRaises(ValueError):
+                        self.ops.inspect(kind, {'pod': pod})
+            kube.assert_not_called()
+
+    def test_log_byte_limit_prevents_large_lines_from_exhausting_the_response(self):
+        def kubectl(command, **kwargs):
+            size = 8192 if '--limit-bytes=8192' in command else 512 * 1024 + 1
+            return SimpleNamespace(returncode=0, stdout='x' * size)
+        with patch('ax_local.api.project_operator.subprocess.run', side_effect=kubectl):
+            result = self.ops.inspect('logs', {'pod': 'ax-worker', 'container': 'agent'})
+        self.assertEqual(len(result['logs'].encode()), 8192)
+
     def test_metrics_models_memory_and_sessions_use_only_their_bounded_read_routes(self):
         with patch.object(self.ops, '_proxy', return_value={'result': 'ok'}) as proxy:
             self.ops.inspect('metrics', {'query': 'up'})

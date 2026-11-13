@@ -17,6 +17,7 @@ if [[ ! -f "$IMAGE_FILE" ]]; then
   echo "AX local cluster is not bootstrapped; run ax_local/bootstrap.sh first" >&2
   exit 1
 fi
+python3 "$ROOT/ax_local/cluster/gvisor_runtime.py"
 python3 "$ROOT/ax_local/cluster/worker_health.py"
 bash "$ROOT/ax_local/cluster/controller_tools.sh"
 

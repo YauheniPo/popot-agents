@@ -102,13 +102,33 @@ class WorkflowStabilityTests(unittest.TestCase):
         failure = AgentResumeError('private transport detail')
         failure.diagnostic = {'task': 'popot-chat-' + 'a' * 16,
             'phase': 'Failed', 'reason': 'ActorSuspendFailed', 'operation': 'confirm_suspension',
+            'probe': 'AX ssh timed out',
             'private': 'must not be persisted'}
         _, response, _ = workflows.WorkflowTests().run_workflow([failure], allow_error=True)
         diagnostic = response['outcome']['failure']['diagnostic']
         self.assertEqual(diagnostic['reason'], 'ActorSuspendFailed')
         self.assertEqual(diagnostic['operation'], 'confirm_suspension')
+        self.assertEqual(diagnostic['probe'], 'AX ssh timed out')
         self.assertNotIn('private', diagnostic)
         self.assertNotIn('private transport detail', str(response))
+
+    def test_root_ssh_interruption_retains_the_redacted_error_tail(self):
+        import os
+        import subprocess
+        from unittest.mock import patch
+        from ax_local.api.ax_runner import AxCommandError
+        from tests import test_workflow as workflows
+        secret = 'fixture-root-transport-secret'
+        with patch.dict(os.environ, {'MODEL_API_KEY': secret}):
+            failure = AxCommandError('ssh', subprocess.CompletedProcess([], 1, '',
+                'x' * 3000 + '\nconnection reset; token=' + secret))
+            _, response, _ = workflows.WorkflowTests().run_workflow([failure], allow_error=True)
+        diagnostic = response['outcome']['failure']['diagnostic']
+        self.assertEqual(diagnostic['exit_code'], 1)
+        self.assertIn('connection reset', diagnostic['stderr'])
+        self.assertLessEqual(len(diagnostic['stderr']), 2000)
+        self.assertNotIn(secret, json.dumps(response))
+        self.assertEqual(response['outcome']['reason'], 'workflow_execution_uncertain')
 
     def test_planner_accepts_attributed_child_pr_readback_without_own_git_tools(self):
         helper = reliability.AgentReliabilityTests()

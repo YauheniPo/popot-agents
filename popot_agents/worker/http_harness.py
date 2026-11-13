@@ -20,7 +20,8 @@ from popot_agents.skills import prepare_role_config
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env, export_artifacts, read_repository_context
 from popot_agents.artifacts import ArtifactError, MAX_ARTIFACTS, validate_artifacts
 from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks
-from popot_agents.child_results import ChildResults
+from popot_agents.child_results import ChildResults, budget_recovery_allowed
+from popot_agents.workflow_config import role_policy
 from .context import compact_tool_results
 from . import mcp_client
 from .delegation_policy import (available_roles, delegation_instructions,
@@ -28,7 +29,7 @@ from .delegation_policy import (available_roles, delegation_instructions,
 from .verification import (observed_revision, acceptance_revision, requested_pull_request,
                            verified_roles, latest_verification, unresolved_findings, verification_failed)
 from .turn_memory import TurnMemory, parse_summary
-from .final_result import evidence_transcript, parse_result, retained_receipts
+from .final_result import evidence_transcript, parse_result, retained_receipts, without_format_repairs
 from .review_progress import ReviewProgress, NAME as REVIEW_CHECKPOINT, SCHEMA as REVIEW_SCHEMA
 
 
@@ -276,6 +277,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if previous_answer:
             user_context.append(previous_answer)
     run_id = (run_context or {}).get('run_id')
+    recovery_limit = role_policy(role_config, stored=True)['max_child_recoveries']
     resuming = bool(_checkpoint_matches_run(state, run_context) and
                     state.get('outcome', {}).get('status') in {'partial', 'blocked', 'failed'})
     included_intervention_ids = set(state.get('included_intervention_ids', [])) if resuming else set()
@@ -285,7 +287,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if not any(m.get('role') == 'user' and m.get('content') == text for m in user_context):
             user_context.append({'role': 'user', 'content': text})
     if resuming:
-        messages = [*state['messages'], messages[-1]]
+        messages = [*without_format_repairs(state['messages']), messages[-1]]
     extra_tools = dict(extra_tools or {})
     if 'delegate_task' in extra_tools:
         # This scope controls the HTTP parent's lifecycle, not the child's task API.
@@ -379,7 +381,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     if 'cognee' in mcp_servers:
         messages.insert(0, {'role': 'system', 'content':
             render_prompt('memory/lifecycle') +
-            (memory.dataset if memory.enabled else
+            (memory.dataset if memory.dataset else
              render_prompt('memory/unknown_project'))})
     recall_budget = remaining_or_none()
     context = (memory.context(min(RUNTIME["timeouts"]["memory_recall_seconds"], recall_budget))
@@ -418,6 +420,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
     forced_final = False
     model_failure = None
     final_validation_error = None
+    format_error = None
     invalid_results = 0
     input_errors = {}
     structural_blocker = None
@@ -524,14 +527,17 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 
     def save_result(answer, status, reason, report=None):
         claimed_completed = status == 'completed'
-        revision = observed_revision(report, tool_evidence,
-            (run_context or {}).get('target_revision') if role_config.get('name',role_config.get('_ax_role')) in {'code_reviewer','qa_engineer'} else None)
-        pull_request = requested_pull_request(user_context)
-        target = acceptance_revision(list(completed_delegations.values()), tool_evidence, pull_request)
         role_name = role_config.get('name', role_config.get('_ax_role'))
         children = list(completed_delegations.values())
         implementation = role_name in {'backend_engineer', 'frontend_engineer'} or any(
             child.get('role') in {'backend_engineer', 'frontend_engineer'} for child in children)
+        pinned_revision = ((run_context or {}).get('target_revision')
+            if role_name in {'code_reviewer', 'qa_engineer'} and not implementation else None)
+        revision = observed_revision(report, tool_evidence, pinned_revision)
+        pull_request = requested_pull_request(user_context)
+        # A scoped assessment stays bound to its assignment when the PR moves.
+        # The verification owner still requires review and QA of the current head.
+        target = pinned_revision or acceptance_revision(children, tool_evidence, pull_request)
         findings = list((report or {}).get('findings', []))
         if owns_verification:
             for child in latest_verification(children, target):
@@ -574,7 +580,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 'or get_file_contents with a loaded repo:// resource at the full commit SHA. '
                 'Printing REV from Python does not preserve structured PR metadata. '
                 'Do not repeat completed writes.']}
-        if status == 'completed' and target and (report or {}).get('revision') not in (None,target):
+        if status == 'completed' and not pinned_revision and target and (report or {}).get('revision') not in (None,target):
             status, reason = 'partial','acceptance_revision_mismatch'
             report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
                       ['Final acceptance must match revision '+target]}
@@ -615,11 +621,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                          'read-only tool or delegate one read-only PR-head check to a specialist. Return the '
                          'observed full SHA with the actual structured tool result, not another summary. '
                          'Reuse matching review and QA; do not repeat completed PR writes.']}
-        if status == 'completed' and (run_context or {}).get('target_revision') and role_config.get('name',role_config.get('_ax_role')) in {'code_reviewer','qa_engineer'}:
-            if revision != run_context['target_revision']:
+        if status == 'completed' and pinned_revision:
+            if revision != pinned_revision:
                 status, reason = 'partial','verification_revision_missing'
                 report = {**(report or {}),'remaining_work':(report or {}).get('remaining_work',[]) +
-                    ['Observe and verify the requested revision ' + run_context['target_revision']]}
+                    ['Observe and verify the requested revision ' + pinned_revision]}
         outcome = {'status': status, 'reason': reason,
             **({key: list(dict.fromkeys(item.strip() for item in report[key]
                     if isinstance(item, str) and item.strip()))
@@ -716,12 +722,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 answer = (answer.strip() + '\n\n' if answer else '') + ('Retained evidence '
                     '(not a completion claim):\n' + '\n'.join(receipts))
         recoverable = [value for value in failed_delegations.values()
-            if value.get('resumable') and value.get('outcome', {}).get('reason') == 'workflow_turn_limit'
-            and child_recoveries.get(value.get('session_id'), 0) < 1]
+            if budget_recovery_allowed(value, child_recoveries.get(value.get('session_id'), 0), recovery_limit)]
         blocked_child = any(value not in recoverable and (value.get('status') == 'blocked' or
                             value.get('status') == 'failed' and not value.get('resumable')
                             ) for value in failed_delegations.values())
-        incomplete_child = failed_delegations and not forced_final and not model_failure
+        incomplete_child = bool(failed_delegations)
         if failed_delegations:
             # Full child answers stay in the checkpoint/tool history. Do not recursively
             # copy nested transcripts into the user-facing answer at every parent level.
@@ -758,11 +763,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         for value in recoverable:
             report['remaining_work'].append('Resume the existing ' + value['role'] +
                 ' child with session_id=' + value['session_id'] +
-                ' once: verify existing effects and finish its concrete remaining deliverables; do not repeat writes.')
+                ': verify existing effects and finish its concrete remaining deliverables; do not repeat writes. '
+                'Further budget recovery requires new tool-observed checks and is limited to '
+                + str(recovery_limit) + ' per child.')
         status = ('Partial result: a delegated task is blocked; resolve its reported precondition.'
                   if blocked_child else
                   'Partial result: the model returned an invalid final result; inspect the saved evidence.'
-                  if invalid_results else
+                  if final_validation_error else
                   'Partial result: the model request failed; task completeness is unverified.'
                   if model_failure else
                   'Partial result: a delegated task is incomplete. Inspect its evidence before retrying.'
@@ -773,7 +780,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         reason = 'work_budget_exhausted'
         for flag, candidate in ((blocked_child, 'delegated_task_blocked'),
                                 (recoverable, 'child_recovery_required'),
-                                (invalid_results, 'invalid_final_result'),
+                                (final_validation_error, 'invalid_final_result'),
                                 (model_failure, 'model_request_failed'),
                                 (incomplete_child, 'delegated_task_incomplete')):
             if flag:
@@ -804,8 +811,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         if final:
             # End the tool conversation. Some providers keep emitting calls from
             # its history even with tool_choice=none; retain that history as data.
-            request_messages = [{'role': 'system', 'content':
-                render_prompt('reporting/final', result_contract=result_contract if state is not None else "")},
+            final_instructions = render_prompt('reporting/final',
+                result_contract=result_contract if state is not None else "")
+            if invalid_results:
+                final_instructions = render_prompt('reporting/repair', reason=format_error,
+                    result_contract='') + '\n\n' + final_instructions
+            request_messages = [{'role': 'system', 'content': final_instructions},
                 {'role': 'user', 'content': json.dumps(
                     evidence_transcript(messages, context=user_context), ensure_ascii=False)}]
         if {'read_file', 'bash'} & set(allowed):
@@ -895,6 +906,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 _trace("assistant_message", round=round_number, content=content)
             messages.append({'role': 'assistant', **message})
             requested_wait = None
+            round_input_errors = set()
             for tool_call in calls:
                 if remaining_or_none() is None:
                     _trace('turn_partial', reason='turn_deadline_exhausted',
@@ -964,17 +976,22 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 raise ToolInputError('delegate_task requires an available specialist role')
                             if not isinstance(arguments.get('task'), str) or not arguments['task'].strip():
                                 raise ToolInputError('delegate_task requires a nonempty task')
-                            revision = arguments.pop('revision', None)
+                            assignment = arguments['task'].strip()
+                            revision = arguments.get('revision')
                             if revision is not None:
                                 if not isinstance(revision, str) or len(revision) != 40 or any(c not in '0123456789abcdefABCDEF' for c in revision):
-                                    raise ToolInputError('revision must be a full commit SHA')
+                                    raise ToolInputError('revision must be a full commit SHA (40 hexadecimal characters). '
+                                                         'Copy the exact value from git rev-parse HEAD or PR metadata head.sha.')
                                 arguments['task'] += '\nTarget revision: ' + revision.lower()
+                            arguments.pop('revision', None)
                             session_id = arguments.get('session_id')
                             recovering_child = next((value for value in failed_delegations.values()
                                 if value.get('session_id') == session_id and value.get('role') == arguments['role']
                                 and value.get('outcome', {}).get('reason') == 'workflow_turn_limit'), None) if session_id else None
-                            if recovering_child and child_recoveries.get(session_id, 0) >= 1:
-                                raise ToolInputError('This child already used its one budget recovery; reconcile remaining work')
+                            if recovering_child and not budget_recovery_allowed(
+                                    recovering_child, child_recoveries.get(session_id, 0), recovery_limit):
+                                raise ToolInputError('Child budget recovery requires new tool-observed checks '
+                                    'and permits at most ' + str(recovery_limit) + ' recoveries; reconcile remaining work')
                             completed_child = (completed_delegations.get(session_id)
                                                if isinstance(session_id, str) else None)
                             if completed_child and completed_child['role'] != arguments['role']:
@@ -984,7 +1001,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             # Only a successful retry of the same role AND task
                             # can resolve its failure. Another job for that role
                             # (even with a reused model call ID) proves nothing.
-                            delegation_key = (arguments['role'], arguments['task'].strip())
+                            delegation_key = (arguments['role'], assignment)
+                            legacy_key = (arguments['role'], arguments['task'].strip())
+                            if delegation_key not in failed_delegations and legacy_key in failed_delegations:
+                                delegation_key = legacy_key
                             running = failed_delegations.get(delegation_key)
                             if running and running.get('pending'):
                                 delegation_key = None
@@ -1005,8 +1025,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 replaced = next((key for key, value in failed_delegations.items()
                                     if key[0] == arguments['role'] and value.get('session_id') == replacement), None)
                                 if (not isinstance(replacement, str) or replaced is None
-                                        or arguments.get('session_id')
-                                        or failed_delegations[replaced].get('resumable')):
+                                        or (arguments.get('session_id') and not completed_child)
+                                        or failed_delegations[replaced].get('resumable')
+                                        or failed_delegations[replaced].get('pending')):
                                     delegation_key = None
                                     raise ToolInputError('Replacement requires a known non-resumable failed child '
                                                          'of the same role. Continue resumable work with session_id.')
@@ -1046,7 +1067,13 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             if revision is not None:
                                 arguments['_scope_revision'] = revision.lower()
                         if completed_child:
-                            delegation_key = None
+                            prior = failed_delegations.get(delegation_key)
+                            if prior and prior.get('resumable') and prior.get('session_id') != session_id:
+                                delegation_key = None
+                                raise ToolInputError('Continue the resumable child with its existing session_id; '
+                                                     'another completed session cannot replace it.')
+                            if prior is None:
+                                delegation_key = None
                             output = json.dumps({**completed_child, 'continuation_skipped': True,
                                 'notice': 'This session already completed; no new work was executed. '
                                           'This is its previous verified result. For a new requirement or '
@@ -1087,7 +1114,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                                      'and side=LEFT or RIGHT. Verify the position against the actual diff.')
                         if selected['server'] == 'cognee':
                             if not memory.enabled:
-                                raise ToolInputError('Memory needs one repository URL or [project: slug].')
+                                raise mcp_client.MCPToolError(
+                                    'Project memory is unavailable; continue using current sources and tools.'
+                                    if memory.dataset else
+                                    'Project memory is skipped without an unambiguous project; '
+                                    'continue using current sources and tools.')
                             if arguments.get('dataset_name', memory.dataset) != memory.dataset:
                                 raise ToolInputError('Memory is scoped to this task project: ' + memory.dataset)
                             arguments['dataset_name'] = memory.dataset
@@ -1123,7 +1154,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                     }, ensure_ascii=False)
                     if isinstance(exc, ToolInputError):
                         fingerprint = (name, type(exc).__name__, str(exc)[:400])
-                        input_errors[fingerprint] = input_errors.get(fingerprint,0)+1
+                        if fingerprint not in round_input_errors:
+                            input_errors[fingerprint] = input_errors.get(fingerprint,0)+1
+                            round_input_errors.add(fingerprint)
                         if getattr(exc,'retryable',None) is False or input_errors[fingerprint] >= RUNTIME['workflow']['max_no_progress']:
                             structural_blocker = str(exc)
                 except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
@@ -1186,6 +1219,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             except ValueError as exc:
                 invalid_results += 1
                 reason = str(exc)
+                format_error = reason
                 _trace('final_result_invalid', round=round_number, attempt=invalid_results,
                        reason=reason, content_chars=len(answer) if isinstance(answer, str) else 0,
                        finish_reason=finish_reason if finish_reason in
@@ -1195,8 +1229,6 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 final_validation_error = 'model returned an invalid final result: ' + reason
                 if invalid_results >= 2 or deadline - time.monotonic() <= 0:
                     return partial_answer()
-                messages.append({'role': 'system', 'content':
-                    render_prompt('reporting/repair', reason=reason, result_contract=result_contract)})
                 continue
             if invalid_results:
                 final_validation_error = None

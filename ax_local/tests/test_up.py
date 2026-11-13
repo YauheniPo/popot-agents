@@ -88,6 +88,10 @@ class UpScriptTests(unittest.TestCase):
             "import os\nfrom pathlib import Path\n"
             "with Path(os.environ['CALLS']).open('a') as f: f.write('worker-health\\n')\n"
             "raise SystemExit(int(os.environ.get('HEALTH_FAIL', '0')))\n")
+        (cluster / 'gvisor_runtime.py').write_text(
+            "import os\nfrom pathlib import Path\n"
+            "with Path(os.environ['CALLS']).open('a') as f: f.write('gvisor-runtime\\n')\n"
+            "raise SystemExit(int(os.environ.get('GVISOR_FAIL', '0')))\n")
         (cluster / "substrate_cleanup.py").write_text(
             "import os, sys\nfrom pathlib import Path\n"
             "assert sys.argv[1:] == ['--apply']\n"
@@ -264,6 +268,7 @@ class UpScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls.read_text().splitlines()
         self.assertIn("worker-health", calls)
+        self.assertLess(calls.index('gvisor-runtime'), calls.index('worker-health'))
         self.assertIn("up --build --force-recreate -d --wait --wait-timeout 300 api mcp-server", calls[-4])
         self.assertIn('compose.omniroute.yaml --profile omniroute', calls[-4])
         self.assertEqual(calls[-3:], ['grafana-forward-check', 'deployment-cleanup', 'resource-monitoring'])
@@ -279,7 +284,14 @@ class UpScriptTests(unittest.TestCase):
         result = subprocess.run(["bash", str(self.ax / "rebuild-worker.sh")], env=self.env,
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.calls.read_text().splitlines(), ["worker-health"])
+        self.assertEqual(self.calls.read_text().splitlines(), ['gvisor-runtime', "worker-health"])
+        self.env.pop('HEALTH_FAIL')
+        self.calls.write_text('')
+        self.env['GVISOR_FAIL'] = '1'
+        result = subprocess.run(['bash', str(self.ax / 'rebuild-worker.sh')], env=self.env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls.read_text().splitlines(), ['gvisor-runtime'])
 
     def test_cleanup_failure_is_visible_as_failed_up(self):
         self.prepare_local()

@@ -8,6 +8,56 @@ from unittest.mock import patch
 
 
 class PromptConfigTests(unittest.TestCase):
+    def test_cached_child_reconciliation_requires_an_explicit_assignment_link(self):
+        from popot_agents.prompts import render_prompt
+        instructions = render_prompt('delegation/instructions', role='planner', review_routing='', description='')
+        self.assertIn('completed replacement', instructions)
+        self.assertIn('replaces_session_id', instructions)
+        self.assertIn('exact original task', instructions)
+        self.assertIn('Never start a replacement for a resumable child', instructions)
+
+    def test_corrections_are_not_forbidden_by_the_expired_initial_window(self):
+        from popot_agents.prompts import render_prompt
+        budget = render_prompt('workflow/budget', budget='{}')
+        for text in ('implementation_limited=false', 'zero', 'required corrections',
+                     'workflow_seconds_remaining', 'hard deadline'):
+            self.assertIn(text, budget)
+
+    def test_sonar_pr_binding_uses_pr_specific_revision_instead_of_main_analyses(self):
+        from popot_agents.prompts import render_prompt
+        inspection = render_prompt('tools/inspection')
+        for text in ('project_pull_requests/list', 'commit.sha', 'analysisDate',
+                     'project_analyses', 'does not prove'):
+            self.assertIn(text, inspection)
+
+    def test_exported_reports_cannot_claim_a_newer_revision_than_the_assessment(self):
+        from popot_agents.prompts import render_prompt
+        contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
+                                 artifact_byte_limit=24000)
+        for text in ('report artifacts', 'structured revision', 'superseded', 'PR metadata'):
+            self.assertIn(text, contract)
+
+    def test_missing_prerequisites_require_revision_bound_ci_and_test_guard_evidence(self):
+        from popot_agents.prompts import render_prompt
+        inspection = render_prompt('tools/inspection')
+        coordinator = render_prompt('workflow/coordinator')
+        for text in ('exact revision', 'CI services', 'test guards', 'opt-in',
+                     'already configured', 'new external service'):
+            self.assertIn(text, inspection)
+        for text in ('missing prerequisite', 'observed failure', 'configured CI',
+                     'routine', 'uncovered lines', 'number of tests'):
+            self.assertIn(text, coordinator)
+
+    def test_review_assignment_does_not_follow_a_moving_pr_head_implicitly(self):
+        from popot_agents.prompts import render_prompt
+        review = render_prompt('review/verification')
+        coordinator = render_prompt('workflow/coordinator')
+        for text in ('assigned revision', 'PR head moves', 'completed', 'current head'):
+            self.assertIn(text, review)
+        for text in ('revision=', 'new revision', 'verification_status=failed',
+                     'completed assessment', 'implementation owner'):
+            self.assertIn(text, coordinator)
+
     def test_qa_prepares_project_dependencies_and_preserves_node_skip_evidence(self):
         from popot_agents.prompts import render_prompt
         qa = render_prompt('delegation/qa')

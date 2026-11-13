@@ -17,9 +17,11 @@ POLICY = {**execution.POLICY, 'total_seconds': 3600, 'turn_seconds': 900,
           'verification_reserve_seconds': 900}
 
 
-def test_runtime_allocates_fifteen_minutes_within_the_existing_hour():
-    assert RUNTIME['workflow']['total_seconds'] == 3600
-    assert RUNTIME['workflow']['verification_reserve_seconds'] == 900
+def test_runtime_allocates_thirty_minutes_within_two_hours_and_eight_turns():
+    assert RUNTIME['workflow']['total_seconds'] == 7200
+    assert RUNTIME['workflow']['max_turns'] == 8
+    assert RUNTIME['workflow']['verification_reserve_seconds'] == 1800
+    assert RUNTIME['workflow']['max_child_recoveries'] == 2
     assert RUNTIME['model']['final_answer_reserve_seconds'] == 120
     assert validate_policy(POLICY) == POLICY
 

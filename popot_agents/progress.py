@@ -34,10 +34,13 @@ class TurnProgress:
         if event in {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer'}:
             return
         action = {'event': redact_text(event)[:160]}
-        for key in ('name', 'model', 'server', 'agent_role', 'agent_session_id', 'error_type',
+        for key in ('name', 'model', 'server', 'agent_role', 'agent_session_id',
+                    'root_session_id', 'parent_session_id', 'error_type',
                     'code', 'stage', 'phase', 'reason'):
             if isinstance(value.get(key), str):
                 action[key] = redact_text(value[key])[:160]
+        if 'parent_session_id' in value and value['parent_session_id'] is None:
+            action['parent_session_id'] = None
         if (event == 'tool_error' and value.get('recoverable') is True
                 and value.get('error_type') in {'ToolInputError', 'MCPToolError'}
                 and isinstance(value.get('error'), str)):
@@ -114,15 +117,20 @@ def is_progress_message(message):
     return isinstance(value, dict) and isinstance(value.get('event'), str) and bool(value['event'])
 
 
-def scoped_progress(role, message, *, session_id=None):
+def scoped_progress(role, message, *, session_id=None, root_session_id=None, parent_session_id=None):
     if not is_progress_message(message):
         return None
     value = json.loads(message)
-    # Preserve the originating role through nested delegation. The harness may
-    # itself use a "role" field, so keep source attribution in a separate field.
-    value.setdefault('agent_role', role)
-    if session_id and value['agent_role'] == role:
-        value.setdefault('agent_session_id', session_id)
+    # Preserve the source and its immediate parent through nested delegation.
+    # The caller supplies the authoritative root for the stream; the harness's
+    # own "role" field stays separate from source attribution.
+    if role is not None:
+        value.setdefault('agent_role', role)
+    if not value.get('agent_session_id') or value['agent_session_id'] == session_id:
+        value['agent_session_id'] = session_id
+        value['parent_session_id'] = parent_session_id
+    value.setdefault('parent_session_id', None)
+    value['root_session_id'] = root_session_id or value.get('root_session_id') or session_id
     return json.dumps(value, ensure_ascii=False)
 
 

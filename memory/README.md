@@ -140,7 +140,10 @@ writes are never retried by that correction.
 
 Recall and capture share the existing turn deadline and have short request
 timeouts. An unavailable memory service, invalid summary or exhausted budget
-does not turn a completed task into a failure. Worker events report
+does not turn a completed task into a failure. Model-driven memory calls also
+degrade to recoverable tool errors when memory is disabled or no project is
+known; repeating these calls does not create a structural task blocker.
+Requests for a different project remain rejected. Worker events report
 `memory_recalled`, `memory_saved`, `memory_skipped`, `memory_recall_failed` and
 `memory_capture_failed`. Recall events and Cognee session tool traces distinguish
 `useful`, `empty`, and `warming_up` outcomes and include the useful chunk count.

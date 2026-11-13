@@ -11,6 +11,19 @@ class FinalResultTests(unittest.TestCase):
     result = staticmethod(helpers.AgentReliabilityTests.result)
     delegate_call = staticmethod(helpers.AgentReliabilityTests.delegate_call)
 
+    def test_repaired_format_does_not_mask_an_unresolved_child_failure(self):
+        state = {'messages': [{'role': 'user', 'content': 'Verify the requested work'}],
+                 'outcome': {'status': 'partial'}, 'failed_delegations': [[
+                     ['qa_engineer', 'Verify the artifact'], {'role': 'qa_engineer', 'session_id': None,
+                     'status': 'incomplete', 'resumable': False, 'pending': False,
+                     'error': 'Submission failed', 'outcome': {}}]]}
+        answer, state, bodies = self.run_sequence([{'content': 'bad JSON'}, self.result()], state=state)
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[-1]['tool_choice'], 'none')
+        self.assertEqual(state['outcome']['reason'], 'delegated_task_incomplete')
+        self.assertNotIn('invalid final result', answer)
+        self.assertEqual(state['outcome']['errors'], ['Submission failed'])
+
     def test_final_evidence_separates_tool_results_from_model_claims(self):
         from popot_agents.worker.final_result import evidence_transcript
         messages = [
@@ -96,6 +109,53 @@ class FinalResultTests(unittest.TestCase):
         self.assertEqual(len(bodies), 2)
         self.assertNotIn('tools', bodies[-1])
 
+    def test_format_repair_is_request_scoped_when_required_verification_remains(self):
+        from popot_agents.prompts import render_prompt
+        partial = self.result('partial', remaining=['Obtain independent QA at the target revision'])
+        _, state, bodies = self.run_sequence([{'content': 'bad JSON'}, partial])
+        repair_prefix = render_prompt('reporting/repair', reason='invalid_json', result_contract='').splitlines()[0]
+        self.assertEqual(bodies[-1]['messages'][0]['content'].splitlines()[0], repair_prefix)
+        self.assertNotIn('tools', bodies[-1])
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertFalse(any(m.get('role') == 'system' and repair_prefix in m.get('content', '')
+                             for m in state['messages']))
+        delegate = Mock(return_value=json.dumps({'sessionId': 'a'*16, 'role': 'qa_engineer',
+            'state': 'TASK_STATE_COMPLETED', 'answer': 'QA assessed', 'outcome': {
+                'status': 'completed', 'evidence': ['QA check'], 'errors': [], 'remaining_work': []}}))
+        _, resumed, requests = self.run_sequence([self.delegate_call(), self.result()], state=state, delegate=delegate)
+        delegate.assert_called_once()
+        self.assertIn('tools', requests[0])
+        self.assertFalse(any(m.get('role') == 'system' and repair_prefix in m.get('content', '')
+                             for m in requests[0]['messages']))
+        self.assertEqual(resumed['outcome']['status'], 'completed')
+
+    def test_legacy_checkpoint_drops_only_runtime_format_repair_directives(self):
+        from popot_agents.prompts import render_prompt
+        repair = render_prompt('reporting/repair', reason='invalid_json', result_contract='OLD CONTRACT')
+        context = {'role': 'system', 'content': 'Keep independent QA and the original deadline'}
+        quoted = {'role': 'user', 'content': repair}
+        state = {'messages': [context, quoted, {'role': 'system', 'content': repair}],
+                 'outcome': {'status': 'partial'}}
+        _, _, bodies = self.run_sequence([self.result('partial', remaining=['QA'])], state=state)
+        messages = bodies[0]['messages']
+        self.assertIn(context, messages)
+        self.assertIn(quoted, messages)
+        self.assertFalse(any(m.get('role') == 'system' and m.get('content') == repair for m in messages),
+                         'Legacy runtime repair directive must not govern a new work turn')
+
+    def test_format_repair_does_not_bypass_missing_independent_verification(self):
+        child = {'sessionId': 'a'*16, 'role': 'backend_engineer', 'outcome': {
+            'status': 'completed', 'revision': 'b'*40, 'evidence': ['implementation observed'],
+            'errors': [], 'remaining_work': []}}
+        state = {'messages': [{'role': 'user', 'content': 'Verify the implementation'}],
+                 'outcome': {'status': 'partial'}, 'completed_delegations': {'a'*16: child}}
+        _, state, bodies = self.run_sequence([{'content': 'bad JSON'}, self.result()], state=state,
+            role={'name': 'planner', '_workflow_coordinator': True, 'tools': []})
+        self.assertEqual(state['outcome']['reason'], 'workflow_validation_missing')
+        self.assertEqual(state['outcome']['status'], 'partial')
+        self.assertIn('code_reviewer, qa_engineer', ' '.join(state['outcome']['remaining_work']))
+        self.assertNotIn('tools', bodies[-1])
+
     def test_invalid_forced_final_also_gets_one_format_repair(self):
         clock = [0]
         def first():
@@ -129,6 +189,52 @@ class FinalResultTests(unittest.TestCase):
         _, state, bodies = self.run_sequence([{'content': '```json\n' + result + '\n```'}])
         self.assertEqual(state['outcome']['status'], 'completed')
         self.assertEqual(len(bodies), 1)
+
+    def test_multiline_report_is_normalized_without_a_model_repair(self):
+        answer = 'Проверено:\n| check | result |\n| tests | PASS |\r\n\tExit 0'
+        report = self.result(answer=answer)['content']
+        report = report.replace('\\n', '\n').replace('\\r', '\r').replace('\\t', '\t')
+        with patch('popot_agents.worker.http_harness._trace') as trace:
+            actual, state, bodies = self.run_sequence([{'content': report}, self.result(answer=answer)])
+        self.assertEqual(actual, answer)
+        self.assertEqual(state['outcome']['status'], 'completed')
+        self.assertEqual(len(bodies), 1, 'Formatting alone must not spend another model request')
+        self.assertFalse(any(c.args[0] == 'final_result_invalid' for c in trace.call_args_list))
+
+    def test_trailing_separators_preserve_report_data_without_a_model_repair(self):
+        from popot_agents.worker.final_result import parse_result
+        report = {'status': 'partial', 'answer': 'Keep ,} and ,] and \\"quoted\\" text',
+                  'evidence': ['stdout: ok'], 'remaining_work': ['QA'], 'errors': [],
+                  'findings': [{'description': 'verify', 'scope': 'in_scope', 'status': 'open'}]}
+        text = json.dumps(report, ensure_ascii=False).replace('"stdout: ok"]', '"stdout: ok",]')
+        text = text.replace('"status": "open"}', '"status": "open",}').removesuffix('}') + ',}'
+        self.assertEqual(parse_result(text), report)
+
+    def test_transport_wrappers_accept_bom_and_crlf_without_extracting_prose(self):
+        from popot_agents.worker.final_result import parse_result
+        report = self.result()['content']
+        for text in ('\ufeff' + report, '```json\r\n' + report + '\r\n```',
+                     '```JSON \n' + report + '\n```'):
+            with self.subTest(text=text[:12]):
+                self.assertEqual(parse_result(text), json.loads(report))
+
+    def test_normalization_does_not_guess_missing_data_or_accept_invalid_schema(self):
+        from popot_agents.worker.final_result import parse_result
+        valid = self.result()['content']
+        for text in (valid[:-1], valid + valid, 'prefix ' + valid, valid + '\nDone',
+                     valid.replace('Result verified', 'broken "quote'),
+                     valid.replace('Result verified', 'bad\\q'),
+                     valid.replace('Result verified', 'bad\x00control'),
+                     valid.replace('"errors": []', '"errors": [,]'),
+                     valid.replace('"errors": []', '"errors": [1,,]'),
+                     valid.replace('"errors": []', '"errors": {,}'),
+                     '{"status":"completed","answer":"text",}',
+                     valid.replace('"errors": []', '"errors": "none"')):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_result(text)
+        truncated = valid.replace('Result verified', 'line\nbreak')
+        with self.assertRaisesRegex(ValueError, 'truncated_result'):
+            parse_result(truncated, 'length')
 
     def test_cloud_format_repair_disables_thinking_without_changing_work_requests(self):
         parameters = {'reasoning': {'enabled': True}}

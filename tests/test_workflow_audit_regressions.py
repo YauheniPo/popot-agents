@@ -16,6 +16,94 @@ from tests.test_workflow_execution import execution, report, SESSION
 REVISION = 'a' * 40
 
 
+@pytest.mark.parametrize('role', ['code_reviewer', 'qa_engineer'])
+@pytest.mark.parametrize('verdict', ['passed', 'failed'])
+def test_pinned_assessment_finishes_when_the_pr_moves_without_certifying_the_new_head(role, verdict):
+    helper = reliability.AgentReliabilityTests()
+    newer = 'b' * 40
+    run_id = 'd' * 32
+    findings = ([{'description': 'new coverage is below the requested target',
+                  'scope': 'in_scope', 'status': 'open'}] if verdict == 'failed' else [])
+    result = {**json.loads(helper.result()['content']), 'revision': REVISION,
+              'verification_status': verdict, 'findings': findings}
+    _, state, _ = helper.run_sequence([{'content': json.dumps(result)}],
+        state={'run_id': run_id, 'outcome': {'status': 'partial'}, 'messages': [{'role': 'user',
+            'content': 'Assess https://github.com/example/repo/pull/57 at the assigned revision'}],
+            'tool_evidence': [
+                {'kind': 'revision', 'source': 'tool_result', 'status': 'observed',
+                 'revision': REVISION, 'revisionSource': 'git_head'},
+                {'kind': 'revision', 'source': 'tool_result', 'status': 'observed',
+                 'revision': newer, 'revisionSource': 'pr_head', 'repository': 'example/repo',
+                 'pullRequest': 57, 'observedAt': '2026-11-09T13:19:10Z'}]},
+        role={'name': role, 'tools': []},
+        run_context={'run_id': run_id, 'target_revision': REVISION,
+                     'authorization': ['Assess https://github.com/example/repo/pull/57']})
+    outcome = state['outcome']
+    assert outcome['status'] == 'completed'
+    assert outcome['revision'] == REVISION
+    assert outcome['verification_status'] == verdict
+    assert outcome['findings'] == findings
+    assert verified_roles([{'role': role, 'outcome': outcome}], newer) == set()
+
+
+def test_pinned_assessment_cannot_substitute_a_different_observed_revision():
+    helper = reliability.AgentReliabilityTests()
+    newer, run_id = 'b' * 40, 'd' * 32
+    result = {**json.loads(helper.result()['content']), 'revision': newer,
+              'verification_status': 'passed', 'findings': []}
+    _, state, _ = helper.run_sequence([{'content': json.dumps(result)}],
+        state={'run_id': run_id, 'outcome': {'status': 'partial'},
+               'messages': [{'role': 'user', 'content': 'Verify the assigned revision'}], 'tool_evidence': [
+            {'kind': 'revision', 'source': 'tool_result', 'status': 'observed', 'revision': newer}]},
+        role={'name': 'code_reviewer', 'tools': []},
+        run_context={'run_id': run_id, 'target_revision': REVISION})
+    assert state['outcome']['status'] == 'partial'
+    assert state['outcome']['reason'] == 'verification_revision_missing'
+
+
+def test_reviewer_owning_implementation_accepts_the_corrected_revision():
+    helper = reliability.AgentReliabilityTests()
+    newer, run_id = 'b' * 40, 'd' * 32
+    children = {role: {'role': role, 'outcome': {'status': 'completed',
+        'revision': newer, 'verification_status': 'passed', 'findings': [], 'evidence': ['checked']}}
+        for role in ('backend_engineer', 'qa_engineer')}
+    result = {**json.loads(helper.result()['content']), 'revision': newer,
+              'verification_status': 'passed', 'findings': []}
+    _, state, _ = helper.run_sequence([{'content': json.dumps(result)}],
+        state={'run_id': run_id, 'outcome': {'status': 'partial'},
+               'messages': [{'role': 'user', 'content': 'Fix and review the implementation'}],
+               'completed_delegations': children,
+               'tool_evidence': [{'kind': 'revision', 'source': 'tool_result',
+                                  'status': 'observed', 'revision': newer}]},
+        role={'name': 'code_reviewer', '_workflow_coordinator': True, 'tools': []},
+        run_context={'run_id': run_id, 'target_revision': REVISION})
+    assert state['outcome']['status'] == 'completed'
+    assert state['outcome']['revision'] == newer
+
+
+def test_parent_requires_fresh_review_instead_of_accepting_a_pinned_old_assessment():
+    helper = reliability.AgentReliabilityTests()
+    newer = 'b' * 40
+    children = {role: {'role': role, 'outcome': {'status': 'completed',
+        'revision': newer, 'verification_status': 'passed', 'findings': [], 'evidence': ['checked']}}
+        for role in ('backend_engineer', 'qa_engineer')}
+    children['code_reviewer'] = {'role': 'code_reviewer', 'outcome': {
+        'status': 'completed', 'revision': REVISION, 'verification_status': 'passed',
+        'findings': [], 'evidence': ['reviewed the assigned old revision']}}
+    result = {**json.loads(helper.result()['content']), 'revision': newer}
+    _, state, _ = helper.run_sequence([{'content': json.dumps(result)}],
+        state={'outcome': {'status': 'partial'}, 'messages': [
+            {'role': 'user', 'content': 'Fix and verify the implementation'}],
+            'completed_delegations': children},
+        role={'name': 'planner', '_workflow_coordinator': True, 'tools': []})
+    assert state['outcome']['status'] == 'partial'
+    assert state['outcome']['reason'] == 'workflow_validation_missing'
+    assert state['outcome']['revision'] == newer
+    remaining = ' '.join(state['outcome']['remaining_work'])
+    assert 'code_reviewer' in remaining
+    assert 'qa_engineer' not in remaining
+
+
 def test_native_loaded_file_completes_implementation_readback_without_repeating_requests():
     helper = reliability.AgentReliabilityTests()
     name = 'mcp__github__get_file_contents'

@@ -1,0 +1,30 @@
+{
+  "apiVersion": "ate.dev/v1alpha1",
+  "kind": "SandboxConfig",
+  "metadata": {
+    "name": "gvisor-default",
+    "annotations": {
+      "popot.dev/gvisor-commit": "93dbdc19004bd65e526b0f100cefc1f390e3c2bc",
+      "popot.dev/gvisor-version": "release-20261102.0-162-g93dbdc19004b",
+      "popot.dev/gvisor-pr": "17176"
+    }
+  },
+  "spec": {
+    "assets": {
+      "amd64": {
+        "gvisor": {
+          "sha256": "d547d81401461fd1c679c5c4fa0a6c2b8ef7dc3c22ce23c9e25dcc4c69cfd06f",
+          "url": "gs://gvisor/releases/nightly/2026-09-02/x86_64/gvisor.tar.zstd"
+        }
+      },
+      "arm64": {
+        "gvisor": {
+          "url": "gs://ate-snapshots/popot-runtime/gvisor/93dbdc19004bd65e526b0f100cefc1f390e3c2bc/arm64/44374e3d7357eb5fcbcf226796f7c94351c28542e7b4dd8fc3dac680ad976183/gvisor.tar.zstd",
+          "sha256": "44374e3d7357eb5fcbcf226796f7c94351c28542e7b4dd8fc3dac680ad976183"
+        }
+      }
+    },
+    "pauseImage": "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4",
+    "sandboxClass": "gvisor"
+  }
+}
