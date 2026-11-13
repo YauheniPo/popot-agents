@@ -1,5 +1,6 @@
 """Pinned runtime provisioning must verify storage before changing the cluster."""
 
+import base64
 import copy
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -13,6 +14,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 ARCHIVE = b'fixture release archive'
+FIXTURE_SECRET = 'fixture-secret'
 
 
 class GvisorRuntimeTests(unittest.TestCase):
@@ -74,7 +76,7 @@ class GvisorRuntimeTests(unittest.TestCase):
                     {'name': 'RUSTFS_SECRET_KEY', 'valueFrom': {
                         'secretKeyRef': {'name': 'object-store', 'key': 'password'}}}]}]}}}}
             elif 'secret' in args:
-                value = {'data': {'password': 'Zml4dHVyZS1zZWNyZXQ='}}
+                value = {'data': {'password': base64.b64encode(FIXTURE_SECRET.encode()).decode()}}
             else:
                 value = {'spec': {'clusterIP': '10.96.1.2'}}
             return subprocess.CompletedProcess(args, 0, json.dumps(value), '')
@@ -87,8 +89,8 @@ class GvisorRuntimeTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, '', '')
         self.assertIn('--network', args)
         self.assertIn('container:popot-ax-control-plane', args)
-        self.assertNotIn('fixture-secret', ' '.join(args))
-        self.assertEqual(kwargs['env']['AWS_SECRET_ACCESS_KEY'], 'fixture-secret')
+        self.assertNotIn(FIXTURE_SECRET, ' '.join(args))
+        self.assertEqual(kwargs['env']['AWS_SECRET_ACCESS_KEY'], FIXTURE_SECRET)
         if 's3api' in args:
             return subprocess.CompletedProcess(args, 0, None, b'')
         cp = args.index('cp')

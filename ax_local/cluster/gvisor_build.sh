@@ -8,7 +8,10 @@ git -C /src init -q
 git -C /src remote add origin https://github.com/google/gvisor.git
 git -C /src fetch -q --depth=1 origin "$COMMIT"
 git -C /src checkout -q --detach FETCH_HEAD
-test "$(git -C /src rev-parse HEAD)" = "$COMMIT"
+if [[ "$(git -C /src rev-parse HEAD)" != "$COMMIT" ]]; then
+  echo "checked out commit does not match the pinned commit" >&2
+  exit 1
+fi
 
 # Pin the version stamp too: a shallow checkout has no release tags.
 printf '#!/bin/sh\nprintf "STABLE_VERSION %%s\\n" "%s"\n' "$VERSION" > /build-home/workspace-status.sh

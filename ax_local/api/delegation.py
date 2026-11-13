@@ -33,6 +33,8 @@ from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunErro
 from popot_agents.progress import emit_progress, observe_progress, scoped_progress, forward_progress
 
 ACTIVE = {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
+TRANSIENT_RESUME_PROBES = {'AX ssh failed', 'AX ssh timed out',
+                          'AX ssh connection failed', 'AX ssh OS error'}
 
 
 def _revision_observations(saved):
@@ -358,26 +360,37 @@ class DelegationService:
                 [RUNTIME['timeouts']['mcp_discovery_seconds']])) * 1.5 + 1
                 for alias in config.get('mcpServers', {}) if alias != 'cognee')
 
+    @staticmethod
+    def _is_transient_resume_probe(attempt, diagnostic):
+        """Only a failed readiness probe may be retried; never a real send."""
+        return (not attempt
+                and diagnostic.get('operation') == 'wait_for_chat'
+                and diagnostic.get('phase') == 'Running'
+                and diagnostic.get('probe') in TRANSIENT_RESUME_PROBES)
+
     def _resume_parent(self, parent_id, worker, deadline):
-        for attempt in range(2):
-            job = self.jobs.get(parent_id)
-            grant = self.grants.get(parent_id)
-            run = job.run if job else grant.run if grant else None
-            remaining = deadline - time.monotonic()
-            if self.closed or remaining <= 0 or run and run.canceled.is_set() or job and job.canceled.is_set():
-                raise TimeoutError('workflow canceled or deadline exceeded before parent resume')
-            try:
-                worker.resume(timeout_seconds=remaining)
-                return
-            except AgentResumeError as exc:
-                diagnostic = getattr(exc, 'diagnostic', {})
-                if attempt or diagnostic.get('operation') != 'wait_for_chat' or diagnostic.get('phase') != 'Running' \
-                        or diagnostic.get('probe') not in {'AX ssh failed', 'AX ssh timed out',
-                            'AX ssh connection failed', 'AX ssh OS error'}:
-                    raise
-                # Readiness failed before a model turn. Reuse the same Task and
-                # lease; never retry send(), restore() or a child's external work.
-                emit_progress('snapshot_resume_retry', attempt=2)
+        self._resume_parent_attempt(parent_id, worker, deadline, attempt=0)
+
+    def _resume_parent_attempt(self, parent_id, worker, deadline, attempt):
+        job = self.jobs.get(parent_id)
+        grant = self.grants.get(parent_id)
+        owner = job or grant
+        run = owner.run if owner else None
+        remaining = deadline - time.monotonic()
+        blocked = (self.closed or remaining <= 0
+                   or bool(job and job.canceled.is_set())
+                   or bool(run and run.canceled.is_set()))
+        if blocked:
+            raise TimeoutError('workflow canceled or deadline exceeded before parent resume')
+        try:
+            worker.resume(timeout_seconds=remaining)
+        except AgentResumeError as exc:
+            if not self._is_transient_resume_probe(attempt, getattr(exc, 'diagnostic', {})):
+                raise
+            # Readiness failed before a model turn. Reuse the same Task and
+            # lease; never retry send(), restore() or a child's external work.
+            emit_progress('snapshot_resume_retry', attempt=2)
+            self._resume_parent_attempt(parent_id, worker, deadline, attempt=1)
 
     def await_children(self, parent_id, worker, history, deadline):
         """Wait outside a model turn, then reconcile only this parent's receipts."""

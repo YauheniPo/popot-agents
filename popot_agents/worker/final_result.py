@@ -43,26 +43,34 @@ def evidence_transcript(messages, context=()):
     return transcript
 
 
+def _next_quote_state(quoted, escaped, char):
+    """Track whether the scanner sits inside a JSON string after ``char``."""
+    if not quoted:
+        return char == '"', False
+    if escaped:
+        return True, False
+    if char == '\\':
+        return True, True
+    return char != '"', False
+
+
+def _closes_container(text, index):
+    """Detect a comma whose next non-space character ends an array or object."""
+    following = index + 1
+    while following < len(text) and text[following] in ' \t\r\n':
+        following += 1
+    return following < len(text) and text[following] in '}]'
+
+
 def _without_trailing_commas(text):
     result = []
     quoted = escaped = False
     previous = ''
     for index, char in enumerate(text):
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif char == '"':
-                quoted = False
-        elif char == '"':
-            quoted = True
-        elif char == ',' and previous not in '[{,:':
-            following = index + 1
-            while following < len(text) and text[following] in ' \t\r\n':
-                following += 1
-            if following < len(text) and text[following] in '}]':
-                continue
+        was_quoted = quoted
+        quoted, escaped = _next_quote_state(quoted, escaped, char)
+        if not was_quoted and char == ',' and previous not in '[{,:' and _closes_container(text, index):
+            continue
         result.append(char)
         if char not in ' \t\r\n':
             previous = char

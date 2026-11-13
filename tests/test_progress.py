@@ -245,8 +245,9 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                         ('/messages', {'sessionId': root, 'message': 'fail'}, root),
                         ('/tasks', {'agent': 'broken', 'task': 'work'}, None)):
                     received.clear()
+                    context = Context()
                     with self.assertRaisesRegex(RuntimeError, 'HTTP 502'):
-                        await stream_call(client, path, payload, Context())
+                        await stream_call(client, path, payload, context)
                     expected_id = expected_id or started_ids[-1]
                     self.assertEqual(received[0]['event'], 'accepted')
                     self.assertEqual(received[-1]['event'], 'failed')
@@ -255,8 +256,9 @@ class StreamingProgressTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(event['agent_session_id'], expected_id)
                         self.assertIsNone(event['parent_session_id'])
                 received.clear()
+                context = Context()
                 with self.assertRaisesRegex(RuntimeError, 'HTTP 404'):
-                    await stream_call(client, '/tasks', {'agent': 'missing', 'task': 'work'}, Context())
+                    await stream_call(client, '/tasks', {'agent': 'missing', 'task': 'work'}, context)
                 self.assertEqual([event['event'] for event in received], ['accepted', 'failed'])
                 for event in received:
                     for key in ('root_session_id', 'agent_session_id', 'parent_session_id'):

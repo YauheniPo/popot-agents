@@ -272,8 +272,9 @@ class FinalResultTests(unittest.TestCase):
                      valid.replace('"errors": []', '"errors": "none"')):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_result(text)
+        truncated = valid.replace('Result verified', 'line\nbreak')
         with self.assertRaisesRegex(ValueError, 'truncated_result'):
-            parse_result(valid.replace('Result verified', 'line\nbreak'), 'length')
+            parse_result(truncated, 'length')
 
     def test_cloud_format_repair_disables_thinking_without_changing_work_requests(self):
         parameters = {'reasoning': {'enabled': True}}
