@@ -581,13 +581,15 @@ class OperatorRoleTests(unittest.TestCase):
         self.assertIn('pagination', role['instructions'])
         self.assertNotIn('PHOENIX_ADMIN_SECRET', role['env_names'])
 
-    def test_operator_uses_shared_free_route_without_changing_other_roles(self):
+    def test_operator_uses_engineering_route_without_changing_other_roles(self):
         root=Path(__file__).resolve().parents[2]
         roles={path.stem:json.loads(path.read_text()) for path in (root/'config/roles').glob('*.json')}
         agents=json.loads((root/'config/agents.json').read_text())
         combos=json.loads((root/'config/omniroute/combos.json').read_text())
         self.assertEqual(roles['project_operator']['agent'],'omniroute_ops')
-        self.assertEqual(agents['omniroute_ops']['model_env'],'OMNIROUTE_FREE_MODEL')
+        self.assertEqual(agents['omniroute_ops']['model_env'],'OMNIROUTE_CLOUD_MODEL')
+        self.assertEqual(agents['omniroute_ops']['model_parameters'],
+                         agents['omniroute_cloud']['model_parameters'])
         self.assertEqual(combos['ax-free']['models'][0]['model'],
                          'openrouter/cohere/north-mini-code:free')
         self.assertEqual(roles['chat']['agent'],'omniroute_free')

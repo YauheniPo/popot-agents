@@ -20,3 +20,9 @@ test('gateway export preserves unknown usage and provider errors', () => {
   assert.equal(row.tokens,null);
   assert.equal(row.error,true);
 });
+
+test('gateway export preserves the per-attempt correlation ID', () => {
+  const row=baselineCall({summary:{status:200},pipeline:{clientRawRequest:{headers:{
+    'x-popot-session-id':'root','x-popot-request-id':'a'.repeat(32)}}}},new Set(['root']));
+  assert.equal(row.request_id,'a'.repeat(32));
+});

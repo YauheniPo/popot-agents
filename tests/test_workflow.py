@@ -191,8 +191,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(data['outcome']['status'],'blocked')
 
     def test_repeated_partial_stops_at_no_progress_limit(self):
-        calls,data,_=self.run_workflow([result('partial',remaining=('review',)),result('partial',remaining=('review',))])
-        self.assertEqual(len(calls),2)
+        calls,data,_=self.run_workflow([result('partial',remaining=('review',)) for _ in range(3)])
+        self.assertEqual(len(calls),3)
         self.assertEqual(data['outcome']['status'],'blocked')
         self.assertEqual(data['outcome']['reason'],'workflow_no_progress')
 
@@ -383,7 +383,7 @@ class WorkflowTests(unittest.TestCase):
             workflow.begin()
             checkpoint = {'messages': [{'role': 'tool', 'content': 'CI observation'}] * observations}
             self.assertIsNone(workflow.record(result('partial', remaining=('wait for CI',)), checkpoint))
-        self.assertEqual(workflow.meta['no_progress'], 1)
+        self.assertEqual(workflow.meta['no_progress'], 0)
 
     def test_policy_rejects_unbounded_limits(self):
         from popot_agents.orchestrator.workflow import validate_policy

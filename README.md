@@ -63,6 +63,33 @@ Python suites a separate tool workspace for each test.
 
 ## CI and code quality
 
+Ручной запуск всех текущих evals на работающем локальном AX/Phoenix:
+
+```bash
+bash evals/run-all.sh
+```
+
+Команда собирает runtime-оценки накопленных трейсов, выполняет все шесть
+контролируемых сценариев с числом повторов и моделью из `evals/config.json`,
+присоединяет usage шлюза и публикует результаты в Phoenix. Сценарии запускают
+настоящих агентов и расходуют квоту провайдера. Отчёты сохраняются в
+`reports/evals/full-<UTC>/`. Требования, границы измерений и запуск только
+runtime-evals описаны в [руководстве evals](evals/README.md).
+
+Сравнение моделей и параметров на одинаковых сценариях:
+
+```bash
+python3 -m evals.matrix --output reports/evals/models-before-harness
+```
+
+Варианты, baseline, повторы и бюджеты заданы в `evals/config.json → x-evals`. Результаты
+публикуются в Phoenix Experiments и в [Grafana Evals](http://127.0.0.1:3002/d/popot-evals):
+зелёное Δ означает улучшение с учётом направления метрики, красное — ухудшение.
+Проверенный успех, фиксированный judge и самооценка агента показаны отдельно.
+Дашборд устанавливается при развёртывании мониторинга; для существующей установки:
+`python3 ax_local/cluster/resource_monitoring.py install-evals`.
+
+
 [GitHub Actions CI](.github/workflows/ci.yml) runs on branch pushes, pull requests,
 and manual dispatch. It runs the Python and AX suites on Python 3.12, including
 session-store integration tests against an isolated PostgreSQL 17 service, plus
@@ -146,7 +173,7 @@ its indexed graph. Memory persists independently of AX Tasks. See
 | [config/omniroute/combos.json](config/omniroute/combos.json) | Model order, fallback chains and their timeouts |
 | [ax_local/config.json](ax_local/config.json) | kind context, WorkerPool, Task resources, queue, snapshots, AX timeouts, delegation and proxy |
 | [pyproject.toml](pyproject.toml) | Python dependencies and pinned service, runtime and build versions |
-| [evals/config.json](evals/config.json) | Baseline model, repetitions, workflow budgets/timeouts and Phoenix service settings |
+| [evals/config.json](evals/config.json) | Unified `x-evals` variants, baseline, repetitions, workflow budgets/timeouts and Phoenix service settings |
 | [memory/config.json](memory/config.json) | Cognee services and agent recall/capture, summary, journal and memory timeouts |
 | [compose.sh](compose.sh) | Docker Compose with versions loaded from pyproject.toml |
 | `.env` | Credentials, selected model names and published MCP port |
@@ -1011,7 +1038,7 @@ scheduled work uses the receiving role's own profile.
 | `openrouter` | OpenRouter chat API | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
 | `omniroute_free` | Local OmniRoute gateway | `OMNIROUTE_API_KEY`, `OMNIROUTE_FREE_MODEL` |
 | `omniroute_cloud` | OmniRoute combo for code | `OMNIROUTE_API_KEY`, `OMNIROUTE_CLOUD_MODEL` |
-| `omniroute_ops` | Project operator and service analysis | `OMNIROUTE_API_KEY`, `OMNIROUTE_FREE_MODEL` |
+| `omniroute_ops` | Project operator, service analysis and evals | `OMNIROUTE_API_KEY`, `OMNIROUTE_CLOUD_MODEL` |
 | `ollama_local` | Local Ollama chat API | `OLLAMA_LOCAL_MODEL` |
 | `ollama_cloud` | Ollama Cloud chat API | `OLLAMA_API_KEY`, `OLLAMA_CLOUD_MODEL` |
 | `nous` | Nous inference chat API | `NOUS_API_KEY`, `NOUS_MODEL` |

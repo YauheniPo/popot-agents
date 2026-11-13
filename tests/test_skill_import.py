@@ -40,7 +40,7 @@ class SkillImportTests(unittest.TestCase):
         skill_directories = {path.parent.relative_to(root).as_posix()
                              for path in root.rglob('SKILL.md')}
         # Project-authored skills are not part of the third-party provenance manifest.
-        local_skills = {'engineering/security-review'}
+        local_skills = {'engineering/security-review', 'operations/runtime-evals'}
         self.assertTrue(local_skills.isdisjoint(imported))
         self.assertEqual(skill_directories, imported | local_skills)
 
@@ -75,7 +75,8 @@ class SkillImportTests(unittest.TestCase):
                 self.assertIn((skill / 'SKILL.md').read_text(), prepared['instructions'])
                 self.assertIn(str(skill / 'references/behave-no-semantics-change.md'),
                               prepared['instructions'])
-                self.assertEqual({key: value for key, value in prepared.items() if key != 'instructions'},
+                self.assertRegex(prepared['_skills_prompt_sha256'], r'^[0-9a-f]{64}$')
+                self.assertEqual({key: value for key, value in prepared.items() if key not in {'instructions', '_skills_prompt_sha256'}},
                                  {**{key: value for key, value in role.items() if key not in {'instructions', 'skills'}},
                                   '_loaded_skills': role['skills']})
                 loaded = prepared['instructions'][len(role['instructions']):]
@@ -115,7 +116,8 @@ class SkillImportTests(unittest.TestCase):
                 for document in ('engineering/pr/SKILL.md', 'engineering/pr/CREDITS.md',
                                  'productivity/writing-for-agents/SKILL-MECHANICS.md'):
                     self.assertIn(document, prepared['instructions'])
-                self.assertEqual({key: value for key, value in prepared.items() if key != 'instructions'},
+                self.assertRegex(prepared['_skills_prompt_sha256'], r'^[0-9a-f]{64}$')
+                self.assertEqual({key: value for key, value in prepared.items() if key not in {'instructions', '_skills_prompt_sha256'}},
                                  {**{key: value for key, value in role.items() if key not in {'instructions', 'skills'}},
                                   '_loaded_skills': role['skills']})
                 loaded = prepared['instructions'][len(role['instructions']):]

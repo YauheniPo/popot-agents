@@ -65,11 +65,13 @@ class ProviderProxyTests(unittest.TestCase):
             dispatch_request({'capability':selected},'/v1/chat/completions','Bearer capability',
                 b'{"model":"model"}',correlation={'X-Popot-Session-Id':'a'*16,
                     'X-Popot-Run-Id':'b'*32,'X-Popot-Root-Session-Id':'c'*16,
+                    'X-Popot-Request-Id':'d'*32,
                     'Cookie':'secret','X-Popot-Other':'unsupported'})
             headers={k.lower():v for k,v in opened.call_args.args[0].header_items()}
             self.assertEqual(headers['x-popot-session-id'],'a'*16)
             self.assertEqual(headers['x-popot-run-id'],'b'*32)
             self.assertEqual(headers['x-popot-root-session-id'],'c'*16)
+            self.assertEqual(headers['x-popot-request-id'],'d'*32)
             self.assertNotIn('cookie',headers)
             self.assertNotIn('x-popot-other',headers)
             dispatch_request({'capability':selected},'/v1/chat/completions','Bearer capability',

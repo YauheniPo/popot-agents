@@ -6,6 +6,7 @@ import time
 import unittest
 from contextlib import redirect_stderr
 from urllib.error import HTTPError, URLError
+from urllib.request import Request
 from unittest.mock import Mock, patch
 
 from popot_agents.worker.http_harness import _model_request, run_http
@@ -321,7 +322,7 @@ class ModelTimeoutTests(unittest.TestCase):
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=[
                  ConnectionResetError(), io.BytesIO(b'{"choices": []}')]) as call, \
              redirect_stderr(io.StringIO()):
-            self.assertEqual(_model_request(object(), round_number=1, messages=[], schemas=[],
+            self.assertEqual(_model_request(Request('http://model'), round_number=1, messages=[], schemas=[],
                                             remaining_seconds=lambda: 300), {'choices': []})
         self.assertEqual(call.call_count, 2)
 

@@ -1,6 +1,7 @@
 """Load explicitly selected repository skills into a worker's instructions."""
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -89,8 +90,10 @@ def prepare_role_config(role_config: dict | None) -> dict:
     instructions = load_skill_instructions(selected,
         include_references='bash' not in prepared.get('tools', []))
     if instructions:
+        prepared['_skills_prompt_sha256'] = hashlib.sha256(instructions.encode()).hexdigest()
         prepared["instructions"] = prepared.get("instructions", "") + instructions
         print(json.dumps({"event": "skills_loaded", "skills": selected,
+                          "prompt_sha256": prepared['_skills_prompt_sha256'],
                           "prompt_bytes": len(instructions.encode("utf-8"))}),
               file=sys.stderr, flush=True)
     return prepared

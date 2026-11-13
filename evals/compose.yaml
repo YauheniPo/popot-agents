@@ -14,6 +14,8 @@ services:
     volumes:
       - phoenix-data:/data
       - .:/opt/popot/evals:ro
+      - ../popot_agents/telemetry.py:/opt/popot/popot_agents/telemetry.py:ro
+      - ../popot_agents/progress.py:/opt/popot/popot_agents/progress.py:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6006/healthz', timeout=3).close()"]
       interval: 5s

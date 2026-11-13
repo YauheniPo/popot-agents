@@ -3,7 +3,7 @@
     "sha256": "1906268ff6061d09e1970fd5547154dd479679576fc2e9841576b39d8c88cb3e"
   },
   "reporting/result_contract": {
-    "sha256": "05789431a88eff496dedcf149f756869baff5eb2d91a28b9d9ac0abe30dd6cb5",
+    "sha256": "1476d0072afd3d062a8875fee3eb372dea75e40bada7e13db91dfd81dc73e28a",
     "values": {
       "artifact_count_limit": 16,
       "artifact_byte_limit": 24000,
@@ -65,7 +65,7 @@
     "sha256": "1be35145eb04228225e8ad0a7e7c5ba8f206fa920341d80b954d2b8b66e7bb9b"
   },
   "delegation/handoff": {
-    "sha256": "467cc01ca6962083025ae561db1953968db3f9e2691f7d700d7fc1846b25db3d",
+    "sha256": "2aa49bfa3f9dafb19b8080bc2e1c087cf34e1e4593441d4d10fe587d82609a52",
     "values": {
       "handoff": "TASK",
       "context": "CONTEXT"

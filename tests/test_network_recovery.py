@@ -4,6 +4,7 @@ import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+from urllib.request import Request
 
 from popot_agents.runtime_config import RUNTIME
 from popot_agents.worker.http_harness import _model_request
@@ -24,7 +25,7 @@ class NetworkRecoveryTests(unittest.TestCase):
              patch('popot_agents.worker.http_harness.request.urlopen', side_effect=perform), \
              redirect_stderr(io.StringIO()):
             try:
-                result = _model_request(object(), round_number=1, messages=[], schemas=[],
+                result = _model_request(Request('http://model'), round_number=1, messages=[], schemas=[],
                     remaining_seconds=lambda: budget - now[0], final=final)
             except RuntimeError as error:
                 result = error

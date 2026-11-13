@@ -46,6 +46,7 @@ COPY popot_agents/__init__.py popot_agents/tools.py popot_agents/runtime_config.
 COPY popot_agents/skills.py /app/popot_agents/
 COPY popot_agents/prompts.py /app/popot_agents/
 COPY popot_agents/progress.py /app/popot_agents/
+COPY popot_agents/telemetry.py /app/popot_agents/
 COPY popot_agents/work_evidence.py popot_agents/child_results.py /app/popot_agents/
 COPY popot_agents/workflow_config.py /app/popot_agents/
 COPY popot_agents/artifacts.py /app/popot_agents/
@@ -56,6 +57,7 @@ COPY ax_local/worker /app/ax_local/worker
 COPY config/runtime.json /app/config/runtime.json
 COPY memory/config.json /app/memory/config.json
 COPY config/prompts /app/config/prompts
+COPY evals/__init__.py evals/runtime.py evals/operator_tools.py evals/config.json /app/evals/
 RUN python -c 'import popot_agents.worker.http_harness, ax_local.worker.entrypoint'
 ENV PYTHONPATH=/app
 ENTRYPOINT ["/usr/local/bin/ax-task-runner"]

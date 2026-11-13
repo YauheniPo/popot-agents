@@ -31,9 +31,9 @@ ate-controller. Далее схема показывает создание sand
 {"role":"project_operator","task":"Проверь здоровье проекта через Holmes, метрики Prometheus, маршруты моделей и память Cognee. Найди причины сбоев и предложи улучшения. Ничего не меняй."}
 ```
 
-Роль использует профиль `omniroute_ops` и `OMNIROUTE_FREE_MODEL=ax-free`
-из `.env`: North Mini Code первой, затем NVIDIA Lightning. Holmes
-также настроен на `HOLMES_MODEL=ax-free`; состав комбо находится в
+Роль использует профиль `omniroute_ops` и `OMNIROUTE_CLOUD_MODEL=ax-ollama`
+из `.env`, с параметрами модели инженерных ролей. Holmes
+настроен на `HOLMES_MODEL=ax-free`; состав комбо находится в
 `config/omniroute/combos.json`. Маршруты остальных ролей не меняются. Для неё Harness²
 выключен: расследования и предложения изменений не нужно выполнять повторно.
 `chat`, `planner` и `tech_lead` могут передавать ей аналитические подзадачи.
@@ -63,7 +63,7 @@ Phoenix роль читает напрямую из worker через встро
 мутации. `PHOENIX_ENABLE_MCP_CODE_MODE=false` в `evals/config.json` открывает
 отдельные инструменты вместо универсального исполнения кода.
 
-Создайте в Phoenix отдельного пользователя с ролью `VIEWER`, войдите им и
+Создайте в Phoenix отдельного пользователя с ролью `MEMBER`, войдите им и
 выпустите пользовательский API key. Сохраните его как `PHOENIX_API_KEY` в
 корневом `.env`. Имя включено в `runtime.json → role_env_names` и
 `project_operator.env_names`; MCP-клиент worker отправляет ключ в Bearer-заголовке.
@@ -76,15 +76,34 @@ Phoenix роль читает напрямую из worker через встро
 `root_session_id`, а `popot.agent_session_id` — конкретному агенту. Нужно
 сопоставлять spans с AX-сессиями и OmniRoute: AGENT spans поступают после
 завершения, фильтр только корневых spans скрывает дочерние, отсутствие usage
-не означает нулевое использование. Ключ `VIEWER` даёт чтение данных Phoenix,
-включая содержимое spans; чувствительные данные нельзя раскрывать в отчёте.
+не означает нулевое использование. Ключ `MEMBER` даёт чтение и запись данных
+Phoenix; чувствительные данные нельзя раскрывать в отчёте. Нативный MCP роли
+по-прежнему предоставляет только запросы чтения.
 После изменения конфигурации пересоберите runtime и начните новую сессию.
+
+Два дополнительных инструмента локального MCP `evals` запускаются в worker:
+
+- `mcp__evals__run_runtime_evals(hours=12, end=null, publish=true)` — версия
+  оценщика из образа, прямой запрос к Phoenix с ключом роли, снимок и отчёты,
+  публикация только CODE-аннотаций этого оценщика. `publish=false` поддерживает
+  анализ с VIEWER. Ограничения: 7 дней, 20000 spans и 90 секунд.
+- `mcp__evals__read_eval_report(run_id, section)` — чтение разделов этого же
+  отчёта без повторного захвата. Включает audit, roles/models/tools, sessions,
+  provenance, ограничения и квитанцию публикации.
+
+Навык `operations/runtime-evals` объясняет метрики, неполноту трейсов,
+различие runtime-оценок и controlled baseline. Итоговые отчёты передаются
+артефактами; полный JSON сжат в `.json.gz`, чтобы соблюдать лимит текста.
+Права MEMBER задаются в `evals/config.json → x-operator` и проверяются
+bootstrap при `bash evals/up.sh`; исходный пользовательский ключ сохраняется.
+Пример запроса роли: «Запусти runtime-evals за 12 часов, опубликуй оценки,
+разбери полноту данных, latency и расход по ролям; приложи отчёты».
 
 Память роли по умолчанию относится к `popot-agents` (`memory_project`), поэтому
 вопрос о локальном стеке не требует метки проекта. Явная ссылка/метка задаёт
 свой проект; неоднозначные ссылки на несколько проектов отключают авто-память.
-Новые токены для роли не требуются: используются настроенные ключи сервисов,
-которые остаются в API. В worker нет Docker socket, административного kubeconfig,
+Используются настроенные ключи: Phoenix API key и Cognee передаются роли,
+административные ключи сервисов остаются в API. В worker нет Docker socket, административного kubeconfig,
 shell или ключей провайдеров. Пароль Cognee передаётся только для существующей
 памяти этой роли; содержимое секретов исключается из диагностических ответов.
 
@@ -701,8 +720,8 @@ bundle через ConfigMap; проверки TLS у Python, Node и Holmes ос
 
 | Комбо | Роли | Порядок моделей |
 | --- | --- | --- |
-| `ax-free` | `chat`, `analyst`, `tech_lead`, `cron_demo`, `project_operator`, Holmes, Harness² | OpenRouter North Mini Code `:free` → NVIDIA Nemotron 3.5 Lightning |
-| `ax-ollama` | `planner`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `security_engineer`, `qa_engineer` | DeepSeek V4.1 Flash 1017 → GLM 5.3 Flash → DeepSeek V4 Pro 0813 |
+| `ax-free` | `chat`, `analyst`, `tech_lead`, `cron_demo`, Holmes, Harness² | OpenRouter North Mini Code `:free` → NVIDIA Nemotron 3.5 Lightning |
+| `ax-ollama` | `planner`, `backend_engineer`, `frontend_engineer`, `code_reviewer`, `security_engineer`, `qa_engineer`, `project_operator` | DeepSeek V4.1 Flash 1017 → GLM 5.3 Flash → DeepSeek V4 Pro 0813 |
 
 Точные бесплатные model IDs: `nvidia/nemotron-3.5-lightning-30b-a3b` у NVIDIA
 и `cohere/north-mini-code:free` у OpenRouter. Отдельных комбо для кода,

@@ -8,6 +8,14 @@ from unittest.mock import patch
 
 
 class PromptConfigTests(unittest.TestCase):
+    def test_local_handoff_preserves_commit_identity_and_recovered_errors_are_evidence(self):
+        from popot_agents.prompts import render_prompt
+        handoff = render_prompt('delegation/handoff', handoff='source', context='task')
+        self.assertIn('git bundle', handoff)
+        contract = render_prompt('reporting/result_contract', artifact_count_limit=16,
+                                 artifact_byte_limit=24000, artifact_total_byte_limit=1000000)
+        self.assertIn('Recovered tool failures belong in evidence', contract)
+
     def test_operator_reports_require_primary_sources_and_metric_scope(self):
         from popot_agents.prompts import render_prompt
         role = json.loads((Path(__file__).resolve().parents[1] / 'config/roles/project_operator.json').read_text())

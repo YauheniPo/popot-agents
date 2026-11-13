@@ -18,6 +18,7 @@ export function baselineCall(artifact, roots) {
   const tokens = Number.isFinite(usage?.total_tokens) ? usage.total_tokens :
     Number.isFinite(summary.tokens?.in) && Number.isFinite(summary.tokens?.out) ? summary.tokens.in + summary.tokens.out : null;
   return {id:summary.id, root_session_id:root, session_id:sid, run_id:lower['x-popot-run-id'],
+    request_id:lower['x-popot-request-id'],
     started_at:raw?.timestamp, duration_ms:summary.duration, status:summary.status,
     model:summary.model, requested_model:summary.requestedModel, provider:summary.provider,
     tokens, usage:safeUsage, error:Boolean(artifact.error) || summary.status >= 400};

@@ -12,6 +12,8 @@ from urllib import error, parse, request
 import uuid
 
 from popot_agents.progress import redact_text
+from popot_agents.telemetry import (VERSION, decode_payload, message_attributes,
+                                    payload_attributes, sensitive_values)
 
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / 'evals/config.json'
@@ -62,6 +64,36 @@ class Span:
             'parent_id': parent.data['context']['span_id'] if parent else None,
             'start_time': _now(), 'status_code': 'OK', 'attributes': dict(attributes or {})}
         self.finished = False
+        self.parent = parent
+        self.secrets = set()
+
+    def payload(self, side, value):
+        value = decode_payload(value)
+        self.secrets.update(sensitive_values(value))
+        self.data['attributes'].update(payload_attributes(side, value, extra_secrets=self.secrets))
+
+    def model_input(self, body, *, request_id=None):
+        self.payload('input', body)
+        attrs = self.data['attributes']
+        if isinstance(request_id, str) and re.fullmatch(r'[a-f0-9]{32}', request_id):
+            attrs['popot.request_id'] = request_id
+        clean = json.loads(attrs['input.value'])
+        if isinstance(clean, dict) and not attrs['popot.input.truncated']:
+            attrs.update(message_attributes('input', clean.get('messages')))
+            messages = clean.get('messages')
+            if (isinstance(messages, list) and self.parent and not self.parent.finished
+                    and 'input.value' not in self.parent.data['attributes']):
+                self.parent.payload('input', [m for m in messages
+                    if isinstance(m, dict) and m.get('role') == 'user'])
+            attrs['llm.invocation_parameters'] = json.dumps({k: v for k, v in clean.items()
+                if k not in {'messages', 'tools', 'model'}}, ensure_ascii=False)
+            tools = clean.get('tools')
+            for index, tool in enumerate(tools[:16] if isinstance(tools, list) else []):
+                attrs[f'llm.tools.{index}.tool.json_schema'] = json.dumps(tool, ensure_ascii=False)[:16000]
+        attrs['popot.input.available'] = True
+
+    def upstream_error(self, value):
+        self.payload('error', value)
 
     def finish(self):
         if not self.finished:
@@ -70,6 +102,7 @@ class Span:
             self.tracer.submit(self.data)
 
     def model_result(self, status, body):
+        self.payload('output', body)
         try:
             response = json.loads(body)
         except (ValueError, UnicodeError):
@@ -88,6 +121,20 @@ class Span:
                 value = usage.get(source)
                 if type(value) is int and value >= 0:
                     self.data['attributes']['llm.token_count.' + target] = value
+            for source, field, target in [('prompt_tokens_details', 'cached_tokens', 'prompt_details.cache_read'),
+                                          ('completion_tokens_details', 'reasoning_tokens', 'completion_details.reasoning')]:
+                details = usage.get(source)
+                value = details.get(field) if isinstance(details, dict) else None
+                if type(value) is int and value >= 0:
+                    self.data['attributes']['llm.token_count.' + target] = value
+        clean = json.loads(self.data['attributes']['output.value'])
+        if isinstance(clean, dict) and not self.data['attributes']['popot.output.truncated']:
+            choices = clean.get('choices') if isinstance(clean.get('choices'), list) else []
+            self.data['attributes'].update(message_attributes('output',
+                [item['message'] for item in choices if isinstance(item, dict) and isinstance(item.get('message'), dict)]))
+            if choices and isinstance(choices[0], dict) and isinstance(choices[0].get('finish_reason'), str):
+                self.data['attributes']['llm.finish_reason'] = choices[0]['finish_reason']
+        self.data['attributes']['popot.output.available'] = bool(body and body != b'{}')
         self.finish()
 
 
@@ -103,6 +150,8 @@ class AgentSpan(Span):
                       'popot.root_session_id': root_id,
                       'popot.agent_profile': config.get('agent', 'unknown'),
                       'popot.skills.configured': list(config.get('skills', [])),
+                      'popot.telemetry.version': VERSION,
+                      'popot.worker_image': os.getenv('AX_LOCAL_WORKER_IMAGE', 'unknown'),
                       'metadata': json.dumps(metadata)}
         parent_id = parent.session_id if parent else delegation.get('parent_session_id')
         if parent_id:
@@ -124,16 +173,22 @@ class AgentSpan(Span):
             return
         if kind not in {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer',
                         'tool_call', 'tool_result', 'tool_error'}:
-            fields = {}
-            for key in ('name', 'server', 'error_type', 'code', 'stage', 'phase', 'reason', 'status', 'round', 'attempt'):
-                value = event.get(key)
-                if isinstance(value, str):
-                    fields[key] = redact_text(value)[:160]
-                elif type(value) is int and 0 <= value <= 1000000:
-                    fields[key] = value
+            detail = payload_attributes('event', {k: v for k, v in event.items() if k != 'error'}, limit=16384)
+            fields = {'popot.event.value': detail['event.value'],
+                      'popot.event.truncated': detail['popot.event.truncated']}
             events = self.data.setdefault('events', [])
+            if len(events) == 64:
+                chunk = Span(self.tracer, 'Harness events', 'CHAIN', parent=self,
+                    attributes={**self.base_attributes(), 'popot.harness.events_chunk': True})
+                chunk.data['start_time'] = events[0]['timestamp']
+                chunk.data['events'] = list(events)
+                chunk.finish()
+                events.clear()
             events.append({'name': redact_text(kind)[:160], 'timestamp': _now(), 'attributes': fields})
-            del events[:-64]
+        if kind == 'harness_started':
+            self.data['attributes']['popot.harness.config'] = payload_attributes('config', event.get('config', {}), limit=16384)['config.value']
+            self.data['attributes']['popot.harness.sha256'] = event.get('harness_sha256', '')
+            self.data['attributes']['popot.role.sha256'] = event.get('role_sha256', '')
         if kind == 'skills_loaded':
             configured = self.data['attributes']['popot.skills.configured']
             loaded = event.get('skills')
@@ -142,6 +197,8 @@ class AgentSpan(Span):
                 metadata = json.loads(self.data['attributes']['metadata'])
                 metadata['skills_loaded'] = self.data['attributes']['popot.skills.loaded']
                 self.data['attributes']['metadata'] = json.dumps(metadata)
+            if isinstance(event.get('prompt_sha256'), str):
+                self.data['attributes']['popot.skills.prompt_sha256'] = event['prompt_sha256']
         elif kind == 'tool_call':
             key = event.get('call_id')
             if not isinstance(key, str):
@@ -152,7 +209,13 @@ class AgentSpan(Span):
             name = redact_text(name)[:256] if isinstance(name, str) else 'unknown'
             span = Span(self.tracer, name, 'TOOL', parent=self,
                         attributes={**self.base_attributes(), 'tool.name': name})
-            arguments = event.get('arguments')
+            arguments = event.get('input', event.get('arguments'))
+            if arguments is not None:
+                span.payload('input', arguments)
+                span.data['attributes']['popot.input.available'] = 'input' in event
+                for suffix in ('truncated', 'bytes', 'sha256'):
+                    if 'input_' + suffix in event:
+                        span.data['attributes']['popot.input.' + suffix] = event['input_' + suffix]
             path = arguments.get('path', '') if isinstance(arguments, dict) else ''
             if event.get('name') == 'read_file' and isinstance(path, str):
                 for skill in self.data['attributes']['popot.skills.configured']:
@@ -163,15 +226,29 @@ class AgentSpan(Span):
             key = event.get('call_id')
             if not isinstance(key, str):
                 return
-            span = self.pending.pop(key, None)
+            span = self.pending.get(key)
+            if span is None and kind == 'tool_error':
+                self.event(json.dumps({**event, 'event': 'tool_call'}))
+                span = self.pending.get(key)
+                span.data['attributes']['popot.call_started_missing'] = True
             if span:
+                if 'output' in event:
+                    span.payload('output', event['output'])
+                elif kind == 'tool_error':
+                    span.payload('output', {k: event[k] for k in ('error_type', 'message') if k in event})
+                span.data['attributes']['popot.output.available'] = 'output' in event
+                for suffix in ('truncated', 'bytes', 'sha256'):
+                    if 'output_' + suffix in event:
+                        span.data['attributes']['popot.output.' + suffix] = event['output_' + suffix]
                 if kind == 'tool_error':
                     span.data['status_code'] = 'ERROR'
                     if isinstance(event.get('error_type'), str):
                         span.data['attributes']['popot.error_type'] = redact_text(event['error_type'])[:160]
-                elif 'popot.skill.reference_requested' in span.data['attributes']:
+                elif span.data['status_code'] != 'ERROR' and 'popot.skill.reference_requested' in span.data['attributes']:
                     span.data['attributes']['popot.skill.reference_read'] = span.data['attributes']['popot.skill.reference_requested']
-                span.finish()
+                if kind == 'tool_result':
+                    self.pending.pop(key)
+                    span.finish()
 
     def base_attributes(self):
         return {key: value for key, value in self.data['attributes'].items()
@@ -184,6 +261,7 @@ class AgentSpan(Span):
         outcome = result.get('outcome')
         outcome = outcome if isinstance(outcome, dict) else {}
         self.outcome = outcome.get('status', 'completed')
+        self.payload('output', {key: result[key] for key in ('answer', 'outcome', 'revision') if key in result})
         if isinstance(outcome.get('reason'), str):
             self.data['attributes']['popot.outcome_reason'] = redact_text(outcome['reason'])[:256]
 

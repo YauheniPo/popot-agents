@@ -11,6 +11,19 @@ from ax_local.cluster.resource_dashboard import dashboard
 
 
 class ResourceMonitoringTests(unittest.TestCase):
+    def test_grafana_provisions_both_dashboards_without_replacing_storage(self):
+        from ax_local.resource_config import load_monitoring
+        cluster = MagicMock()
+        monitoring.configure_grafana(cluster, load_monitoring(monitoring.ROOT))
+        objects = cluster.apply.call_args.args[0]
+        config = next(o for o in objects if o['kind'] == 'ConfigMap')
+        self.assertEqual(json.loads(config['data']['evals.json'])['uid'], 'popot-evals')
+        self.assertIn('resources.json', config['data'])
+        grafana = next(o for o in objects if o['kind'] == 'Deployment')
+        spec = grafana['spec']['template']['spec']
+        self.assertIn({'name': 'data', 'persistentVolumeClaim': {'claimName': 'grafana-resource-data'}}, spec['volumes'])
+        self.assertTrue(any(m.get('subPath') == 'evals.json' for m in spec['containers'][0]['volumeMounts']))
+
     def test_collector_debug_removal_preserves_metrics_traces_and_is_idempotent(self):
         original = ('receivers:\n  otlp: {}\nexporters:\n  debug:\n    verbosity: detailed\n'
                     '  prometheus:\n    endpoint: 0.0.0.0:8889\n  otlp/jaeger: {}\n'
