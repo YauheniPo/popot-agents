@@ -75,6 +75,23 @@ class SkillTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "skills"):
                     load_roles(path, {"test": SimpleNamespace(session_mode="http")})
 
+    def test_role_validation_uses_the_workers_reference_loading_mode(self):
+        from popot_agents.runtime_config import RUNTIME
+        from popot_agents.skills import prepare_role_config
+        (self.skill / 'references.md').write_text('Example.\n' * RUNTIME['limits']['skill_prompt_bytes'])
+        path = self.root / 'roles.json'
+        agents = {'test': SimpleNamespace(session_mode='http')}
+        shell_role = dict(self.role, tools=['bash'],
+                          permissions={'shell': True, 'internet': True, 'workspace': 'persistent'})
+        path.write_text(json.dumps({'engineer': shell_role}))
+        loaded = load_roles(path, agents)
+        prepared = prepare_role_config(loaded['engineer'])
+        self.assertIn(str(self.skill / 'references.md'), prepared['instructions'])
+        self.assertNotIn('Example.', prepared['instructions'])
+        path.write_text(json.dumps({'engineer': self.role}))
+        with self.assertRaisesRegex(ValueError, 'skills exceed'):
+            load_roles(path, agents)
+
     def test_http_model_receives_only_selected_documents(self):
         with patch.dict(os.environ, self.env), \
                 patch("popot_agents.worker.http_harness.request.urlopen",

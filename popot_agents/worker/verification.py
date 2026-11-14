@@ -1,6 +1,7 @@
 """Bind reported repository verification to an observed immutable revision."""
 import re
 from datetime import datetime, timezone
+from itertools import chain
 
 _PULL_REQUEST = re.compile(r'github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)',
                           re.IGNORECASE)
@@ -9,17 +10,30 @@ AMBIGUOUS = object()
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
 
+class FindingsValidationError(ValueError):
+    code = 'invalid_findings'
+
+    def __init__(self, detail):
+        self.detail = detail
+        super().__init__(f'{self.code}: {detail}')
+
+
 def validate_findings(findings):
     if not isinstance(findings, list):
-        raise ValueError('invalid_findings')
-    for finding in findings:
-        if (not isinstance(finding, dict) or not isinstance(finding.get('description'), str)
-                or not finding['description'].strip()
-                or finding.get('scope') not in ('in_scope', 'out_of_scope')
-                or finding.get('status') not in ('open', 'resolved')
-                or finding['scope'] == 'out_of_scope' and (
-                    not isinstance(finding.get('rationale'), str) or not finding['rationale'].strip())):
-            raise ValueError('invalid_findings')
+        raise FindingsValidationError('findings must be a list')
+    for index, finding in enumerate(findings):
+        path = f'findings[{index}]'
+        if not isinstance(finding, dict):
+            raise FindingsValidationError(path + ' must be an object')
+        if not isinstance(finding.get('description'), str) or not finding['description'].strip():
+            raise FindingsValidationError(path + '.description must be a nonempty string')
+        if finding.get('scope') not in ('in_scope', 'out_of_scope'):
+            raise FindingsValidationError(path + '.scope must be in_scope or out_of_scope')
+        if finding.get('status') not in ('open', 'resolved'):
+            raise FindingsValidationError(path + '.status must be open or resolved')
+        if finding['scope'] == 'out_of_scope' and (
+                not isinstance(finding.get('rationale'), str) or not finding['rationale'].strip()):
+            raise FindingsValidationError(path + '.rationale must be a nonempty string for out_of_scope')
 
 
 def unresolved_findings(outcome):
@@ -79,35 +93,33 @@ def requested_pull_request(messages):
 def observed_revision(report, receipts, target=None):
     observed = [r['revision'] for r in receipts if re.fullmatch(r'[a-f0-9]{40}', r.get('revision',''))
                 and r.get('status') not in {'failed','unknown'}]
-    declared = (report or {}).get('revision')
-    if declared:
-        return declared if declared in observed else None
-    if target:
-        return target if target in observed else None
+    requested = (report or {}).get('revision') or target
+    if requested:
+        return requested if requested in observed else None
     return observed[-1] if observed else None
 
 
 def acceptance_revision(children, receipts, target=None):
     children = list(children)
     implementations = [c for c in children if c.get('role') in {'backend_engineer','frontend_engineer'}]
-    implementations.sort(key=lambda c:c.get('reportedAt',''))
-    latest = implementations[-1] if implementations else {}
+    # Reversing keeps the last report when timestamps tie, as the stable sort did.
+    latest = max(reversed(implementations), key=lambda c:c.get('reportedAt',''), default={})
     revision = latest.get('outcome',{}).get('revision')
     reported = _moment(latest.get('reportedAt'))
     if target is AMBIGUOUS:
         return revision
     # The server forwards actual child tool observations with session attribution;
     # a child's prose or declared revision alone cannot establish a PR head.
-    child_receipts = [r for child in children
+    child_receipts = (r for child in children
                       if (child.get('outcome') or {}).get('status') == 'completed'
                       for r in child.get('observations', [])
-                      if child.get('sessionId') and r.get('sourceSessionId') == child['sessionId']]
-    fresh = [r for r in [*receipts, *child_receipts]
+                      if child.get('sessionId') and r.get('sourceSessionId') == child['sessionId'])
+    fresh = (r for r in chain(receipts, child_receipts)
              if re.fullmatch(r'[a-f0-9]{40}', r.get('revision', '')) and r.get('revisionSource') == 'pr_head'
              and r.get('status') not in {'failed','unknown'}
              and _fresh(r, reported)
              and (target is None or (str(r.get('repository','')).lower() == target['repository']
-                                     and r.get('pullRequest') == target['pullRequest']))]
+                                     and r.get('pullRequest') == target['pullRequest'])))
     newest = max(fresh, key=lambda r: _moment(r.get('observedAt')) or _EPOCH, default=None)
     return newest['revision'] if newest else revision
 

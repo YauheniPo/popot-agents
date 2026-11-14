@@ -12,6 +12,23 @@ from ax_local.worker import remote_client
 
 
 class ChunkedHistoryTests(unittest.TestCase):
+    def test_offset_chunks_can_repeat_without_duplicating_the_request(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(remote_client, 'REQUEST_DIRECTORY', directory), \
+             patch.object(remote_client, 'MAX_ENCODED_REQUEST_BYTES', 8), \
+             redirect_stdout(io.StringIO()):
+            request_id = 'd' * 32
+            remote_client.main(['--chunk', request_id, '0', 'YWJj'])
+            remote_client.main(['--chunk', request_id, '0', 'YWJj'])
+            remote_client.main(['--chunk', request_id, '4', 'ZGVm'])
+            remote_client.main(['--chunk', request_id, '0', 'YWJj'])
+            path = Path(directory) / ('.ax-local-request-' + request_id)
+            self.assertEqual(path.read_text(), 'YWJjZGVm')
+            for offset, content in [('0', 'AAAA'), ('9', 'YWJj'), ('-1', 'YWJj')]:
+                with self.subTest(offset=offset), self.assertRaises(ValueError):
+                    remote_client.main(['--chunk', request_id, offset, content])
+            self.assertEqual(path.read_text(), 'YWJjZGVm')
+
     def test_chunk_file_is_private_and_bounded(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(remote_client, 'REQUEST_DIRECTORY', directory), \
@@ -60,3 +77,41 @@ class ChunkedHistoryTests(unittest.TestCase):
             self.assertEqual(received, payload)
             from pathlib import Path
             self.assertEqual(list(Path(directory).iterdir()), [])
+
+
+class ChunkGuardTests(unittest.TestCase):
+    def test_chunk_guards_reject_invalid_offsets_incomplete_writes_and_conflicts(self):
+        import tempfile
+        from unittest.mock import patch
+        from contextlib import redirect_stdout
+        import io
+        from ax_local.worker import remote_client
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(remote_client, 'REQUEST_DIRECTORY', directory), \
+             redirect_stdout(io.StringIO()):
+            request_id = 'c' * 32
+            with self.assertRaisesRegex(ValueError, 'invalid AX chunk offset'):
+                remote_client.main(['--chunk', request_id, 'x', 'YWJj'])
+            with self.assertRaisesRegex(ValueError, 'past the received request'):
+                remote_client.main(['--chunk', request_id, '5', 'YWJj'])
+            with patch.object(remote_client.os, 'pwrite', return_value=1):
+                with self.assertRaisesRegex(OSError, 'incomplete AX request chunk'):
+                    remote_client.main(['--chunk', request_id, '0', 'YWJj'])
+            remote_client.main(['--chunk', request_id, '0', 'YWJj'])
+            with self.assertRaisesRegex(ValueError, 'differs from the received request'):
+                remote_client.main(['--chunk', request_id, '0', 'ZGVm'])
+
+    def test_invalid_commands_and_chunks_are_rejected(self):
+        import tempfile
+        from unittest.mock import patch
+        from contextlib import redirect_stdout
+        import io
+        from ax_local.worker import remote_client
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(remote_client, 'REQUEST_DIRECTORY', directory), \
+             redirect_stdout(io.StringIO()):
+            request_id = 'd' * 32
+            with self.assertRaisesRegex(ValueError, 'invalid AX request chunk'):
+                remote_client.main(['--chunk', request_id, '0', '***'])
+            with self.assertRaisesRegex(ValueError, 'invalid AX request command'):
+                remote_client.main([])

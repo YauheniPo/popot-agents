@@ -155,10 +155,6 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
         if "description" in config and (not isinstance(config["description"], str)
                 or not config["description"].strip() or len(config["description"]) > 1000):
             raise ValueError(f"role {name} has invalid description")
-        try:
-            load_skill_instructions(config.get("skills", []))
-        except ValueError as exc:
-            raise ValueError(f"role {name} has invalid skills: {exc}") from exc
         allowed_roles = config.get("allowed_roles", [])
         if not isinstance(allowed_roles, list) or any(
                 not isinstance(target, str) or target not in roles or target == name
@@ -197,6 +193,10 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
             raise ValueError(f"role {name} has an unknown tool")
         if tools and agents[agent].session_mode != "http":
             raise ValueError(f"role {name} needs an HTTP agent for built-in tools")
+        try:
+            load_skill_instructions(config.get("skills", []), include_references='bash' not in tools)
+        except ValueError as exc:
+            raise ValueError(f"role {name} has invalid skills: {exc}") from exc
         permissions = config.get("permissions", {})
         if not isinstance(permissions, dict) or set(permissions) - {"workspace", "shell", "internet"}:
             raise ValueError(f"role {name} has invalid permissions")
@@ -230,9 +230,11 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
             raise ValueError(f"role {name} must grant internet permission for MCP servers")
         for alias, server in mcp_servers.items():
             if not isinstance(alias, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", alias) \
-                    or not isinstance(server, dict) or set(server) not in (
-                        {"command", "tools"}, {"url", "bearer_token_env", "tools"}):
+                    or not isinstance(server, dict) or set(server) - {'optional'} not in (
+                        {"command", "tools"}, {"url", "tools"}, {"url", "bearer_token_env", "tools"}):
                 raise ValueError(f"role {name} has invalid MCP server")
+            if type(server.get('optional', False)) is not bool:
+                raise ValueError(f"role {name} has invalid MCP optional flag")
             offered = server["tools"]
             if "url" in server:
                 url = server["url"]
@@ -243,16 +245,17 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
                         or parsed.password is not None or parsed.query or parsed.fragment
                         or any(char.isspace() for char in url)):
                     raise ValueError(f"role {name} needs a credential-free HTTPS MCP URL")
-                token_name = server["bearer_token_env"]
-                if not isinstance(token_name, str) or token_name not in config.get("env_names", []):
-                    raise ValueError(f"role {name} MCP token must be selected in env_names")
+                if 'bearer_token_env' in server:
+                    token_name = server["bearer_token_env"]
+                    if not isinstance(token_name, str) or token_name not in config.get("env_names", []):
+                        raise ValueError(f"role {name} MCP token must be selected in env_names")
             else:
                 command = server["command"]
                 if not isinstance(command, list) or not command or not all(
                         isinstance(part, str) and part for part in command):
                     raise ValueError(f"role {name} has invalid MCP command")
             if not isinstance(offered, list) or not offered or not all(
-                    isinstance(tool, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tool)
+                    isinstance(tool, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", tool)
                     for tool in offered) or len(offered) != len(set(offered)):
                 raise ValueError(f"role {name} has invalid MCP tools")
     # Role identity comes from the filename (or legacy block key), not settings.

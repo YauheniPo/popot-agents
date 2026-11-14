@@ -104,8 +104,8 @@ def build_work_status(saved, chats):
                ((item.get('roleConfig') or {}).get('_ax_delegation') or {}).get('root_session_id') == root_id}
     related[saved['sessionId']] = saved
     ordered = sorted(related.values(), key=lambda item: (
+        item['sessionId'] == saved['sessionId'], item['sessionId'] == root_id,
         item.get('updatedAt', ''), item['sessionId']), reverse=True)
-    ordered.sort(key=lambda item: (item['sessionId'] != saved['sessionId'], item['sessionId'] != root_id))
     result = {'rootSessionId': root_id, 'source': 'stored_worker_reports',
               'taskCount': len(ordered), 'tasks': [], 'truncated': len(ordered) > 8}
     for item in ordered[:8]:

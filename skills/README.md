@@ -4,7 +4,16 @@
 на коммите `a496f5513d4a4cf889bc48e189e579f4b0bdf6aa` (проверен `main` 31 октября 2026).
 Исходные файлы скопированы без изменений вместе со
 справочниками, шаблонами и `agents/`. Лицензия: [MIT](LICENSE.mattpocock).
-Версия и SHA-256 каждого файла: [upstream.json](upstream.json).
+
+Из [pproenca/dot-skills](https://github.com/pproenca/dot-skills/tree/cf93c57cac89d6fc3e4194686000411567f5caf3/skills/.curated/code-simplifier)
+импортирован `code-simplifier` на коммите `cf93c57cac89d6fc3e4194686000411567f5caf3`.
+Каталог `skills/.curated/code-simplifier` целиком скопирован без изменений в
+[`engineering/code-simplifier`](engineering/code-simplifier/SKILL.md), включая справочники,
+шаблон и metadata. Лицензия: [MIT](LICENSE.pproenca).
+
+Версии и SHA-256 каждого файла: [upstream.json](upstream.json). Основной источник
+сохранён в корне манифеста; дополнительные источники перечислены в
+`additional_sources` со своими каталогами, коммитами, хешами и лицензиями.
 
 ## Подборка по ролям
 
@@ -28,6 +37,7 @@
 | `skills/engineering/pr` | `backend_engineer`, `frontend_engineer` | Описание PR с результатами проверок и оценкой последствий изменений |
 | `skills/productivity/writing-for-agents` | `planner`, `backend_engineer`, `frontend_engineer` | Написание навыков и инструкций для агентов; справочник для `retro` |
 | `skills/engineering/retro` | `planner` | Ретроспектива сессии по явному запросу пользователя |
+| `skills/.curated/code-simplifier` (pproenca) | `backend_engineer`, `frontend_engineer`, `qa_engineer`, `code_reviewer` | Упрощение изменённого кода и тестов с сохранением поведения; проверка читаемости при ревью |
 
 Для `chat` и `cron_demo` специальные навыки из этого набора не нужны.
 
@@ -53,6 +63,11 @@
 `pr` помогает backend и frontend подготовить описание PR с доказательствами.
 `writing-for-agents` добавляет правила написания инструкций и справочник
 `SKILL-MECHANICS.md`. Состав прав и инструментов ролей задаётся отдельно.
+
+`code-simplifier` применяется при упрощении кода, тестов и проверке читаемости.
+Ревьюер использует его для оценки и рекомендаций в пределах своей роли.
+Справочники читаются по необходимости; полный свод `AGENTS.md` не загружается
+в каждый запрос. Импорт не запускает рефакторинг автоматически.
 
 `retro` доступен planner по явному запросу пользователя. Он разбирает текущую
 сессию или предоставленные материалы и предлагает улучшения окружения агента.

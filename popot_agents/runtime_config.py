@@ -24,7 +24,7 @@ FIELDS = {
     "workflow": {"max_turns", "total_seconds", "turn_seconds", "max_no_progress", "max_concurrent", "verification_reserve_seconds", "max_child_recoveries"},
     "mcp": {"discovery_attempts", "discovery_backoff_seconds", "default_role"},
     "limits": {"request_bytes", "message_chars", "history_bytes", "socket_message_bytes", "tool_output_chars",
-               "write_file_bytes", "download_bytes", "skill_prompt_bytes"},
+               "write_file_bytes", "download_bytes", "skill_prompt_bytes", "artifact_bytes"},
     "logging": {"mcp_body_max_bytes"},
     "model": {"default_max_tool_rounds", "request_retries", "request_retry_window_seconds", "temperature", "max_tokens", "final_answer_reserve_seconds", "final_answer_reserve_divisor", "max_tool_rounds", "context_tool_budget_chars", "context_recent_tool_results"},
     "memory": {"summary_attempts", "summary_max_tokens", "summary_retry_max_tokens", "recall_top_k",

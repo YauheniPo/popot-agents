@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 from contextlib import nullcontext
 import json
 import os
@@ -22,7 +23,7 @@ from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunErro
 from popot_agents.role_env import selected_role_env
 from ax_local.config import AX_CONFIG
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
-from popot_agents.progress import is_progress_message, emit_progress, progress_observer, redact_text
+from popot_agents.progress import is_progress_message, emit_progress, progress_observer, redact_text, format_progress
 from ..worker.remote_client import RESPONSE_PREFIX, PROGRESS_PREFIX
 from .worker_queue import WorkerQueue
 
@@ -204,6 +205,51 @@ class AxAgentRunner:
         }
 
     def remote(self, task_name: str, payload: dict, timeout: int = 60, *, on_progress=None) -> dict:
+        if payload.get('action') != 'message':
+            return self._remote_payload(task_name, payload, timeout, on_progress=on_progress)
+        request_id = uuid.uuid4().hex
+        payload = {**copy.deepcopy(payload), 'request_id': request_id}
+        deadline = time.monotonic() + timeout
+        recovering, attempt = False, 0
+        while True:
+            remaining = self._remote_remaining(deadline, timeout)
+            try:
+                result = self._remote_payload(
+                    task_name,
+                    {'action': 'recover', 'request_id': request_id} if recovering else payload,
+                    remaining, on_progress=on_progress)
+            except AxCommandError as exc:
+                recovering, attempt = self._remote_recovery(exc, attempt, deadline, timeout, on_progress)
+                continue
+            if attempt and not result.get('error') and on_progress:
+                on_progress(format_progress('worker_reconnected', attempt=attempt))
+            return result
+
+    @staticmethod
+    def _remote_remaining(deadline: float, timeout: int) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout)
+        return remaining
+
+    @staticmethod
+    def _remote_recovery(exc: AxCommandError, attempt: int, deadline: float, timeout: int,
+                         on_progress=None) -> tuple:
+        """Return the recovery state for the next attempt or re-raise a non-transport error."""
+        if 'rpc error: code = Unavailable' not in exc.diagnostic.get('stderr', ''):
+            raise exc
+        recovering = not getattr(exc, 'request_not_sent', False)
+        attempt += 1
+        if on_progress:
+            on_progress(format_progress('worker_reconnecting', attempt=attempt,
+                                        reason='ax_transport_unavailable'))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout) from exc
+        time.sleep(min(2, .5 * attempt, remaining))
+        return recovering, attempt
+
+    def _remote_payload(self, task_name: str, payload: dict, timeout: int = 60, *, on_progress=None) -> dict:
         raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
         if len(raw) + 1 > RUNTIME['limits']['socket_message_bytes']:
             raise AgentRunError('AX request is too large')
@@ -218,10 +264,14 @@ class AxAgentRunner:
                 raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout)
             return budget
 
-        request_id = uuid.uuid4().hex
-        for offset in range(0, len(encoded), 48000):
-            self._remote_command(task_name, "--chunk", request_id,
-                                 encoded[offset:offset + 48000], timeout=remaining())
+        request_id = payload.get('request_id') or uuid.uuid4().hex
+        try:
+            for offset in range(0, len(encoded), 48000):
+                self._remote_command(task_name, "--chunk", request_id,
+                                     str(offset), encoded[offset:offset + 48000], timeout=remaining())
+        except AxCommandError as exc:
+            exc.request_not_sent = True  # --consume was never invoked.
+            raise
         return self._remote_command(task_name, "--consume", request_id, timeout=remaining(), on_progress=on_progress)
 
     def _remote_command(self, task_name: str, *arguments: str, timeout: int, on_progress=None) -> dict:
@@ -815,7 +865,11 @@ class AxChat:
                                         timeout=timeout + AX_CONFIG["response_margin_seconds"],
                                         **({'on_progress': callback} if callback else {}))
         if isinstance(result.get("error"), str):
-            raise AgentRunError(result["error"])
+            failure = AgentRunError(result["error"])
+            if result.get('error_type') in {'TimeoutExpired', 'RecoveryUnavailable'}:
+                failure.diagnostic = {'task': self.container_name,
+                                      'operation': 'worker_message', 'reason': result['error_type']}
+            raise failure
         if not isinstance(result.get("answer"), str):
             raise AgentRunError("AX chat worker returned no answer")
         if self.runner.snapshot_mode == 'data':

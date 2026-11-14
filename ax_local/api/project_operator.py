@@ -158,7 +158,7 @@ class ProjectOperations:
             'cognee': lambda: self._json('http://cognee:8000/health'),
             'cognee_ui': lambda: self._http_status('http://host.docker.internal:3001/sessions'),
             'grafana': lambda: self._proxy('grafana', '/api/health'),
-            'prometheus': lambda: self._proxy('prometheus', '/api/v1/query?' + urlencode({'query':'up'})),
+            'prometheus': lambda: self._metrics({'query': 'up'}),
             'postgres': self._database,
         }.items():
             try:
@@ -167,6 +167,8 @@ class ProjectOperations:
                 result[name] = {'unavailable': True, 'error_type': type(exc).__name__}
         result['roles'] = {n: {k: v for k, v in r.items() if k in
             {'agent', 'harness2', 'timeout_seconds', 'max_tool_rounds'}} for n, r in self.roles.items()}
+        result['worker_pool'] = {'source_type': 'configuration',
+            **{key: AX_CONFIG[key] for key in ('atespace', 'worker_pool_name', 'warm_workers', 'max_workers')}}
         return result
 
     def _kubernetes(self, kind, params):
@@ -200,19 +202,42 @@ class ProjectOperations:
             'resources': [{'container': c['name'], 'resources': c.get('resources', {})}
                           for c in r['spec']['containers']]} for r in rows]
 
+    def _metric_range(self, params):
+        start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
+        if any(type(value) not in {int, float} for value in (start, end, step)) \
+                or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
+            raise ValueError('range must be <=7d, step>=15s and <=1500 points')
+        return {'start': start, 'end': end, 'step': step}
+
+    @staticmethod
+    def _metric_availability(result):
+        data = result.get('data', {})
+        if result.get('status') != 'success' or not isinstance(data.get('result'), list):
+            return 'unknown'
+        samples = data['result']
+        if data.get('resultType') == 'matrix':
+            return 'available' if any(row.get('values') or row.get('histograms')
+                                      for row in samples) else 'no_data'
+        if data.get('resultType') in ('vector', 'scalar', 'string'):
+            return 'available' if samples else 'no_data'
+        return 'unknown'
+
     def _metrics(self, params):
         query = params.get('query', '')
         if not isinstance(query, str) or not query.strip() or len(query) > 3000:
             raise ValueError('PromQL query of 1..3000 characters is required')
-        args = {'query': query, 'timeout':'5s'}
+        args = {'query': query, 'timeout': '5s'}
         if 'start' in params or 'end' in params:
-            start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
-            if any(type(v) not in {int, float} for v in (start, end, step)) \
-                    or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
-                raise ValueError('range must be <=7d, step>=15s and <=1500 points')
-            args.update(start=start, end=end, step=step)
+            args.update(self._metric_range(params))
         endpoint = 'query_range' if 'start' in args else 'query'
-        return self._proxy('prometheus', '/api/v1/' + endpoint + '?' + urlencode(args))
+        result = self._proxy('prometheus', '/api/v1/' + endpoint + '?' + urlencode(args))
+        return {**result, 'observation': {
+            'source_type': 'observation', 'observed_at': datetime.now(timezone.utc).isoformat(),
+            'query': query, 'range': {key: args[key] for key in ('start', 'end', 'step') if key in args},
+            'availability': self._metric_availability(result),
+            'interpretation': 'no_data means no samples for this query and scope, not zero utilization; '
+                              'unknown means availability could not be established.',
+        }}
 
     def _models(self):
         api = self._gateway()
@@ -283,7 +308,8 @@ class ProjectOperations:
         if not saved.get('status',{}).get('succeeded') and not saved.get('status',{}).get('failed') and wait:
             time.sleep(wait)
             saved = json.loads(self._kube('-n','ax-diagnostics','get','job',job,'-o','json'))
-        result = {'job':job, 'status':saved.get('status',{}), 'model':os.environ['HOLMES_MODEL']}
+        result = {'job':job, 'status':saved.get('status',{}), 'model':os.environ['HOLMES_MODEL'],
+                  'source_type': 'analysis', 'observed_at': datetime.now(timezone.utc).isoformat()}
         try:
             result['report'] = redact_text(self._kube('-n','ax-diagnostics','logs','job/'+job,
                                                     '--tail=200','--timestamps=true'))

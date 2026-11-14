@@ -73,6 +73,7 @@ class TurnMemory:
         self.dataset = project_dataset(messages, default=role.get('memory_project'))
         self.task = scrub(next((m['content'] for m in reversed(messages) if m.get('role') == 'user'), ''))[:RUNTIME["memory"]["task_chars"]]
         self.evidence = {'user': self.task}
+        self.evidence_sources = {'user': {'source_type': 'user'}}
         self.enabled = bool(self.dataset and 'cognee' in role.get('mcpServers', {})
                             and env.get('COGNEE_PASSWORD'))
         self.client = None
@@ -211,16 +212,20 @@ class TurnMemory:
         if len(self.tools) < RUNTIME["memory"]["trace_tool_limit"]:
             self.tools.append({'name': name[:200], 'status': 'error' if is_error else 'success',
                                'output_chars': len(output)})
-        if name.startswith('mcp__cognee__'):
+        if name.startswith('mcp__cognee__') or is_error:
             return
-        try:
-            if json.loads(output).get('isError'):
-                return
-        except (ValueError, AttributeError, TypeError):
-            pass
         self.evidence[call_id] = scrub(output)[:RUNTIME["memory"]["tool_evidence_chars"]]
+        inspection = arguments.get('kind') if name == 'project_inspect' else None
+        self.evidence_sources[call_id] = {
+            'tool': name[:200], 'observed_at': datetime.now(timezone.utc).isoformat(),
+            'source_type': 'analysis' if inspection == 'holmes' else 'observation',
+        }
+        if isinstance(inspection, str):
+            self.evidence_sources[call_id]['inspection_kind'] = inspection[:64]
         while len(self.evidence) > RUNTIME["memory"]["tool_evidence_count"] + 1:
-            del self.evidence[next(key for key in self.evidence if key != 'user')]
+            oldest = next(key for key in self.evidence if key != 'user')
+            del self.evidence[oldest]
+            del self.evidence_sources[oldest]
 
     def summary_messages(self, answer: str, *, task_status: str = 'completed') -> list[dict]:
         return [
@@ -228,7 +233,7 @@ class TurnMemory:
              render_prompt('memory/extract', max_memories=RUNTIME["memory"]["max_memories"])},
             {'role': 'user', 'content': json.dumps({
                 'project': self.dataset, 'task_status': task_status, 'task': self.task, 'answer': scrub(answer)[:RUNTIME["memory"]["answer_chars"]],
-                'evidence': self.evidence}, ensure_ascii=False)},
+                'evidence': self.evidence, 'evidence_sources': self.evidence_sources}, ensure_ascii=False)},
         ]
 
     def save(self, result: dict, *, task_status: str = 'completed') -> int:
@@ -247,14 +252,18 @@ class TurnMemory:
                     or not quote.strip() or len(quote) > RUNTIME["memory"]["quote_chars"] or quote not in self.evidence[source]
                     or (source == 'user' and kind not in {'decision', 'constraint'})):
                 continue
+            provenance = self.evidence_sources[source]
+            if provenance['source_type'] == 'analysis':
+                continue
             clean_text, clean_quote = scrub(text), scrub(quote)
             if '[REDACTED]' in clean_text or '[REDACTED]' in clean_quote:
                 continue
             accepted.append({'kind': kind, 'text': clean_text, 'source': source,
-                             'evidence_quote': clean_quote})
+                             'evidence_quote': clean_quote, 'provenance': provenance})
         if accepted:
             references = list(dict.fromkeys(ref.rstrip('.,;:!?') for ref in
-                re.findall(r'https://github\.com/[^\s)\]"<>]+', self.task)))
+                re.findall(r'https://github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+'
+                           r'(?:[/?#][^\s)\\\]"<>`*]*)?', self.task)))
             record = {'project': self.dataset, 'task_status': task_status, 'recorded_at': datetime.now(timezone.utc).isoformat(),
                       'agent_model': os.getenv('HARNESS_MODEL', ''), 'references': references,
                       'trust': 'agent-derived historical notes; verify current sources', 'memories': accepted}

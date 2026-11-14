@@ -100,4 +100,3 @@ class GvisorPinTests(unittest.TestCase):
             namespace = runpy.run_path(str(ROOT / 'ax_local/cluster/gvisor_runtime.py'),
                                        run_name='__main__')
         self.assertIn('main', namespace)
-

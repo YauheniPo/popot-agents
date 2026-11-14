@@ -266,6 +266,8 @@ class OperatorChangeTests(unittest.TestCase):
         self.assertEqual(job['metadata']['labels']['popot.dev/operator-session'],'actor')
         self.assertIn('Holmes observed',report['report'])
         self.assertEqual(report['status'],{'succeeded':1})
+        self.assertEqual(report['source_type'], 'analysis')
+        self.assertTrue(report['observed_at'])
         self.assertNotIn('fake-gateway',json.dumps(report))
 
     def test_resource_validation_rejects_excessive_limits_and_request_limit_inversion(self):
@@ -450,6 +452,26 @@ class OperatorInspectionTests(unittest.TestCase):
             result = self.ops.inspect('logs', {'pod': 'ax-worker', 'container': 'agent'})
         self.assertEqual(len(result['logs'].encode()), 8192)
 
+    def test_metrics_distinguish_missing_samples_from_zero_and_retain_query_scope(self):
+        for result_type, samples, expected in (
+                ('vector', [], 'no_data'),
+                ('matrix', [{'metric': {}, 'values': []}], 'no_data'),
+                ('vector', [{'metric': {}, 'value': [300, '0']}], 'available'),
+                ('matrix', [{'metric': {}, 'values': [[300, '0']]}], 'available'),
+                ('scalar', [300, '0'], 'available')):
+            response = {'status': 'success', 'data': {'resultType': result_type, 'result': samples}}
+            with self.subTest(result_type=result_type, samples=samples), \
+                 patch.object(self.ops, '_proxy', return_value=response):
+                result = self.ops.inspect('metrics', {'query': 'up', 'start': 0, 'end': 300, 'step': 30})
+            self.assertEqual(result['data'], response['data'])
+            observation = result['observation']
+            self.assertEqual(observation['availability'], expected)
+            self.assertEqual(observation['query'], 'up')
+            self.assertEqual(observation['range'], {'start': 0, 'end': 300, 'step': 30})
+            self.assertTrue(observation['observed_at'])
+        with patch.object(self.ops, '_proxy', return_value={'status': 'error', 'error': 'unavailable'}):
+            self.assertEqual(self.ops.inspect('metrics', {'query': 'up'})['observation']['availability'], 'unknown')
+
     def test_metrics_models_memory_and_sessions_use_only_their_bounded_read_routes(self):
         with patch.object(self.ops, '_proxy', return_value={'result': 'ok'}) as proxy:
             self.ops.inspect('metrics', {'query': 'up'})
@@ -481,17 +503,35 @@ class OperatorInspectionTests(unittest.TestCase):
         self.ops.store = None
         self.assertEqual(self.ops.inspect('sessions', {})['postgres'], {'backend': 'file'})
 
+
+    def test_metrics_reject_partial_or_out_of_bounds_ranges(self):
+        for params in ({'query': 'up', 'end': 300}, {'query': 'up', 'start': 0},
+                       {'query': 'up', 'start': 0, 'end': 300, 'step': 5}):
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                self.ops.inspect('metrics', params)
+
+    def test_metrics_unrecognised_result_type_stays_unknown(self):
+        from unittest.mock import patch
+        response = {'status': 'success', 'data': {'resultType': 'histogram', 'result': []}}
+        with patch.object(self.ops, '_proxy', return_value=response):
+            result = self.ops.inspect('metrics', {'query': 'up'})
+        self.assertEqual(result['observation']['availability'], 'unknown')
     def test_overview_is_partial_when_one_service_fails_and_redacts_service_details(self):
         self.ops.roles = {'test': {'agent': 'omniroute_free', 'env_names': ['SECRET']}}
         with patch.object(self.ops, '_api_health', return_value={'status': 'ok'}), \
              patch.object(self.ops, '_mcp_status', side_effect=TimeoutError), \
              patch.object(self.ops, '_json', return_value={'apiKey': 'hidden'}), \
              patch.object(self.ops, '_http_status', return_value={'http_status': 200}), \
-             patch.object(self.ops, '_proxy', return_value={'ready': True}):
+             patch.object(self.ops, '_proxy', return_value={'ready': True}), \
+             patch.dict('ax_local.api.project_operator.AX_CONFIG', {'warm_workers': 4, 'max_workers': 12}):
             overview = self.ops.inspect('overview', {})
         self.assertEqual(overview['ax_api'], {'status': 'ok'})
         self.assertEqual(overview['mcp_gateway'], {'unavailable': True, 'error_type': 'TimeoutError'})
         self.assertEqual(overview['roles'], {'test': {'agent': 'omniroute_free'}})
+        self.assertEqual(overview['worker_pool']['warm_workers'], 4)
+        self.assertEqual(overview['worker_pool']['max_workers'], 12)
+        self.assertEqual(overview['worker_pool']['source_type'], 'configuration')
+        self.assertEqual(overview['prometheus']['observation']['availability'], 'unknown')
         self.assertNotIn('hidden', json.dumps(overview))
 
     def test_restart_preserves_annotations_and_uses_an_optimistic_resource_version_check(self):

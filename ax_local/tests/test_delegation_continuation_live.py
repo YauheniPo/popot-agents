@@ -16,6 +16,17 @@ from ax_local.worker.delegation import make_tools
 from popot_agents.orchestrator.session_store import SessionStore
 
 
+SCREENSHOT_SCRIPT = '''from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.launch(args=["--no-sandbox"])
+    page = browser.new_page(viewport={"width": 400, "height": 300})
+    page.set_content("<canvas width=320 height=240></canvas>")
+    page.evaluate("() => { const ctx = document.querySelector('canvas').getContext('2d'); const image = ctx.createImageData(320, 240); for (let i = 0; i < image.data.length; i++) image.data[i] = i % 4 === 3 ? 255 : Math.floor(Math.random() * 256); ctx.putImageData(image, 0, 0); }")
+    page.screenshot(path="artifacts/screenshot.png")
+    browser.close()
+'''
+
+
 class ContinuationRunner(AxAgentRunner):
     def remote(self, *args, **kwargs):
         result = super().remote(*args, **kwargs)
@@ -37,13 +48,33 @@ def respond(request, **kwargs):
     body = json.loads(request.data)
     users = [m['content'] for m in body['messages'] if m['role'] == 'user']
     if users[-1] == 'artifact':
-        if body['messages'][-1].get('tool_call_id') == 'write-artifact':
+        if not any(m.get('tool_call_id') == 'context7-docs' for m in body['messages']):
+            if body['messages'][-1].get('tool_call_id') == 'context7-resolve':
+                if '/pytest-dev/pytest' not in body['messages'][-1]['content']:
+                    raise RuntimeError('Context7 library was not resolved')
+                name = 'mcp__context7__query-docs'
+                arguments = {'libraryId': '/pytest-dev/pytest/9.2.0',
+                             'query': 'How to parametrize test functions?', 'language': 'Python'}
+                call_id = 'context7-docs'
+            else:
+                name = 'mcp__context7__resolve-library-id'
+                arguments = {'libraryName': 'pytest', 'query': 'pytest 9.2 parametrized tests'}
+                call_id = 'context7-resolve'
+            message = {'tool_calls': [{'id': call_id, 'type': 'function', 'function': {
+                'name': name, 'arguments': json.dumps(arguments)}}]}
+            return io.BytesIO(json.dumps({'choices': [{'message': {'role': 'assistant', **message}}]}).encode())
+        if body['messages'][-1].get('tool_call_id') == 'context7-docs' and 'parametrize' not in body['messages'][-1]['content']:
+            raise RuntimeError('Context7 documentation was not returned')
+        if body['messages'][-1].get('tool_call_id') == 'write-screenshot':
             message = {'content': json.dumps({'status': 'completed', 'answer': 'patch prepared',
                 'evidence': ['patch written'], 'remaining_work': [], 'errors': []})}
         else:
+            screenshot = __SCREENSHOT_SCRIPT__
             message = {'tool_calls': [{'id': 'write-artifact', 'type': 'function', 'function': {
                 'name': 'write_file', 'arguments': json.dumps({'path': 'artifacts/fix.patch',
-                    'content': 'unpublished patch'})}}]}
+                    'content': 'unpublished patch'})}},
+                {'id': 'write-screenshot', 'type': 'function', 'function': {
+                    'name': 'bash', 'arguments': json.dumps({'command': "python - <<'PY'\\n" + screenshot + "PY"})}}]}
     elif users[-1] == 'finish':
         if not any(m.get('tool_call_id') == 'write-proof' for m in body['messages']):
             raise RuntimeError('fixture tool evidence was not restored')
@@ -70,6 +101,7 @@ def respond(request, **kwargs):
 http_harness.request.urlopen = respond
 main()
 '''
+        script = script.replace('__SCREENSHOT_SCRIPT__', repr(SCREENSHOT_SCRIPT))
         encoded = base64.b64encode(script.encode()).decode()
         manifest['spec']['command'] = ['python', '-u', '-c',
             "import base64; exec(base64.b64decode('" + encoded + "'))"]
@@ -86,9 +118,12 @@ class LiveDelegationContinuationTests(unittest.TestCase):
         runner = ContinuationRunner(image=os.environ['AX_TEST_WORKER_IMAGE'], model='fixture',
                                     base_url='http://localhost:1/v1')
         roles = {name: {'agent': 'fixture', '_ax_role': name, 'instructions': name,
-                        'tools': ['write_file'], 'max_tool_rounds': 2}
+                        'tools': ['write_file', 'bash'], 'max_tool_rounds': 5,
+                        'permissions': {'workspace': 'persistent', 'shell': True, 'internet': True}}
                  for name in ('parent', 'child')}
         roles['parent']['allowed_roles'] = ['child']
+        roles['child']['mcpServers'] = {'context7': {'url': 'https://mcp.context7.com/mcp',
+            'optional': True, 'tools': ['resolve-library-id', 'query-docs']}}
         policy = {'max_depth': 2, 'max_calls_per_turn': 3, 'turn_timeout_seconds': 180,
                   'poll_interval_seconds': .1}
         with tempfile.TemporaryDirectory() as directory:
@@ -104,9 +139,17 @@ class LiveDelegationContinuationTests(unittest.TestCase):
                     result = json.loads(delegate({'role': 'child', 'task': 'artifact'},
                         timeout_seconds=90, call_id='live-artifact'))
                 self.assertEqual(result['outcome']['status'], 'completed', result)
-                expected = [{'name': 'fix.patch', 'content': 'unpublished patch',
-                    'sha256': hashlib.sha256(b'unpublished patch').hexdigest()}]
-                self.assertEqual(result['outcome']['artifacts'], expected)
+                expected = result['outcome']['artifacts']
+                self.assertEqual(expected[0], {'name': 'fix.patch', 'content': 'unpublished patch',
+                    'sha256': hashlib.sha256(b'unpublished patch').hexdigest()})
+                self.assertEqual(len(expected), 2)
+                self.assertEqual(expected[1]['name'], 'screenshot.png')
+                self.assertEqual(expected[1]['encoding'], 'base64')
+                png = base64.b64decode(expected[1]['content'], validate=True)
+                self.assertTrue(png.startswith(b'\x89PNG\r\n\x1a\n'))
+                from popot_agents.runtime_config import RUNTIME
+                self.assertGreater(len(png), RUNTIME['limits']['tool_output_chars'])
+                self.assertEqual(expected[1]['sha256'], hashlib.sha256(png).hexdigest())
                 self.assertIsNone(runner.task_status('popot-chat-' + result['sessionId'])[0])
                 service.close()
                 script = '''

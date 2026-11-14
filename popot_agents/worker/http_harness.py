@@ -314,6 +314,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             name: shutil.which(name, path=tool_path) is not None for name in (
                 'git', 'gh', 'node', 'npm', 'go', 'postgres', 'pytest', 'coverage', 'ggshield', 'sonar-scanner')})
     mcp_servers = role_config.get("mcpServers", {})
+    if mcp_servers and discovery_cache is None:
+        discovery_cache = mcp_client.DiscoveryCache()
     # Optional startup work must not raise once the deadline is gone: skip it and
     # let the round loop checkpoint the partial answer.
     discovery_budget = remaining_or_none() if mcp_servers else None
@@ -322,7 +324,7 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                  if discovery_budget else {})
     memory_warnings = list(discovery_cache.warnings) if discovery_cache is not None else []
     if memory_warnings:
-        instructions += '\nProject memory is unavailable. Continue with current sources and tools; report this limitation.'
+        instructions += '\n' + ' '.join(memory_warnings) + ' Continue with current sources and tools; report these limitations.'
     # Writes use the curated runtime capture, not arbitrary model-selected text.
     mcp_tools.pop('mcp__cognee__remember', None)
     reviewer = role_config.get('name', role_config.get('_ax_role')) == 'code_reviewer'
@@ -373,7 +375,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
              'The owner arranges independent code review and QA; do not start duplicate verification children. '
              'Your completed subtask does not imply acceptance of the whole workflow.')})
     result_contract = render_prompt('reporting/result_contract', artifact_count_limit=MAX_ARTIFACTS,
-                                   artifact_byte_limit=RUNTIME['limits']['tool_output_chars'])
+                                   artifact_byte_limit=RUNTIME['limits']['tool_output_chars'],
+                                   artifact_total_byte_limit=RUNTIME['limits']['artifact_bytes'])
+    if 'context7' in mcp_servers:
+        messages.append({'role': 'system', 'content': render_prompt('tools/documentation')})
     if state is not None:
         messages.append({'role': 'system', 'content': result_contract})
     if delegation_prompt:
@@ -657,8 +662,9 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
             outcome.update(status='partial', reason='artifact_export_failed')
             outcome['errors'].append(str(exc))
             outcome['remaining_work'].append(
-                f'Fix the artifact export error before completing: keep at most {MAX_ARTIFACTS} plain UTF-8 '
-                f'files and {RUNTIME["limits"]["tool_output_chars"]} bytes in total in /workspace/artifacts. '
+                f'Fix the artifact export error before completing: keep at most {MAX_ARTIFACTS} regular '
+                f'files, {RUNTIME["limits"]["tool_output_chars"]} bytes of UTF-8 text and '
+                f'{RUNTIME["limits"]["artifact_bytes"]} bytes in total before encoding in /workspace/artifacts. '
                 'Move research inputs, raw logs and duplicate outputs to /workspace/research; '
                 'preserve the complete final deliverables.')
             status = 'partial'
@@ -1010,8 +1016,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 delegation_key = None
                                 raise ToolInputError('This subtask is already running; use await_tasks for '+
                                                      str(running['session_id'])+' instead of submitting it again')
-                            # Durable children outlive this activation. Reserve
-                            # only the two bounded submission RPC attempts here.
+                            # Durable children outlive this activation. Require
+                            # enough work budget to submit before waiting on them.
                             submission_budget = 10 if run_context is not None else 60
                             if not completed_child and tool_seconds() < submission_budget:
                                 if delegation_key in failed_delegations or any(
@@ -1218,10 +1224,11 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 answer = report['answer']
             except ValueError as exc:
                 invalid_results += 1
-                reason = str(exc)
-                format_error = reason
+                reason = getattr(exc, 'code', str(exc))
+                format_error = str(exc)
                 _trace('final_result_invalid', round=round_number, attempt=invalid_results,
-                       reason=reason, content_chars=len(answer) if isinstance(answer, str) else 0,
+                       reason=reason, **({'detail': exc.detail} if hasattr(exc, 'detail') else {}),
+                       content_chars=len(answer) if isinstance(answer, str) else 0,
                        finish_reason=finish_reason if finish_reason in
                            ('stop', 'length', 'tool_calls', 'content_filter') else 'unknown')
                 # Preserve even the failed correction in the resumable checkpoint.

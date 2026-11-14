@@ -6,6 +6,21 @@ from unittest.mock import patch
 
 
 class WorkStatusTests(unittest.TestCase):
+    def test_report_order_prioritizes_current_and_root_before_recency_and_id(self):
+        from popot_agents.orchestrator.work_status import build_work_status
+        root = {'sessionId': 'a' * 16, 'updatedAt': '2026-11-01', 'roleConfig': {}}
+        children = [{'sessionId': char * 16, 'updatedAt': updated,
+                     'roleConfig': {'_ax_delegation': {'root_session_id': root['sessionId']}}}
+                    for char, updated in (('b', '2026-11-02'), ('c', '2026-11-04'),
+                                          ('d', '2026-11-04'), ('e', '2026-11-03'))]
+        chats = [children[1], root, children[3], children[0], children[2]]
+        for current, expected in ((root, 'adceb'), (children[0], 'badce')):
+            for records in (chats, list(reversed(chats))):
+                with self.subTest(current=current['sessionId'], records=records):
+                    result = build_work_status(current, records)
+                    self.assertEqual([item['sessionId'] for item in result['tasks']],
+                                     [char * 16 for char in expected])
+
     def test_artifact_manifest_names_source_without_exporting_body_to_every_observer(self):
         from popot_agents.orchestrator.work_status import build_work_status
         saved = {'sessionId': 'a'*16, 'role': 'backend_engineer', 'roleConfig': {

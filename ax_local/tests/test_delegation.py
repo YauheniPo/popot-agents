@@ -247,6 +247,34 @@ class DelegationTests(unittest.TestCase):
         reopened = SessionStore(self.temporary.name)
         self.assertEqual(reopened.get(task['id'])['roleConfig']['_ax_delegation']['outcome']['artifacts'], [artifact])
 
+    def test_binary_artifact_is_durable_before_cleanup_and_readable_after_api_reopen(self):
+        import base64
+        import hashlib
+        from popot_agents.artifacts import collect_artifacts
+        from pathlib import Path
+        data = b'\x89PNG\r\n\x1a\n' + bytes(range(256)) * 1000
+        with tempfile.TemporaryDirectory() as workspace:
+            target = Path(workspace) / 'artifacts'
+            target.mkdir()
+            (target / 'screenshot.png').write_bytes(data)
+            artifacts = collect_artifacts(workspace)
+        self.runner.callback = lambda *_: {'answer': 'Browser check completed', 'outcome': {
+            'status': 'completed', 'evidence': ['UI check passed'], 'errors': [], 'remaining_work': [],
+            'artifacts': artifacts}}
+        original = FakeChat.close
+        def close(chat):
+            saved = self.store.get(chat.session_id)['roleConfig']['_ax_delegation']['outcome']['artifacts']
+            self.assertEqual(saved, artifacts)
+            original(chat)
+        with patch.object(FakeChat, 'close', close), self.service.turn(self.parent, 5):
+            task = self.wait_task(self.send()['id'])
+        self.assertTrue(self.runner.chats[0].closed)
+        self.assertEqual(task['metadata']['outcome']['status'], 'completed')
+        stored = SessionStore(self.temporary.name).get(task['id'])['roleConfig']['_ax_delegation']['outcome']['artifacts'][0]
+        restored = base64.b64decode(stored['content'], validate=True)
+        self.assertEqual(restored, data)
+        self.assertEqual(stored['sha256'], hashlib.sha256(restored).hexdigest())
+
     def test_consumed_child_comment_is_preserved_in_server_assignment_on_resume(self):
         message = 'Require 100% coverage'
         def first(chat, task):

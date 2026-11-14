@@ -44,20 +44,24 @@ def _parameters(config: dict):
 @asynccontextmanager
 async def _streams(config: dict):
     if "url" in config:
-        token_name = config["bearer_token_env"]
-        token = _bearer_token(config)
-        if not token:
-            raise ValueError(f"required MCP environment variable is missing or not selected: {token_name}")
+        headers = {}
+        if 'bearer_token_env' in config:
+            token = _bearer_token(config)
+            if not token:
+                raise ValueError(f"required MCP environment variable is missing or not selected: {config['bearer_token_env']}")
+            headers['Authorization'] = f'Bearer {token}'
         import httpx2
         from mcp.client.streamable_http import streamable_http_client
 
-        async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {token}"},
-                                     follow_redirects=False,
-                                     # Outer discovery/tool deadlines still apply.
-                                     timeout=httpx2.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
-                                         read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client:
-            async with streamable_http_client(config["url"], http_client=client) as (read, write):
-                yield read, write
+        async with (
+            httpx2.AsyncClient(headers=headers,
+                               follow_redirects=False,
+                               # Outer discovery/tool deadlines still apply.
+                               timeout=httpx2.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
+                                   read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client,
+            streamable_http_client(config["url"], http_client=client) as (read, write),
+        ):
+            yield read, write
     else:
         from mcp.client.stdio import stdio_client
 
@@ -169,7 +173,8 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None,
     if cache is not None:
         cache.warnings.clear()
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
-    for alias, config in sorted(servers.items(), key=lambda item: item[0] == 'cognee'):
+    for alias, config in sorted(servers.items(), key=lambda item: item[0] == 'cognee' or item[1].get('optional', False)):
+        optional = alias == 'cognee' or config.get('optional', False)
         key = cache.key(config) if cache is not None else None
         entry = cache.entries.get(alias) if cache is not None else None
         if entry and entry['key'] == key and (entry['tools'] is not None or time.monotonic() < entry['retry_at']):
@@ -177,7 +182,7 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None,
                 discovered.update(deepcopy(entry['tools']))
                 trace_event('mcp_discovery_cached', server=alias, elapsed_seconds=0)
             else:
-                cache.warnings.append('Project memory MCP is unavailable; using current sources.')
+                cache.warnings.append(_optional_warning(alias))
                 trace_event('mcp_optional_unavailable', server=alias, cached=True)
             continue
         try:
@@ -194,24 +199,29 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None,
             if cache is not None:
                 cache.entries[alias] = {'key':key, 'tools':deepcopy(tools)}
         except (TimeoutError, asyncio.TimeoutError) as exc:
-            if alias == 'cognee':
-                _optional_memory_failure(alias, key, cache)
+            if optional:
+                _optional_failure(alias, key, cache)
                 continue
             trace_event('mcp_discovery_failed', server=alias, reason='deadline_exceeded')
             raise RuntimeError(f"MCP server {alias} timed out during discovery") from exc
         except Exception as exc:
-            if alias == 'cognee':
-                _optional_memory_failure(alias, key, cache)
+            if optional:
+                _optional_failure(alias, key, cache)
                 continue
             trace_event('mcp_discovery_failed', server=alias, error=_error_text(config, exc))
             raise RuntimeError(f"MCP server {alias} failed during discovery: {_error_text(config, exc)}") from None
     return discovered
 
 
-def _optional_memory_failure(alias, key, cache):
-    trace_event('mcp_optional_unavailable', server=alias, warning='Project memory unavailable; main tools remain enabled')
+def _optional_warning(alias):
+    return ('Project memory MCP is unavailable; using current sources.' if alias == 'cognee' else
+            f'MCP server {alias} is unavailable; using current sources.')
+
+
+def _optional_failure(alias, key, cache):
+    trace_event('mcp_optional_unavailable', server=alias, warning=_optional_warning(alias))
     if cache is not None:
-        cache.warnings.append('Project memory MCP is unavailable; using current sources.')
+        cache.warnings.append(_optional_warning(alias))
         cache.entries[alias] = {'key':key, 'tools':None,
             'retry_at':time.monotonic() + RUNTIME['timeouts']['mcp_discovery_seconds']}
 

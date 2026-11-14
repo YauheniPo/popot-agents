@@ -18,6 +18,9 @@
 !ax_local/config.json
 !ax_local/cluster/
 !ax_local/cluster/build_versions.py
+!ax_local/cluster/holmes.py
+!ax_local/holmes/
+!ax_local/holmes/**
 !ax_local/api/
 !ax_local/api/**
 !ax_local/worker/

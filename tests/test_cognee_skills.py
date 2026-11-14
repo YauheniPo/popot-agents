@@ -51,6 +51,35 @@ class CogneeSkillsTests(unittest.TestCase):
         sync_skills(self.root, self.client, 'project-a')
         self.assertEqual(self.calls[0], self.calls[1])
 
+    def test_repository_code_simplifier_imports_all_bundled_markdown_without_truncation(self):
+        root = Path(__file__).resolve().parents[1] / 'skills'
+        count = sync_skills(root, self.client, 'project-a')
+        self.assertEqual(count, len(list(root.rglob('SKILL.md'))))
+        payload = next(payload for _, payload in self.calls
+                       if payload['skill_name'] == 'engineering--code-simplifier')
+        text = payload['skills_text']
+        self.assertGreater(len(text.encode('utf-8')), 100000)
+        for source in (root / 'engineering/code-simplifier').rglob('*.md'):
+            with self.subTest(source=source.name):
+                self.assertIn(source.read_text(encoding='utf-8'), text)
+
+    def test_import_budget_counts_utf8_bytes_and_source_headers_before_any_upload(self):
+        from memory import import_skills
+        self.skill()
+        directory = self.skill('engineering/z-last')
+        source = directory / 'SKILL.md'
+        text = source.read_text(encoding='utf-8')
+        text += '\n\n## Repository source\nskills/engineering/z-last/SKILL.md\n'
+        limit = len(text.encode('utf-8')) + 2
+        with patch.object(import_skills, 'MAX_SKILL_BYTES', limit):
+            source.write_text(source.read_text(encoding='utf-8') + 'é', encoding='utf-8')
+            self.assertEqual(sync_skills(self.root, self.client, 'project-a'), 2)
+            self.calls.clear()
+            source.write_text(source.read_text(encoding='utf-8') + 'x', encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, f'exceeds {limit} UTF-8 bytes: engineering/z-last'):
+                sync_skills(self.root, self.client, 'project-a')
+            self.assertEqual(self.calls, [])
+
     def test_validates_every_skill_before_any_upload(self):
         self.skill()
         broken = self.skill('engineering/z-broken')
