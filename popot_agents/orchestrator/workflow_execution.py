@@ -213,14 +213,12 @@ def _run_root_turns(scope, execution, workflow, delegation):
 
 
 def _root_failure(execution, workflow, record, exc):
-    interrupted = isinstance(exc, AgentRunError)
     result = None
     if workflow:
         result = execution.interrupted(exc)
         execution.save(record.messages)
-    if not interrupted:
-        execution.discard_worker()
-    elif not record.worker.is_alive():
+    keep_worker = isinstance(exc, AgentRunError) and record.worker.is_alive()
+    if not keep_worker:
         execution.discard_worker()
     if not workflow:
         raise exc
