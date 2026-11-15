@@ -15,6 +15,11 @@ from popot_agents.progress import redact_text
 
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / 'evals/config.json'
+ROOT_SESSION_ID = 'popot.root_session_id'
+SKILLS_CONFIGURED = 'popot.skills.configured'
+SKILL_REFERENCE_REQUESTED = 'popot.skill.reference_requested'
+KNOWN_EVENTS = {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer',
+                'tool_call', 'tool_result', 'tool_error', 'skills_loaded'}
 
 
 def load_config(path=CONFIG_PATH):
@@ -27,20 +32,28 @@ def load_config(path=CONFIG_PATH):
         raise ValueError('Phoenix tracing enabled must be boolean')
     if not isinstance(settings['project'], str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', settings['project']):
         raise ValueError('Phoenix tracing project must be a project name')
-    if not isinstance(settings['endpoint'], str):
-        raise ValueError('Phoenix endpoint must be an HTTP(S) origin')
-    url = parse.urlsplit(settings['endpoint'])
-    if (url.scheme not in {'http', 'https'} or not url.hostname or url.username or url.password
-            or url.query or url.fragment or url.path not in {'', '/'}):
-        raise ValueError('Phoenix endpoint must be an HTTP(S) origin without credentials')
+    _validate_endpoint(settings['endpoint'])
     if not isinstance(settings['outbox_directory'], str) or not Path(settings['outbox_directory']).is_absolute():
         raise ValueError('Phoenix outbox_directory must be absolute')
     if not isinstance(settings['api_key_env'], str) or not re.fullmatch(r'[A-Z_][A-Z0-9_]*', settings['api_key_env']):
         raise ValueError('Phoenix api_key_env must name an environment variable')
     for key in ('request_timeout_seconds', 'retry_seconds'):
-        if type(settings[key]) not in (int, float) or not 0 < settings[key] <= 60:
-            raise ValueError(f'Phoenix {key} must be between 0 and 60 seconds')
+        _validate_seconds(settings[key], key)
     return settings
+
+
+def _validate_endpoint(endpoint):
+    if not isinstance(endpoint, str):
+        raise ValueError('Phoenix endpoint must be an HTTP(S) origin')
+    url = parse.urlsplit(endpoint)
+    if (url.scheme not in {'http', 'https'} or not url.hostname or url.username or url.password
+            or url.query or url.fragment or url.path not in {'', '/'}):
+        raise ValueError('Phoenix endpoint must be an HTTP(S) origin without credentials')
+
+
+def _validate_seconds(value, key):
+    if type(value) not in (int, float) or not 0 < value <= 60:
+        raise ValueError(f'Phoenix {key} must be between 0 and 60 seconds')
 
 
 def _now():
@@ -72,7 +85,7 @@ class Span:
     def model_result(self, status, body):
         try:
             response = json.loads(body)
-        except (ValueError, UnicodeError):
+        except ValueError:
             response = {}
         if not isinstance(response, dict):
             response = {}
@@ -94,15 +107,15 @@ class Span:
 class AgentSpan(Span):
     def __init__(self, tracer, session_id, role, config, parent):
         delegation = config.get('_ax_delegation', {})
-        root_id = (parent.data['attributes']['popot.root_session_id'] if parent
+        root_id = (parent.data['attributes'][ROOT_SESSION_ID] if parent
                    else delegation.get('root_session_id') or session_id)
         metadata = {'role': role, 'session_id': session_id, 'root_session_id': root_id,
                     'skills_configured': config.get('skills', [])}
         attributes = {'session.id': root_id, 'popot.role': role,
                       'popot.agent_session_id': session_id,
-                      'popot.root_session_id': root_id,
+                      ROOT_SESSION_ID: root_id,
                       'popot.agent_profile': config.get('agent', 'unknown'),
-                      'popot.skills.configured': list(config.get('skills', [])),
+                      SKILLS_CONFIGURED: list(config.get('skills', [])),
                       'metadata': json.dumps(metadata)}
         parent_id = parent.session_id if parent else delegation.get('parent_session_id')
         if parent_id:
@@ -113,70 +126,98 @@ class AgentSpan(Span):
         self.outcome = None
 
     def event(self, message):
-        try:
-            event = json.loads(message)
-        except (TypeError, ValueError):
-            return
-        if not isinstance(event, dict) or event.get('agent_session_id', self.session_id) != self.session_id:
+        event = self._parsed(message)
+        if event is None:
             return
         kind = event.get('event')
         if not isinstance(kind, str):
             return
-        if kind not in {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer',
-                        'tool_call', 'tool_result', 'tool_error'}:
-            fields = {}
-            for key in ('name', 'server', 'error_type', 'code', 'stage', 'phase', 'reason', 'status', 'round', 'attempt'):
-                value = event.get(key)
-                if isinstance(value, str):
-                    fields[key] = redact_text(value)[:160]
-                elif type(value) is int and 0 <= value <= 1000000:
-                    fields[key] = value
-            events = self.data.setdefault('events', [])
-            events.append({'name': redact_text(kind)[:160], 'timestamp': _now(), 'attributes': fields})
-            del events[:-64]
+        if kind not in KNOWN_EVENTS:
+            self._record_unknown(kind, event)
         if kind == 'skills_loaded':
-            configured = self.data['attributes']['popot.skills.configured']
-            loaded = event.get('skills')
-            if isinstance(loaded, list):
-                self.data['attributes']['popot.skills.loaded'] = [s for s in loaded if s in configured]
-                metadata = json.loads(self.data['attributes']['metadata'])
-                metadata['skills_loaded'] = self.data['attributes']['popot.skills.loaded']
-                self.data['attributes']['metadata'] = json.dumps(metadata)
+            self._apply_skills_loaded(event)
         elif kind == 'tool_call':
-            key = event.get('call_id')
-            if not isinstance(key, str):
-                return
-            if key in self.pending:
-                self.pending.pop(key).finish()
-            name = event.get('name')
-            name = redact_text(name)[:256] if isinstance(name, str) else 'unknown'
-            span = Span(self.tracer, name, 'TOOL', parent=self,
-                        attributes={**self.base_attributes(), 'tool.name': name})
-            arguments = event.get('arguments')
-            path = arguments.get('path', '') if isinstance(arguments, dict) else ''
-            if event.get('name') == 'read_file' and isinstance(path, str):
-                for skill in self.data['attributes']['popot.skills.configured']:
-                    if '/skills/' + skill + '/' in '/' + path:
-                        span.data['attributes']['popot.skill.reference_requested'] = skill
-            self.pending[key] = span
+            self._start_tool(event)
         elif kind in {'tool_result', 'tool_error'}:
-            key = event.get('call_id')
-            if not isinstance(key, str):
-                return
-            span = self.pending.pop(key, None)
-            if span:
-                if kind == 'tool_error':
-                    span.data['status_code'] = 'ERROR'
-                    if isinstance(event.get('error_type'), str):
-                        span.data['attributes']['popot.error_type'] = redact_text(event['error_type'])[:160]
-                elif 'popot.skill.reference_requested' in span.data['attributes']:
-                    span.data['attributes']['popot.skill.reference_read'] = span.data['attributes']['popot.skill.reference_requested']
-                span.finish()
+            self._finish_tool(kind, event)
+
+    def _parsed(self, message):
+        try:
+            event = json.loads(message)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(event, dict):
+            return None
+        if event.get('agent_session_id', self.session_id) != self.session_id:
+            return None
+        return event
+
+    def _record_unknown(self, kind, event):
+        fields = {}
+        for key in ('name', 'server', 'error_type', 'code', 'stage', 'phase', 'reason', 'status', 'round', 'attempt'):
+            value = event.get(key)
+            if isinstance(value, str):
+                fields[key] = redact_text(value)[:160]
+            elif type(value) is int and 0 <= value <= 1000000:
+                fields[key] = value
+        events = self.data.setdefault('events', [])
+        events.append({'name': redact_text(kind)[:160], 'timestamp': _now(), 'attributes': fields})
+        del events[:-64]
+
+    def _apply_skills_loaded(self, event):
+        configured = self.data['attributes'][SKILLS_CONFIGURED]
+        loaded = event.get('skills')
+        if not isinstance(loaded, list):
+            return
+        self.data['attributes']['popot.skills.loaded'] = [s for s in loaded if s in configured]
+        metadata = json.loads(self.data['attributes']['metadata'])
+        metadata['skills_loaded'] = self.data['attributes']['popot.skills.loaded']
+        self.data['attributes']['metadata'] = json.dumps(metadata)
+
+    def _start_tool(self, event):
+        key = event.get('call_id')
+        if not isinstance(key, str):
+            return
+        if key in self.pending:
+            self.pending.pop(key).finish()
+        name = event.get('name')
+        name = redact_text(name)[:256] if isinstance(name, str) else 'unknown'
+        span = Span(self.tracer, name, 'TOOL', parent=self,
+                    attributes={**self.base_attributes(), 'tool.name': name})
+        path = self._requested_path(event)
+        if path is not None:
+            for skill in self.data['attributes'][SKILLS_CONFIGURED]:
+                if '/skills/' + skill + '/' in '/' + path:
+                    span.data['attributes'][SKILL_REFERENCE_REQUESTED] = skill
+        self.pending[key] = span
+
+    @staticmethod
+    def _requested_path(event):
+        arguments = event.get('arguments')
+        path = arguments.get('path', '') if isinstance(arguments, dict) else ''
+        if event.get('name') == 'read_file' and isinstance(path, str):
+            return path
+        return None
+
+    def _finish_tool(self, kind, event):
+        key = event.get('call_id')
+        if not isinstance(key, str):
+            return
+        span = self.pending.pop(key, None)
+        if not span:
+            return
+        if kind == 'tool_error':
+            span.data['status_code'] = 'ERROR'
+            if isinstance(event.get('error_type'), str):
+                span.data['attributes']['popot.error_type'] = redact_text(event['error_type'])[:160]
+        elif SKILL_REFERENCE_REQUESTED in span.data['attributes']:
+            span.data['attributes']['popot.skill.reference_read'] = span.data['attributes'][SKILL_REFERENCE_REQUESTED]
+        span.finish()
 
     def base_attributes(self):
         return {key: value for key, value in self.data['attributes'].items()
                 if key in {'session.id', 'popot.role', 'popot.agent_profile', 'metadata',
-                           'popot.agent_session_id', 'popot.root_session_id', 'popot.parent_session_id'}}
+                           'popot.agent_session_id', ROOT_SESSION_ID, 'popot.parent_session_id'}}
 
     def result(self, result):
         if not isinstance(result, dict):
@@ -257,16 +298,20 @@ class PhoenixTracer:
         except error.HTTPError as exc:
             with exc:
                 body = exc.read(65536)
-            if exc.code == 400:
-                response = json.loads(body)
-                detail = response.get('detail', {}) if isinstance(response, dict) else {}
-                detail = json.loads(detail) if isinstance(detail, str) else detail
-                duplicates = detail.get('duplicate_spans', []) if isinstance(detail, dict) else []
-                if (isinstance(detail, dict) and detail.get('total_received') == 1 and detail.get('total_duplicates') == 1
-                        and detail.get('total_invalid') == 0 and len(duplicates) == 1
-                        and duplicates[0].get('span_id') == span['context']['span_id']):
-                    return
+            if exc.code == 400 and self._duplicate_accepted(body, span['context']['span_id']):
+                return
             raise
+
+    @staticmethod
+    def _duplicate_accepted(body, span_id):
+        """Phoenix reports an already exported span as a 400 duplicate batch."""
+        response = json.loads(body)
+        detail = response.get('detail', {}) if isinstance(response, dict) else {}
+        detail = json.loads(detail) if isinstance(detail, str) else detail
+        duplicates = detail.get('duplicate_spans', []) if isinstance(detail, dict) else []
+        return (isinstance(detail, dict) and detail.get('total_received') == 1
+                and detail.get('total_duplicates') == 1 and detail.get('total_invalid') == 0
+                and len(duplicates) == 1 and duplicates[0].get('span_id') == span_id)
 
     def _run(self):
         while not self.stop.is_set():

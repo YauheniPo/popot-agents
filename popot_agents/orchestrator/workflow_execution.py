@@ -169,44 +169,61 @@ def run_root(server, session_id, record, message, workflow=None, *, role_config=
     scope = ExitStack()
     traced = None
     try:
-        tracer = getattr(server, 'tracer', None)
-        if tracer:
-            traced = scope.enter_context(tracer.session(session_id, record.role, execution.config or {}))
-            previous = progress_observer()
-            def trace_progress(message):
-                traced.event(message)
-                if previous:
-                    previous(message)
-            scope.enter_context(observe_progress(trace_progress))
-        if workflow and delegation:
-            scope.enter_context(delegation.workflow(session_id, workflow.deadline,
-                max_turns=workflow.policy['max_turns'], metadata=workflow.meta))
-            execution.stage = 'waiting_for_children'
-            delegation.await_children(session_id, record.worker, record.messages, workflow.deadline)
-        result = _run_turns(execution)
-        execution.stage = 'after_turn'
-        if hasattr(record.worker, 'after_turn'):
-            record.worker.after_turn()
-    except AgentRunError as exc:
-        if workflow:
-            result = execution.interrupted(exc)
-            execution.save(record.messages)
-        if not record.worker.is_alive():
-            execution.discard_worker()
-        if not workflow:
-            raise
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        if workflow:
-            result = execution.interrupted(exc)
-            execution.save(record.messages)
-        execution.discard_worker()
-        if not workflow:
-            raise
+        traced = _enter_trace(scope, server, session_id, record, execution)
+        result = _run_root_turns(scope, execution, workflow, delegation)
+    except (AgentRunError, subprocess.TimeoutExpired, OSError) as exc:
+        result = _root_failure(execution, workflow, record, exc)
     finally:
         # Root cleanup must finish before closing the delegation scope.
         if traced and 'result' in locals():
             traced.result(result)
         scope.close()
+    return result
+
+
+def _enter_trace(scope, server, session_id, record, execution):
+    tracer = getattr(server, 'tracer', None)
+    if not tracer:
+        return None
+    traced = scope.enter_context(tracer.session(session_id, record.role, execution.config or {}))
+    previous = progress_observer()
+
+    def trace_progress(message):
+        traced.event(message)
+        if previous:
+            previous(message)
+
+    scope.enter_context(observe_progress(trace_progress))
+    return traced
+
+
+def _run_root_turns(scope, execution, workflow, delegation):
+    session_id = execution.session_id
+    if workflow and delegation:
+        scope.enter_context(delegation.workflow(session_id, workflow.deadline,
+            max_turns=workflow.policy['max_turns'], metadata=workflow.meta))
+        execution.stage = 'waiting_for_children'
+        delegation.await_children(session_id, execution.record.worker, execution.record.messages,
+                                  workflow.deadline)
+    result = _run_turns(execution)
+    execution.stage = 'after_turn'
+    if hasattr(execution.record.worker, 'after_turn'):
+        execution.record.worker.after_turn()
+    return result
+
+
+def _root_failure(execution, workflow, record, exc):
+    interrupted = isinstance(exc, AgentRunError)
+    result = None
+    if workflow:
+        result = execution.interrupted(exc)
+        execution.save(record.messages)
+    if not interrupted:
+        execution.discard_worker()
+    elif not record.worker.is_alive():
+        execution.discard_worker()
+    if not workflow:
+        raise exc
     return result
 
 

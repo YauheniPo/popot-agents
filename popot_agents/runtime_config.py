@@ -41,12 +41,21 @@ def load_memory_config(path: str | Path | None = None) -> dict:
     with config_path.open(encoding="utf-8") as file:
         config = json.load(file)
     settings = config.get('x-agent') if isinstance(config, dict) else None
+    _validate_memory_settings(settings)
+    return settings
+
+
+def _validate_memory_settings(settings):
     if not isinstance(settings, dict) or set(settings) != MEMORY_FIELDS | {'timeouts'}:
         raise ValueError('memory config has invalid x-agent fields')
     for key in MEMORY_FIELDS:
         if type(settings[key]) is not int or settings[key] <= 0:
             raise ValueError(f'memory config has invalid {key}')
-    timeouts = settings['timeouts']
+    _validate_memory_timeouts(settings['timeouts'])
+    _validate_memory_limits(settings)
+
+
+def _validate_memory_timeouts(timeouts):
     if not isinstance(timeouts, dict) or set(timeouts) != MEMORY_TIMEOUTS:
         raise ValueError('memory config has invalid timeouts fields')
     for key, value in timeouts.items():
@@ -54,11 +63,13 @@ def load_memory_config(path: str | Path | None = None) -> dict:
             raise ValueError(f'memory config has invalid timeouts.{key}')
     if timeouts['memory_capture_min_seconds'] <= timeouts['memory_capture_margin_seconds']:
         raise ValueError('memory config memory_capture_min_seconds must exceed memory_capture_margin_seconds')
+
+
+def _validate_memory_limits(settings):
     if settings['max_memories'] > 5 or settings['trace_tool_limit'] > 200:
         raise ValueError('memory config limits exceed the Cognee session API contract')
     if settings['recall_top_k'] > 20:
         raise ValueError('memory config recall_top_k must not exceed 20')
-    return settings
 
 
 def validate_model_parameters(parameters: dict, label: str = "model parameters") -> dict:
