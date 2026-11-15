@@ -59,6 +59,24 @@ class ChunkedHistoryTests(unittest.TestCase):
             self.assertEqual(target.read_text(), 'private-data')
             call.assert_not_called()
 
+    def test_chunk_offsets_require_ascii_digits(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(remote_client, 'REQUEST_DIRECTORY', directory), \
+             redirect_stdout(io.StringIO()):
+            request_id = 'e' * 32
+            remote_client.main(['--chunk', request_id, 'YWJj'])
+            remote_client.main(['--chunk', request_id, '0000000004', 'ZGVm'])
+            path = Path(directory) / ('.ax-local-request-' + request_id)
+            self.assertEqual(path.read_text(), 'YWJjZGVm')
+            offsets = {'arabic-indic': '\u0664', 'extended arabic-indic': '\u06f4',
+                       'fullwidth': '\uff14', 'mixed ascii and arabic-indic': '1\u0664',
+                       'mixed ascii and fullwidth': '1\uff14', 'eleven ascii digits': '00000000004'}
+            for name, offset in offsets.items():
+                with self.subTest(case=name), \
+                     self.assertRaisesRegex(ValueError, 'invalid AX chunk offset'):
+                    remote_client.main(['--chunk', request_id, offset, 'YWJj'])
+            self.assertEqual(path.read_text(), 'YWJjZGVm')
+
     def test_large_unicode_history_reaches_worker_without_truncation(self):
         payload = {'action': 'restore', 'messages': [
             {'role': 'user', 'content': 'я' * 190000},
