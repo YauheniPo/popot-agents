@@ -229,8 +229,11 @@ def read_repository_context(timeout_seconds=None):
 
     if not WORKSPACE_ROOT.is_dir():
         return ''
-    context = _file_action('repository_context', {}, timeout_seconds)
-    return context if json.loads(context) else ''
+    try:
+        context = _file_action('repository_context', {}, timeout_seconds)
+        return context if json.loads(context) else ''
+    except (OSError, ValueError, subprocess.TimeoutExpired, ToolExecutionError):
+        return ''
 
 
 def export_artifacts(timeout_seconds=None):
