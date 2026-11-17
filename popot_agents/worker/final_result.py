@@ -163,3 +163,20 @@ def retained_receipts(messages, completed_children, observations=()):
         if receipt:
             receipts.append(receipt)
     return list(dict.fromkeys(receipts))[:limit]
+
+
+def _observation_receipt(item, chars):
+    '''One attributed check or CI observation, including its skip details.'''
+    receipt = (f"Observed {item['kind']} {item.get('tool')} ({item.get('callId')}): "
+               f"{item.get('status')}; {item.get('summary')}; "
+               f"revision={item.get('revision') or 'unverified'}")
+    if 'exitCode' in item:
+        receipt += f"; exit_code={item['exitCode']}"
+    if 'skipCount' in item:
+        receipt += f"; skipped={item['skipCount']}; unknown_skip_reasons={item.get('unknownSkipReasons', 0)}"
+    receipt += f" [sha256={item.get('outputSha256')}]"
+    if item.get('outputArtifact'):
+        receipt += f" Full output: {item['outputArtifact']}"
+    if item.get('skippedTests'):
+        receipt += '; skip details=' + json.dumps(item['skippedTests'], ensure_ascii=False)
+    return scrub(receipt)[:chars]

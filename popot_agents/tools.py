@@ -213,7 +213,20 @@ def _file_action(action: str, arguments: dict, timeout_seconds: float | None = N
     return completed.stdout.decode('utf-8')
 
 
+def _artifact_failure(stdout):
+    '''The artifact diagnostic message from an export failure, if any.'''
+    from popot_agents.artifacts import artifact_error_message
+    try:
+        diagnostic = json.loads(stdout)
+    except ValueError:
+        return None
+    if not isinstance(diagnostic, dict):
+        return None
+    return artifact_error_message(diagnostic.get('artifact_error'), diagnostic.get('minimum'))
+
+
 def read_repository_context(timeout_seconds=None):
+
     if not WORKSPACE_ROOT.is_dir():
         return ''
     context = _file_action('repository_context', {}, timeout_seconds)
