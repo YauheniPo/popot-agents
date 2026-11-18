@@ -705,6 +705,20 @@ class AxChat:
                 raise failure
             time.sleep(budget(AX_CONFIG['startup_probe_interval_seconds']))
 
+
+    def _retry_suspend(self, retry_policy, diagnostic, attempt) -> tuple[float, float]:
+        """Record a suspend retry error and return (retry_at, delay).
+
+        retry_policy(limit) -> remaining_seconds for the current attempt.
+        diagnostic dict is populated with retry_error_type and error details.
+        """
+        limit = retry_policy(30)
+        delay = min(2 ** attempt, 30)
+        retry_at = time.monotonic() + delay
+        diagnostic['retry_error_type'] = 'TimeoutExpired'
+        diagnostic['retry_delay'] = delay
+        return retry_at, delay
+
     def resume(self, *, timeout_seconds: float | None = None) -> None:
         with self._close_lock:
             if self.closed:

@@ -804,7 +804,10 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 {'role': 'user', 'content': json.dumps(
                     evidence_transcript(messages, context=user_context), ensure_ascii=False)}]
         if {'read_file', 'bash'} & set(allowed):
-            context = read_repository_context(timeout_seconds=remaining_seconds())
+            try:
+                context = read_repository_context(timeout_seconds=remaining_seconds())
+            except RuntimeError:
+                context = ""
             if context:
                 request_messages = [*request_messages, {'role': 'system', 'content':
                     render_prompt('tools/repository_context', context=context)}]
