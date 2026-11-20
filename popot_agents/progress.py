@@ -87,7 +87,13 @@ def redact_text(text):
                   '[REDACTED]', text, flags=re.DOTALL)
     text = re.sub(r'\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,})',
                   '[REDACTED]', text)
-    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"|\x27(?:[\'\\]|\\.)*\x27|[^\s,;]+)',
+    # Redact credential key=value pairs: split into simpler regexes to avoid
+    # cognitive complexity (SonarQube python:S5843) on a single monolithic pattern.
+    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)"(?:[^"\\]|\\.)*"',
+                  r'\1[REDACTED]', text)
+    text = re.sub(r"(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)\x27(?:[\'\\]|\\.)*\x27",
+                  r"\1[REDACTED]", text)
+    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)[^\s,;]+',
                   r'\1[REDACTED]', text)
     text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1[REDACTED]', text)
     return re.sub(r'(https?://)(?>[^\s:@/]{1,100}):(?>[^\s/@:@]{1,100})@', r'\1[REDACTED]@', text)
