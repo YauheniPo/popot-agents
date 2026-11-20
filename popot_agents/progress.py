@@ -12,7 +12,6 @@ import time
 
 _observer = ContextVar('agent_progress', default=None)
 
-
 class TurnProgress:
     """Bounded, payload-free snapshot for concurrent status readers."""
 
@@ -78,20 +77,20 @@ class TurnProgress:
                                                if result['lastError'] else None)
             return result
 
-
 def redact_text(text):
     for name, value in os.environ.items():
         if len(value) >= 4 and re.search(r'(TOKEN|PASSWORD|SECRET|_KEY)$', name):
             text = text.replace(value, '[REDACTED]')
-    text = re.sub(r'-----BEGIN [A-Za-z ]+PRIVATE KEY-----[A-Za-z0-9+/=\s]{0,2000}-----END [A-Za-z ]+PRIVATE KEY-----',
-                  '[REDACTED]', text)
+    text = re.sub(r'-----BEGIN [A-Za-z ]*?PRIVATE KEY-----'
+                  r'(?:(?!-----END).){0,2000}'
+                  r'-----END [A-Za-z ]*?PRIVATE KEY-----',
+                  '[REDACTED]', text, flags=re.DOTALL)
     text = re.sub(r'\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,})',
                   '[REDACTED]', text)
-    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"|\x27(?:[^\'\\]|\\.)*\x27|[^\s,;]+)',
+    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"|\x27(?:[\'\\]|\\.)*\x27|[^\s,;]+)',
                   r'\1[REDACTED]', text)
     text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1[REDACTED]', text)
-    return re.sub(r'(https?://)[^\s:@/]{1,100}:[^\s/@]{1,100}@', r'\1[REDACTED]@', text)
-
+    return re.sub(r'(https?://)(?>[^\s:@/]{1,100}):(?>[^\s/@:@]{1,100})@', r'\1[REDACTED]@', text)
 
 def _safe_fields(value):
     if isinstance(value, dict):
@@ -102,10 +101,8 @@ def _safe_fields(value):
         return [_safe_fields(item) for item in value]
     return redact_text(value) if isinstance(value, str) else value
 
-
 def format_progress(event, **fields):
     return json.dumps(_safe_fields({'event': event, **fields}), ensure_ascii=False)
-
 
 def is_progress_message(message):
     if not isinstance(message, str):
@@ -116,14 +113,10 @@ def is_progress_message(message):
         return False
     return isinstance(value, dict) and isinstance(value.get('event'), str) and bool(value['event'])
 
-
 def scoped_progress(role, message, *, session_id=None, root_session_id=None, parent_session_id=None):
     if not is_progress_message(message):
         return None
     value = json.loads(message)
-    # Preserve the source and its immediate parent through nested delegation.
-    # The caller supplies the authoritative root for the stream; the harness's
-    # own "role" field stays separate from source attribution.
     if role is not None:
         value.setdefault('agent_role', role)
     if not value.get('agent_session_id') or value['agent_session_id'] == session_id:
@@ -133,10 +126,8 @@ def scoped_progress(role, message, *, session_id=None, root_session_id=None, par
     value['root_session_id'] = root_session_id or value.get('root_session_id') or session_id
     return json.dumps(value, ensure_ascii=False)
 
-
 def progress_observer():
     return _observer.get()
-
 
 @contextmanager
 def observe_progress(callback):
@@ -146,23 +137,19 @@ def observe_progress(callback):
     finally:
         _observer.reset(token)
 
-
 def forward_progress(message):
     callback = _observer.get()
     if callback is not None and is_progress_message(message):
         callback(message)
 
-
 def emit_progress(event, **fields):
     if _observer.get() is not None:
         forward_progress(format_progress(event, **fields))
-
 
 def trace_event(event, **fields):
     message = format_progress(event, **fields)
     forward_progress(message)
     print(message, file=sys.stderr, flush=True)
-
 
 def trace_output(text):
     emit_progress('output', stream='stderr', content=text)
