@@ -1,0 +1,20 @@
+coverage:
+  status:
+    patch:
+      default:
+        informational: true
+        only_pulls: true
+
+comment:
+  layout: "header, diff, flags, components, files, footer"
+
+component_management:
+  individual_components:
+    - component_id: ax
+      name: AX
+      paths:
+        - ax_local/**
+    - component_id: popot_agents
+      name: Popot Agents
+      paths:
+        - popot_agents/**
