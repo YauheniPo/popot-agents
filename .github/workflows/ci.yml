@@ -82,6 +82,36 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  codecov:
+    name: Upload coverage to Codecov
+    needs: tests
+    # Fork and Dependabot runs keep their reports in GitHub without requesting OIDC.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-results
+          path: reports
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: reports/coverage.xml,reports/graph.lcov
+          disable_search: true
+          disable_telem: true
+          fail_ci_if_error: true
+
   test-report:
     name: Test results
     needs: tests
