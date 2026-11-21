@@ -762,7 +762,7 @@ class DelegationService:
             raise A2AError("messageId must be a nonempty string up to 100 characters")
         session_id = message.get('taskId')
         if session_id is not None and (not isinstance(session_id, str) or
-                not re.fullmatch(r'[0-9a-f]{16}', session_id)):
+                not re.fullmatch(SESSION_ID_RE, session_id)):
             raise A2AError('invalid continuation session ID')
         if message.get("contextId", root_id) != root_id:
             raise A2AError("task must belong to the caller's context")
@@ -864,7 +864,7 @@ class DelegationService:
             raise A2AError('invalid target revision')
         dependencies = extra.get('depends_on',[])
         if not isinstance(dependencies,list) or len(dependencies)>16 or any(
-                not isinstance(sid,str) or not re.fullmatch(r'[0-9a-f]{16}',sid) for sid in dependencies) \
+                not isinstance(sid,str) or not re.fullmatch(SESSION_ID_RE, sid) for sid in dependencies) \
                 or len(set(dependencies))!=len(dependencies):
             raise A2AError('depends_on must contain unique direct child session IDs')
         if dependencies and (not grant.run.persistent or is_probe):
