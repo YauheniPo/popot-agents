@@ -35,20 +35,10 @@ class TurnProgress:
         if event in {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer'}:
             return
         action = {'event': redact_text(event)[:160]}
-        for key in ('name', 'model', 'server', 'agent_role', 'agent_session_id',
-                    'root_session_id', 'parent_session_id', 'error_type',
-                    'code', 'stage', 'phase', 'reason'):
-            if isinstance(value.get(key), str):
-                action[key] = redact_text(value[key])[:160]
-        if 'parent_session_id' in value and value['parent_session_id'] is None:
-            action['parent_session_id'] = None
-        if (event == 'tool_error' and value.get('recoverable') is True
-                and value.get('error_type') in {'ToolInputError', 'MCPToolError'}
-                and isinstance(value.get('error'), str)):
-            action['message'] = redact_text(value['error'])[:400]
-        for key in ('round', 'attempt'):
-            if type(value.get(key)) is int and 0 <= value[key] <= 1000000:
-                action[key] = value[key]
+        self._redact_credential_fields(value, action)
+        self._handle_parent_session_id(value, action)
+        self._handle_tool_error(value, action)
+        self._handle_round_attempt(value, action)
         with self._lock:
             self._state['sequence'] += 1
             action['sequence'] = self._state['sequence']
@@ -67,6 +57,27 @@ class TurnProgress:
                 self._state['state'] = event
                 self._state['elapsedSeconds'] = round(time.monotonic() - self._started, 1)
 
+    def _redact_credential_fields(self, value, action):
+        for key in ('name', 'model', 'server', 'agent_role', 'agent_session_id',
+                    'root_session_id', 'parent_session_id', 'error_type',
+                    'code', 'stage', 'phase', 'reason'):
+            if isinstance(value.get(key), str):
+                action[key] = redact_text(value[key])[:160]
+
+    def _handle_parent_session_id(self, value, action):
+        if 'parent_session_id' in value and value['parent_session_id'] is None:
+            action['parent_session_id'] = None
+
+    def _handle_tool_error(self, value, action):
+        if event == 'tool_error' and value.get('recoverable') is True:
+            error_type = value.get('error_type')
+            if error_type in {'ToolInputError', 'MCPToolError'} and isinstance(value.get('error'), str):
+                action['message'] = redact_text(value['error'])[:400]
+
+    def _handle_round_attempt(self, value, action):
+        for key in ('round', 'attempt'):
+            if type(value.get(key)) is int and 0 <= value[key] <= 1000000:
+                action[key] = value[key]
     def snapshot(self):
         with self._lock:
             result = dict(self._state)
