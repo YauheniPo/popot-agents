@@ -94,7 +94,7 @@ def redact_text(text):
     text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)[^\s,;]+',
                   r'\1[REDACTED]', text)
     text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1[REDACTED]', text)
-    return re.sub(r'(https?://)[^\s:@/]{1,100}:[^\s/@:@]{1,100}@', r'\1[REDACTED]@', text)
+    return re.sub(r'(https?://)[^\s:@/]{1,100}:[^\s/@@]{1,100}@', r'\1[REDACTED]@', text)
 
 def _safe_fields(value):
     if isinstance(value, dict):
