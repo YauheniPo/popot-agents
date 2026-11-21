@@ -89,9 +89,9 @@ def redact_text(text):
                   '[REDACTED]', text)
     # Redact credential key=value pairs: split into simpler regexes to avoid
     # cognitive complexity (SonarQube python:S5843) on a single monolithic pattern.
-    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)"(?:[^"\\]|\\.)*"',
+    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)"[^"]*"',
                   r'\1[REDACTED]', text)
-    text = re.sub(r"(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)\x27(?:[\'\\]|\\.)*\x27",
+    text = re.sub(r"(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)'[^']*'",
                   r"\1[REDACTED]", text)
     text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)[^\s,;]+',
                   r'\1[REDACTED]', text)
