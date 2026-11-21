@@ -155,7 +155,7 @@ def _failure_classification(exc):
 
 def _run_error_detail(detail):
     """Known AgentRunError texts as publication-safe codes."""
-    model_http = re.fullmatch(r"model endpoint returned HTTP ([0-9]{3})", detail)
+    model_http = re.fullmatch(r"model endpoint returned HTTP (\\d{3})", detail)
     if model_http:
         return "model_http_error", model_http[0]
     if re.fullmatch(r"(?:\[Errno (?:54|104)\] )?Connection reset by peer", detail):
