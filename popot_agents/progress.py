@@ -69,7 +69,7 @@ class TurnProgress:
             action['parent_session_id'] = None
 
     def _handle_tool_error(self, value, action):
-        if event == 'tool_error' and value.get('recoverable') is True:
+        if value.get('event') == 'tool_error' and value.get('recoverable') is True:
             error_type = value.get('error_type')
             if error_type in {'ToolInputError', 'MCPToolError'} and isinstance(value.get('error'), str):
                 action['message'] = redact_text(value['error'])[:400]
