@@ -49,10 +49,14 @@ def _validate_memory_settings(settings):
     if not isinstance(settings, dict) or set(settings) != MEMORY_FIELDS | {'timeouts'}:
         raise ValueError('memory config has invalid x-agent fields')
     for key in MEMORY_FIELDS:
-        if type(settings[key]) is not int or settings[key] <= 0:
-            raise ValueError(f'memory config has invalid {key}')
+        _validate_memory_int_field(key, settings[key])
     _validate_memory_timeouts(settings['timeouts'])
     _validate_memory_limits(settings)
+
+
+def _validate_memory_int_field(key, value):
+    if type(value) is not int or value <= 0:
+        raise ValueError(f'memory config has invalid {key}')
 
 
 def _validate_memory_timeouts(timeouts):
