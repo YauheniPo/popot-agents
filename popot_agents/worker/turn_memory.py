@@ -164,7 +164,7 @@ class TurnMemory:
                                        top_k=MEMORY["recall_top_k"], timeout_seconds=seconds)
             chunks = []
             warming_up = False
-            for item in result if isinstance(result, list) else []:
+            for item in (result if isinstance(result, list) else []):
                 if not isinstance(item, dict) or not isinstance(item.get('text'), str):
                     continue
                 if item.get('status') == 'memory_warming_up':
