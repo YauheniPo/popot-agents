@@ -604,7 +604,7 @@ class AxChat:
     _messages: list[dict[str, str]] = field(default_factory=list, repr=False)
     _snapshot_issue: str | None = field(default=None, repr=False)
     _suspend_pending: bool = field(default=False, repr=False)
-    _checkpoint: dict = field(default_factory=dict, repr=False)
+    _checkpoint: dict[str, object] = field(default_factory=dict, repr=False)
 
     @property
     def idle_timeout_seconds(self) -> int:
