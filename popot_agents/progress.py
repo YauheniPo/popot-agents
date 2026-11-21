@@ -86,11 +86,12 @@ def redact_text(text):
             text = text.replace(value, _REDACTED)
     text = re.sub(r'-----BEGIN [^-]{1,100}PRIVATE KEY-----.*?-----END [^-]{1,100}PRIVATE KEY-----',
                   _REDACTED, text, flags=re.S)
-    text = re.sub(r'\b(?:gh[pousr]_\w{20,}|github_pat_\w+|sk-[A-Za-z0-9_-]{20,})',
-                  _REDACTED, text)
+    text = re.sub(r'\bgh[pousr]_\w{20,}\b', _REDACTED, text)
+    text = re.sub(r'\bgithub_pat_\w+\b', _REDACTED, text)
+    text = re.sub(r'\bsk-[\w-]{20,}\b', _REDACTED, text)
     text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)(?:"[^"]*"|\x27[^\x27]*\x27|[^\s,;]+)',
                   r'\1' + _REDACTED, text)
-    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1' + _REDACTED, text)
+    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S{1,256}', r'\1' + _REDACTED, text)
     return re.sub(r'(https?://)[^:@/\s]{1,64}:[^:@/\s]{1,64}@', r'\1' + _REDACTED + '@', text)
 
 
