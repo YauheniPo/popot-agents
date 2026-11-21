@@ -37,6 +37,10 @@ TRANSIENT_RESUME_PROBES = {'AX ssh failed', 'AX ssh timed out',
                           'AX ssh connection failed', 'AX ssh OS error'}
 
 
+
+SESSION_ID_RE = r'[0-9a-f]{16}'
+DELEGATION_CANCELED_ERROR = 'delegation canceled'
+
 def _revision_observations(saved):
     config = saved.get('roleConfig') or {}
     run_id = config.get('_ax_delegation', {}).get('run_id')
@@ -406,7 +410,7 @@ class DelegationService:
             ids = selection.get('session_ids') if isinstance(selection, dict) else None
             mode = selection.get('wait_for', 'all') if isinstance(selection, dict) else None
             if not isinstance(ids,list) or not 1 <= len(ids) <= 16 or any(
-                    not isinstance(sid,str) or not re.fullmatch(r'[0-9a-f]{16}',sid) for sid in ids) \
+                    not isinstance(sid,str) or not re.fullmatch(SESSION_ID_RE, sid) for sid in ids) \
                     or len(set(ids)) != len(ids) or mode not in {'all','any'}:
                 raise AgentRunError('Invalid child wait selection')
             pending = set(ids)
@@ -741,7 +745,7 @@ class DelegationService:
                     if job.config["_ax_delegation"]["state"] not in ACTIVE:
                         raise A2AError("task is no longer cancelable", -32002)
                     job.canceled.set()
-                    self._save(job, "TASK_STATE_CANCELED", error="delegation canceled")
+                    self._save(job, "TASK_STATE_CANCELED", error=DELEGATION_CANCELED_ERROR)
                 if job.chat:
                     job.chat.close()
                 self._cancel_children(job.session_id)
