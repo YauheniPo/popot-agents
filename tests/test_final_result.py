@@ -356,7 +356,7 @@ class FinalResultTests(unittest.TestCase):
             'second': {'role': 'qa_engineer', 'sessionId': 'b'*16, 'answer': 'second',
                        'outcome': {'evidence': ['must be truncated']}},
         }
-        with patch.dict(RUNTIME['memory'], {'tool_evidence_count': 3, 'tool_evidence_chars': 100}), \
+        with patch.dict(RUNTIME['limits'], {'tool_evidence_count': 3, 'tool_evidence_chars': 100}), \
              patch.dict('os.environ', {'GITHUB_PERSONAL_ACCESS_TOKEN': 'secret-test-value'}):
             receipts = retained_receipts([], children)
         first = f"Child backend_engineer (sessionId={'a'*16}) reported: "

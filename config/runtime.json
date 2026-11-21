@@ -16,16 +16,6 @@
     "file_action_seconds": 60,
     "file_download_seconds": 60,
     "postgres_connect_seconds": 10,
-    "memory_request_seconds": 5,
-    "memory_recall_seconds": 20,
-    "memory_session_start_seconds": 15,
-    "memory_session_finish_seconds": 5,
-    "memory_summary_seconds": 30,
-    "memory_capture_min_seconds": 8,
-    "memory_capture_margin_seconds": 5,
-    "memory_recall_min_seconds": 1,
-    "memory_tool_request_seconds": 60,
-    "memory_skill_import_seconds": 600,
     "turn_seconds": 900,
     "max_turn_seconds": 1800,
     "min_turn_seconds": 2,
@@ -54,7 +44,9 @@
     "artifact_bytes": 1000000,
     "write_file_bytes": 500000,
     "download_bytes": 20000000,
-    "skill_prompt_bytes": 262144
+    "skill_prompt_bytes": 262144,
+    "tool_evidence_chars": 6000,
+    "tool_evidence_count": 12
   },
   "logging": {
     "mcp_body_max_bytes": 65536
@@ -77,24 +69,8 @@
     "GITHUB_PERSONAL_ACCESS_TOKEN",
     "COGNEE_API_URL",
     "COGNEE_PASSWORD",
+    "PHOENIX_API_KEY",
     "GITGUARDIAN_API_KEY",
     "SONAR_TOKEN"
-  ],
-  "memory": {
-    "summary_attempts": 2,
-    "summary_max_tokens": 2000,
-    "summary_retry_max_tokens": 4000,
-    "recall_top_k": 8,
-    "task_chars": 8000,
-    "query_chars": 4000,
-    "chunk_chars": 4000,
-    "context_chars": 24000,
-    "tool_evidence_chars": 6000,
-    "tool_evidence_count": 12,
-    "answer_chars": 8000,
-    "max_memories": 5,
-    "text_chars": 1600,
-    "quote_chars": 600,
-    "trace_tool_limit": 200
-  }
+  ]
 }

@@ -10,28 +10,66 @@ from popot_agents.role_env import validate_role_env_names
 
 
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "config" / "runtime.json"
+MEMORY_PATH = Path(__file__).resolve().parents[1] / "memory" / "config.json"
+MEMORY_FIELDS = {"summary_attempts", "summary_max_tokens", "summary_retry_max_tokens", "recall_top_k",
+                 "task_chars", "query_chars", "chunk_chars", "context_chars", "answer_chars",
+                 "max_memories", "text_chars", "quote_chars", "trace_tool_limit"}
+MEMORY_TIMEOUTS = {"memory_request_seconds", "memory_recall_seconds", "memory_session_start_seconds",
+                   "memory_session_finish_seconds", "memory_summary_seconds", "memory_capture_min_seconds",
+                   "memory_capture_margin_seconds", "memory_recall_min_seconds", "memory_tool_request_seconds",
+                   "memory_skill_import_seconds"}
 FIELDS = {
     "sessions": {"default_idle_seconds", "retention_days", "prune_interval_seconds"},
     "timeouts": {"model_request_seconds", "mcp_discovery_seconds", "mcp_tool_seconds",
                  "mcp_http_seconds", "mcp_sse_read_seconds",
                  "mcp_upstream_seconds", "tool_command_seconds", "git_clone_seconds",
                  "file_action_seconds", "file_download_seconds", "postgres_connect_seconds",
-                 "turn_seconds", "max_turn_seconds", "min_turn_seconds", "turn_response_margin_seconds",
-                 "memory_request_seconds", "memory_recall_seconds", "memory_session_start_seconds",
-                 "memory_session_finish_seconds", "memory_summary_seconds",
-                 "memory_capture_min_seconds", "memory_capture_margin_seconds", "memory_recall_min_seconds", "memory_tool_request_seconds",
-                 "memory_skill_import_seconds"},
+                 "turn_seconds", "max_turn_seconds", "min_turn_seconds", "turn_response_margin_seconds"},
     "workflow": {"max_turns", "total_seconds", "turn_seconds", "max_no_progress", "max_concurrent", "verification_reserve_seconds", "max_child_recoveries"},
     "mcp": {"discovery_attempts", "discovery_backoff_seconds", "default_role"},
     "limits": {"request_bytes", "message_chars", "history_bytes", "socket_message_bytes", "tool_output_chars",
-               "write_file_bytes", "download_bytes", "skill_prompt_bytes", "artifact_bytes"},
+               "write_file_bytes", "download_bytes", "skill_prompt_bytes", "artifact_bytes",
+               "tool_evidence_chars", "tool_evidence_count"},
     "logging": {"mcp_body_max_bytes"},
     "model": {"default_max_tool_rounds", "request_retries", "request_retry_window_seconds", "temperature", "max_tokens", "final_answer_reserve_seconds", "final_answer_reserve_divisor", "max_tool_rounds", "context_tool_budget_chars", "context_recent_tool_results"},
-    "memory": {"summary_attempts", "summary_max_tokens", "summary_retry_max_tokens", "recall_top_k",
-               "task_chars", "query_chars", "chunk_chars", "context_chars", "tool_evidence_chars",
-               "tool_evidence_count", "answer_chars", "max_memories", "text_chars", "quote_chars",
-               "trace_tool_limit"},
 }
+
+
+def load_memory_config(path: str | Path | None = None) -> dict:
+    """Read the agent integration section; Compose validates the service settings."""
+    config_path = Path(path or os.getenv("POPOT_MEMORY_CONFIG", MEMORY_PATH))
+    with config_path.open(encoding="utf-8") as file:
+        config = json.load(file)
+    settings = config.get('x-agent') if isinstance(config, dict) else None
+    _validate_memory_settings(settings)
+    return settings
+
+
+def _validate_memory_settings(settings):
+    if not isinstance(settings, dict) or set(settings) != MEMORY_FIELDS | {'timeouts'}:
+        raise ValueError('memory config has invalid x-agent fields')
+    for key in MEMORY_FIELDS:
+        if type(settings[key]) is not int or settings[key] <= 0:
+            raise ValueError(f'memory config has invalid {key}')
+    _validate_memory_timeouts(settings['timeouts'])
+    _validate_memory_limits(settings)
+
+
+def _validate_memory_timeouts(timeouts):
+    if not isinstance(timeouts, dict) or set(timeouts) != MEMORY_TIMEOUTS:
+        raise ValueError('memory config has invalid timeouts fields')
+    for key, value in timeouts.items():
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f'memory config has invalid timeouts.{key}')
+    if timeouts['memory_capture_min_seconds'] <= timeouts['memory_capture_margin_seconds']:
+        raise ValueError('memory config memory_capture_min_seconds must exceed memory_capture_margin_seconds')
+
+
+def _validate_memory_limits(settings):
+    if settings['max_memories'] > 5 or settings['trace_tool_limit'] > 200:
+        raise ValueError('memory config limits exceed the Cognee session API contract')
+    if settings['recall_top_k'] > 20:
+        raise ValueError('memory config recall_top_k must not exceed 20')
 
 
 def validate_model_parameters(parameters: dict, label: str = "model parameters") -> dict:
@@ -99,7 +137,7 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
     with config_path.open(encoding="utf-8") as file:
         settings = json.load(file)
     if not isinstance(settings, dict) or set(settings) != set(FIELDS) | {"role_env_names"}:
-        raise ValueError("runtime config must define sessions, timeouts, mcp, workflow, limits, logging, model, memory and role_env_names")
+        raise ValueError("runtime config must define sessions, timeouts, mcp, workflow, limits, logging, model and role_env_names")
     try:
         validate_role_env_names(settings["role_env_names"])
     except ValueError as exc:
@@ -138,18 +176,13 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
         raise ValueError("runtime config limits.socket_message_bytes must exceed history_bytes and request_bytes")
     if settings["timeouts"]["turn_seconds"] > settings["timeouts"]["max_turn_seconds"]:
         raise ValueError("runtime config timeouts.turn_seconds must not exceed role timeout cap")
-    if settings['timeouts']['memory_capture_min_seconds'] <= settings['timeouts']['memory_capture_margin_seconds']:
-        raise ValueError('runtime config memory_capture_min_seconds must exceed memory_capture_margin_seconds')
     if settings['timeouts']['min_turn_seconds'] >= settings['timeouts']['turn_seconds']:
         raise ValueError('runtime config timeouts.min_turn_seconds must be below turn_seconds')
-    if not 1 <= settings['memory']['max_memories'] <= 5 or settings['memory']['trace_tool_limit'] > 200:
-        raise ValueError('runtime config memory limits exceed the Cognee session API contract')
-    if settings['memory']['recall_top_k'] > 20:
-        raise ValueError('runtime config memory.recall_top_k must not exceed 20')
-    if settings['timeouts']['turn_response_margin_seconds'] < (2 * settings['timeouts']['memory_session_start_seconds']
-                                                        + settings['timeouts']['memory_session_finish_seconds']):
+    if settings['timeouts']['turn_response_margin_seconds'] < (2 * MEMORY['timeouts']['memory_session_start_seconds']
+                                                        + MEMORY['timeouts']['memory_session_finish_seconds']):
         raise ValueError('runtime config timeouts.turn_response_margin_seconds must cover memory session requests')
     return settings
 
 
+MEMORY = load_memory_config()
 RUNTIME = load_runtime_config()

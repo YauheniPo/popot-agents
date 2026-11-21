@@ -25,7 +25,7 @@ if not __package__:
         if (parent / 'popot_agents/runtime_config.py').is_file():
             sys.path.insert(0, str(parent))
             break
-from popot_agents.runtime_config import RUNTIME
+from popot_agents.runtime_config import MEMORY
 
 
 class MemoryServiceError(RuntimeError):
@@ -74,7 +74,7 @@ def memory_document(data: str, dataset_name: str) -> tuple[str, dict]:
 
 
 class CogneeMemory:
-    def __init__(self, api_url: str, password: str, timeout: float = RUNTIME["timeouts"]["memory_tool_request_seconds"]):
+    def __init__(self, api_url: str, password: str, timeout: float = MEMORY["timeouts"]["memory_tool_request_seconds"]):
         parsed = parse.urlsplit(api_url)
         if (parsed.scheme not in {'http', 'https'} or not parsed.hostname
                 or parsed.username or parsed.password or parsed.query or parsed.fragment

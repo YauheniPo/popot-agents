@@ -89,7 +89,7 @@ class ProjectLayoutTests(unittest.TestCase):
             (fixture / 'ax_local/cluster').mkdir(parents=True)
             (fixture / 'memory/ui').mkdir(parents=True)
             for path in ('compose.sh', 'ax_local/cluster/build_versions.py',
-                         'ax_local/compose.yaml', 'memory/compose.yaml'):
+                         'ax_local/compose.yaml', 'memory/compose.yaml', 'memory/config.json'):
                 shutil.copyfile(root / path, fixture / path)
             (fixture / 'pyproject.toml').write_text('[tool.popot.build]\n' + ''.join(
                 f'{key} = "{value}"\n' for key, value in pins.items()))
@@ -123,6 +123,55 @@ class ProjectLayoutTests(unittest.TestCase):
         self.assertEqual(memory['cognee-ui']['build']['additional_contexts'], {
             'node-base': 'docker-image://' + pins['NODE_IMAGE'],
             'cognee-ui-base': 'docker-image://cognee/cognee-ui:' + pins['COGNEE_VERSION']})
+
+    @unittest.skipUnless(shutil.which('docker'), 'Docker Compose is required')
+    def test_service_settings_follow_adjacent_json_and_shared_phoenix_pin(self):
+        from ax_local.cluster.build_versions import BUILD_VERSIONS
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            env_file = fixture / '.env'
+            env_file.write_text('COGNEE_PASSWORD=layout-test\nPHOENIX_SECRET=layout-test\n'
+                                'PHOENIX_ADMIN_SECRET=layout-test\n'
+                                'PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD=layout-test\n')
+            for name in ('memory', 'evals'):
+                with self.subTest(service=name):
+                    folder = fixture / name
+                    folder.mkdir()
+                    shutil.copyfile(root / name / 'compose.yaml', folder / 'compose.yaml')
+                    settings = json.loads((root / name / 'config.json').read_text())
+                    service_name = 'cognee' if name == 'memory' else 'phoenix'
+                    service = settings['services'][service_name]
+                    service['environment']['CONFIG_RELOAD_PROBE'] = 'from-adjacent-json'
+                    service['restart'] = 'on-failure'
+                    if name == 'memory':
+                        service['environment']['GRAPH_EXTRACTOR'] = 'fixture-extractor'
+                        service['healthcheck']['interval'] = '19s'
+                    else:
+                        service['ports'] = ['127.0.0.1:16006:6006']
+                        service['mem_limit'] = '768m'
+                    (folder / 'config.json').write_text(json.dumps(settings))
+                    result = subprocess.run(
+                        ['bash', str(root / 'compose.sh'), '--env-file', str(env_file),
+                         '-f', str(folder / 'compose.yaml'), 'config', '--format', 'json'],
+                        cwd=directory, env={key: value for key, value in os.environ.items()
+                                            if not key.startswith('COMPOSE_')},
+                        text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    actual = json.loads(result.stdout)['services'][service_name]
+                    self.assertEqual(actual['restart'], 'on-failure')
+                    self.assertEqual(actual['environment']['CONFIG_RELOAD_PROBE'], 'from-adjacent-json')
+                    if name == 'memory':
+                        self.assertEqual(actual['environment']['GRAPH_EXTRACTOR'], 'fixture-extractor')
+                        self.assertEqual(actual['healthcheck']['interval'], '19s')
+                        self.assertEqual(actual['environment']['DEFAULT_USER_PASSWORD'], 'layout-test')
+                    else:
+                        self.assertEqual(actual['image'], BUILD_VERSIONS['PHOENIX_IMAGE'])
+                        self.assertEqual(actual['mem_limit'], str(768 * 1024 * 1024))
+                        self.assertEqual(actual['ports'][0]['published'], '16006')
+                        self.assertEqual(actual['ports'][0]['host_ip'], '127.0.0.1')
+                        self.assertEqual(actual['environment']['PHOENIX_SECRET'], 'layout-test')
 
     def test_orchestrator_loads_profiles_and_roles_from_config_directory(self):
         from popot_agents.orchestrator.main import load_agents, load_roles

@@ -78,6 +78,7 @@ def refine_role(messages, role, *, deadline, tool_names):
             'parameters': json.loads(os.getenv('HARNESS_MODEL_PARAMETERS_JSON', '{}')),
             'improver_parameters': json.loads(os.getenv('HARNESS2_MODEL_PARAMETERS_JSON', '{}')),
             'budget_seconds': budget,
+            'session_id': os.getenv('HARNESS_CHAT_ID', ''),
         }
         if mode == 'execution':
             # Actual probes must receive the complete input, not a truncated
@@ -139,6 +140,8 @@ class PlanningClient:
                     'notes': {'type': 'string'}}, 'required': ['prompt', 'notes'], 'additionalProperties': False}}}]
             body['tool_choice'] = {'type': 'function', 'function': {'name': 'propose_prompt'}}
         headers = {'Content-Type': 'application/json'}
+        if re.fullmatch(r'[a-f0-9]{16}', payload.get('session_id', '')):
+            headers['X-Popot-Session-Id'] = payload['session_id']
         key = payload['improver_key' if improver else 'key']
         if key:
             headers['Authorization'] = 'Bearer ' + key

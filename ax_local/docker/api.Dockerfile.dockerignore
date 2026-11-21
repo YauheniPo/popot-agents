@@ -28,5 +28,9 @@
 !ax_local/worker/remote_client.py
 !config/
 !config/**
+!memory/
+!memory/config.json
+!evals/
+!evals/config.json
 **/__pycache__/
 **/*.pyc

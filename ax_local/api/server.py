@@ -171,11 +171,19 @@ def main() -> None:
     kind_ip = network_address_toward(kind_control_plane_host(context), 6443)
     os.environ["AX_LOCAL_BASE_URL"] = f"http://{kind_ip}:{AX_CONFIG['proxy']['port']}/v1"
     os.environ["AX_LOCAL_BIND_HOST"] = network_address_toward("db", 5432)
-    proxy = a2a = worker_pool = None
+    proxy = a2a = worker_pool = tracer = None
     try:
         server = make_server()
+        from .phoenix import PhoenixTracer, load_config
+        tracing = load_config()
+        if tracing['enabled']:
+            tracer = PhoenixTracer(tracing, api_key=os.getenv(tracing['api_key_env'], ''))
+            server.tracer = tracer
+            server.cron.tracer = tracer
+            if server.delegation:
+                server.delegation.tracer = tracer
         configure_ax_server_tunnel(context, AX_CONFIG['atespace'])
-        proxy = start_proxy(server.provider_routes, host=kind_ip)
+        proxy = start_proxy(server.provider_routes, host=kind_ip, tracer=tracer)
         # All profiles use the same AX namespace; recover its Tasks once.
         server.worker_managers[0].recover_workers()
         worker_pool = WorkerPoolController(
@@ -204,6 +212,8 @@ def main() -> None:
         if proxy:
             proxy.shutdown()
             proxy.server_close()
+        if tracer:
+            tracer.close()
         raise
     def stop_on_sigterm(_signum, _frame):
         raise KeyboardInterrupt
@@ -228,6 +238,8 @@ def main() -> None:
         server.server_close()
         proxy.shutdown()
         proxy.server_close()
+        if tracer:
+            tracer.close()
         signal.signal(signal.SIGTERM, previous_handler)
 
 

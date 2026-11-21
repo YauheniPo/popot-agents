@@ -180,16 +180,16 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(requests[-1]['tool_choice'], 'none')
 
     def test_memory_budget_validation_rejects_impossible_capture_and_nonfinite_timeouts(self):
-        from popot_agents.runtime_config import load_runtime_config
+        from popot_agents.runtime_config import load_memory_config
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'runtime.json'
+            path = Path(directory) / 'memory.json'
             for field, value in [('memory_summary_seconds', float('inf')),
-                                 ('memory_capture_margin_seconds', load_runtime_config()['timeouts']['memory_capture_min_seconds'])]:
-                settings = load_runtime_config()
+                                 ('memory_capture_margin_seconds', load_memory_config()['timeouts']['memory_capture_min_seconds'])]:
+                settings = load_memory_config()
                 settings['timeouts'][field] = value
-                path.write_text(json.dumps(settings))
+                path.write_text(json.dumps({'x-agent': settings}))
                 with self.subTest(field=field), self.assertRaises(ValueError):
-                    load_runtime_config(path)
+                    load_memory_config(path)
 
     def test_default_config_collects_runtime_limits_and_timeouts(self):
         from popot_agents.runtime_config import DEFAULT_PATH, load_runtime_config

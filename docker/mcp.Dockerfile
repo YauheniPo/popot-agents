@@ -12,6 +12,7 @@ COPY popot_agents/runtime_config.py /app/popot_agents/
 COPY popot_agents/role_env.py /app/popot_agents/
 COPY popot_agents/progress.py /app/popot_agents/
 COPY config/runtime.json /app/config/runtime.json
+COPY memory/config.json /app/memory/config.json
 USER mcp
 
 ENV MCP_HOST=0.0.0.0 MCP_PORT=8001 MCP_ORCHESTRATOR_URL=http://api:8002

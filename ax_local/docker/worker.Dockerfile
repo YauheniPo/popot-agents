@@ -54,6 +54,7 @@ COPY popot_agents/worker /app/popot_agents/worker
 COPY ax_local/__init__.py /app/ax_local/
 COPY ax_local/worker /app/ax_local/worker
 COPY config/runtime.json /app/config/runtime.json
+COPY memory/config.json /app/memory/config.json
 COPY config/prompts /app/config/prompts
 RUN python -c 'import popot_agents.worker.http_harness, ax_local.worker.entrypoint'
 ENV PYTHONPATH=/app
