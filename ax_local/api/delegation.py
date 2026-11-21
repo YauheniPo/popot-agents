@@ -246,12 +246,15 @@ class DelegationService:
         self.runners, self.store = runners, store
         self.base_url = base_url.rstrip("/")
         self.lock = threading.RLock()
+        self.closed = False
+        self.discovery_samples = {}
+        self._reset_state_maps()
+
+    def _reset_state_maps(self):
         self.grants: dict[str, Grant] = {}
         self.tokens: dict[str, Grant] = {}
         self.jobs: dict[str, Job] = {}
         self.retained: dict[str, tuple[object, float]] = {}
-        self.closed = False
-        self.discovery_samples = {}
 
     @contextmanager
     def workflow(self, session_id, deadline, *, max_turns, metadata=None):
@@ -407,8 +410,11 @@ class DelegationService:
         selection = checkpoint.get('await_tasks')
         mode = 'all'
         if selection is not None:
-            ids = selection.get('session_ids') if isinstance(selection, dict) else None
-            mode = selection.get('wait_for', 'all') if isinstance(selection, dict) else None
+            ids = None
+            mode = 'all'
+            if isinstance(selection, dict):
+                ids = selection.get('session_ids')
+                mode = selection.get('wait_for', 'all')
             if not isinstance(ids,list) or not 1 <= len(ids) <= 16 or any(
                     not isinstance(sid,str) or not re.fullmatch(SESSION_ID_RE, sid) for sid in ids) \
                     or len(set(ids)) != len(ids) or mode not in {'all','any'}:
