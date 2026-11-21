@@ -131,6 +131,29 @@ def validate_workflow_policy(policy, max_turn_seconds):
 
 
 
+def _validate_field_value(field, value, settings):
+    """Validate a single runtime config field value."""
+    if field == "mcp.default_role":
+        return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", value) is not None
+    if field == "model.temperature":
+        return value is None or (type(value) in (int, float) and 0 <= value <= 2)
+    if field == "model.max_tokens":
+        return value is None or (type(value) is int and value > 0)
+    if field == "model.default_max_tool_rounds":
+        cap = settings["model"]["max_tool_rounds"]
+        return type(value) is int and type(cap) is int and 1 <= value <= cap
+    if field == "model.request_retries":
+        if type(value) is not int or value < 0:
+            raise ValueError("runtime config model.request_retries must be a non-negative integer "
+                             "(0 disables retries)")
+        return True
+    if field in {"timeouts.turn_seconds", "timeouts.max_turn_seconds", "timeouts.turn_response_margin_seconds"}:
+        return type(value) is int and value > 0
+    if field.split(".")[0] == "timeouts" or field == "mcp.discovery_backoff_seconds":
+        return type(value) in (int, float) and math.isfinite(value) and value > 0
+    return type(value) is int and value > 0
+
+
 def load_runtime_config(path: str | Path | None = None) -> dict:
     """Read and validate shared settings; changes take effect on restart."""
     config_path = Path(path or os.getenv("POPOT_RUNTIME_CONFIG", DEFAULT_PATH))
@@ -148,27 +171,7 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
             raise ValueError(f"runtime config has invalid {section} fields")
         for name, value in values.items():
             field = f"{section}.{name}"
-            if field == "mcp.default_role":
-                valid = isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", value) is not None
-            elif field == "model.temperature":
-                valid = value is None or (type(value) in (int, float) and 0 <= value <= 2)
-            elif field == "model.max_tokens":
-                valid = value is None or (type(value) is int and value > 0)
-            elif field == "model.default_max_tool_rounds":
-                cap = settings["model"]["max_tool_rounds"]
-                valid = type(value) is int and type(cap) is int and 1 <= value <= cap
-            elif field == "model.request_retries":
-                if type(value) is not int or value < 0:
-                    raise ValueError("runtime config model.request_retries must be a non-negative integer "
-                                     "(0 disables retries)")
-                valid = True
-            elif field in {"timeouts.turn_seconds", "timeouts.max_turn_seconds", "timeouts.turn_response_margin_seconds"}:
-                valid = type(value) is int and value > 0
-            elif section == "timeouts" or field == "mcp.discovery_backoff_seconds":
-                valid = type(value) in (int, float) and math.isfinite(value) and value > 0
-            else:
-                valid = type(value) is int and value > 0
-            if not valid:
+            if not _validate_field_value(field, value, settings):
                 raise ValueError(f"runtime config has invalid {field}")
     validate_workflow_policy(settings["workflow"], settings["timeouts"]["max_turn_seconds"])
     if settings["limits"]["socket_message_bytes"] <= max(
