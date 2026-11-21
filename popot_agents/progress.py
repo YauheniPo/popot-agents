@@ -85,19 +85,18 @@ def redact_text(text):
             text = text.replace(value, _REDACTED)
     text = re.sub(r'-----BEGIN [A-Za-z ]+PRIVATE KEY-----[\s\S]{0,2000}?-----END [A-Za-z ]+PRIVATE KEY-----',
                   _REDACTED, text)
-    text = re.sub(r'\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,})',
+    text = re.sub(r'\b(?:gh[pousr]_\w{20,}|github_pat_\w+|sk-[\w-]{20,})',
                   _REDACTED, text)
     # Redact credential key=value pairs: split into simpler regexes to avoid
     # cognitive complexity (SonarQube python:S5843) on a single monolithic pattern.
     text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)"[^"]*"',
-                  r'\1[REDACTED]', text)
+                  r'\1' + _REDACTED, text)
     text = re.sub(r"(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)'[^']*'",
-                  r"\1[REDACTED]", text)
+                  r"\1" + _REDACTED, text)
     text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)[^\s,;]+',
-                  r'\1[REDACTED]', text)
-    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1[REDACTED]', text)
-    return re.sub(r'(https?://)[^\s:@/]{1,100}:[^\s/:@]{1,100}@', r'\1[REDACTED]@', text)
-
+                  r'\1' + _REDACTED, text)
+    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1' + _REDACTED, text)
+    return re.sub(r'(https?://)[^\s:@/]{1,100}:[^\s/:@]{1,100}@', r'\1' + _REDACTED + '@', text)
 def _safe_fields(value):
     if isinstance(value, dict):
         return {key: _REDACTED if re.search(
