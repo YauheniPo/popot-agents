@@ -403,8 +403,8 @@ class DelegationService:
         selection = checkpoint.get('await_tasks')
         mode = 'all'
         if selection is not None:
-            ids = selection.get('session_ids') if isinstance(selection,dict) else None
-            mode = selection.get('wait_for','all') if isinstance(selection,dict) else None
+            ids = selection.get('session_ids') if isinstance(selection, dict) else None
+            mode = selection.get('wait_for', 'all') if isinstance(selection, dict) else None
             if not isinstance(ids,list) or not 1 <= len(ids) <= 16 or any(
                     not isinstance(sid,str) or not re.fullmatch(r'[0-9a-f]{16}',sid) for sid in ids) \
                     or len(set(ids)) != len(ids) or mode not in {'all','any'}:
