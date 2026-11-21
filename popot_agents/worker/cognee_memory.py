@@ -129,11 +129,11 @@ class CogneeMemory:
             # Never echo upstream bodies, URLs, or authentication values.
             exc.close()
             raise MemoryServiceError(f'Cognee request failed (HTTP {exc.code})') from None
-        except (error.URLError, TimeoutError, OSError):
+        except (error.URLError, TimeoutError):
             phase = {'/api/v1/auth/login': 'login', '/api/v1/datasets': 'dataset lookup',
                      '/api/v1/recall': 'recall'}.get(path, 'request')
             raise MemoryServiceError(f'Cognee {phase} is unreachable or timed out; check memory services') from None
-        except (ValueError, UnicodeError):
+        except ValueError:
             raise MemoryServiceError('Cognee returned an invalid JSON response') from None
 
     def session_event(self, event: dict):
