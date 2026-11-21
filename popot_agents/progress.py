@@ -21,11 +21,19 @@ class TurnProgress:
         self._session_id = session_id
         self._lock = threading.Lock()
         self._started = time.monotonic()
-        self._state = {
-            'state': 'running', 'startedAt': datetime.now(timezone.utc).isoformat(),
-            'sequence': 0, 'modelCalls': 0, 'toolCalls': 0,
-            'lastAction': None, 'lastError': None,
-        }
+        self._state = _initial_state()
+
+
+def _initial_state():
+    return {
+        'state': 'running',
+        'startedAt': datetime.now(timezone.utc).isoformat(),
+        'sequence': 0,
+        'modelCalls': 0,
+        'toolCalls': 0,
+        'lastAction': None,
+        'lastError': None,
+    }
 
     def update(self, message, *, finished=False):
         if not is_progress_message(message):
