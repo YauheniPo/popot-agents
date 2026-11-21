@@ -81,10 +81,8 @@ def redact_text(text):
     for name, value in os.environ.items():
         if len(value) >= 4 and re.search(r'(TOKEN|PASSWORD|SECRET|_KEY)$', name):
             text = text.replace(value, '[REDACTED]')
-    text = re.sub(r'-----BEGIN [A-Za-z ]*?PRIVATE KEY-----'
-                  r'.{0,2000}?'
-                  r'-----END [A-Za-z ]*?PRIVATE KEY-----',
-                  '[REDACTED]', text, flags=re.DOTALL)
+    text = re.sub(r'-----BEGIN [A-Za-z ]*PRIVATE KEY-----[\s\S]{0,2000}-----END [A-Za-z ]*PRIVATE KEY-----',
+                  '[REDACTED]', text)
     text = re.sub(r'\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,})',
                   '[REDACTED]', text)
     # Redact credential key=value pairs: split into simpler regexes to avoid
