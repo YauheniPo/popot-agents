@@ -10,6 +10,8 @@ import sys
 import threading
 import time
 
+_REDACTED = '[REDACTED]'
+
 _observer = ContextVar('agent_progress', default=None)
 
 class TurnProgress:
@@ -80,11 +82,11 @@ class TurnProgress:
 def redact_text(text):
     for name, value in os.environ.items():
         if len(value) >= 4 and re.search(r'(TOKEN|PASSWORD|SECRET|_KEY)$', name):
-            text = text.replace(value, '[REDACTED]')
+            text = text.replace(value, _REDACTED)
     text = re.sub(r'-----BEGIN [A-Za-z ]*PRIVATE KEY-----[\s\S]{0,2000}-----END [A-Za-z ]*PRIVATE KEY-----',
-                  '[REDACTED]', text)
+                  _REDACTED, text)
     text = re.sub(r'\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,})',
-                  '[REDACTED]', text)
+                  _REDACTED, text)
     # Redact credential key=value pairs: split into simpler regexes to avoid
     # cognitive complexity (SonarQube python:S5843) on a single monolithic pattern.
     text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)"[^"]*"',
@@ -98,7 +100,7 @@ def redact_text(text):
 
 def _safe_fields(value):
     if isinstance(value, dict):
-        return {key: '[REDACTED]' if re.search(
+        return {key: _REDACTED if re.search(
                     r'(?i)(?:^|[_-])(?:authorization|cookie|password|passwd|secret|token|api[_-]?key|private[_-]?key)$', key)
                 else _safe_fields(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
