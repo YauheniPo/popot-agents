@@ -171,9 +171,14 @@ def main() -> None:
     kind_ip = network_address_toward(kind_control_plane_host(context), 6443)
     os.environ["AX_LOCAL_BASE_URL"] = f"https://{kind_ip}:{AX_CONFIG['proxy']['port']}/v1"
     os.environ["AX_LOCAL_BIND_HOST"] = network_address_toward("db", 5432)
+    run_server(context, kind_ip, kubeconfig)
+
+
+def _run_server(context, kind_ip, kubeconfig):
+    """Start the AX API server and return running components."""
     proxy = a2a = worker_pool = tracer = None
+    server = make_server()
     try:
-        server = make_server()
         from .phoenix import PhoenixTracer, load_config
         tracing = load_config()
         if tracing['enabled']:
@@ -203,8 +208,56 @@ def main() -> None:
             worker_pool.close()
         if a2a:
             a2a.server_close()
-        if "server" in locals():
-            if hasattr(server, "cron"):
+        if hasattr(server, 'cron'):
+            server.cron.close()
+        if server.delegation:
+            server.delegation.close()
+        server.server_close()
+        if proxy:
+            proxy.shutdown()
+            proxy.server_close()
+        if tracer:
+            tracer.close()
+        raise
+    return server, worker_pool, proxy, a2a, tracer
+
+
+def run_server(context, kind_ip, kubeconfig):
+    """Start the AX API server and serve until interrupted."""
+    proxy = a2a = worker_pool = tracer = None
+    server = None
+    try:
+        server, worker_pool, proxy, a2a, tracer = _run_server(
+            context, kind_ip, kubeconfig)
+        previous_handler = signal.signal(signal.SIGTERM, stop_on_sigterm)
+        try:
+            print(f"AX API: http://{server.server_address[0]}:{server.server_port} "
+                  f"profiles={','.join(provider.name for provider in server.provider_routes.values())}",
+                  flush=True)
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if worker_pool:
+                worker_pool.close()
+            if hasattr(server, 'cron'):
+                server.cron.close()
+            if server.delegation:
+                server.delegation.close()
+            server.server_close()
+            if proxy:
+                proxy.shutdown()
+                proxy.server_close()
+            if tracer:
+                tracer.close()
+            signal.signal(signal.SIGTERM, previous_handler)
+    except Exception:
+        if worker_pool:
+            worker_pool.close()
+        if a2a:
+            a2a.server_close()
+        if server is not None:
+            if hasattr(server, 'cron'):
                 server.cron.close()
             if server.delegation:
                 server.delegation.close()
@@ -215,33 +268,5 @@ def main() -> None:
         if tracer:
             tracer.close()
         raise
-    def stop_on_sigterm(_signum, _frame):
-        raise KeyboardInterrupt
-
-    previous_handler = signal.signal(signal.SIGTERM, stop_on_sigterm)
-    try:
-        print(f"AX API: http://{server.server_address[0]}:{server.server_port} "
-              f"profiles={','.join(provider.name for provider in server.provider_routes.values())}",
-              flush=True)
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if worker_pool:
-            worker_pool.close()
-        server.cron.close()
-        if server.delegation:
-            server.delegation.close()
-        if a2a:
-            a2a.shutdown()
-            a2a.server_close()
-        server.server_close()
-        proxy.shutdown()
-        proxy.server_close()
-        if tracer:
-            tracer.close()
-        signal.signal(signal.SIGTERM, previous_handler)
-
-
 if __name__ == "__main__":
     main()
