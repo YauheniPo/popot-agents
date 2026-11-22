@@ -394,7 +394,7 @@ class AxAgentRunner:
             emit_progress('preparing_workspace')
             return self._start_reserved_chat(chat_id, role_config, lease,
                                              deadline=deadline, cancel_event=cancel_event)
-        except (OSError, TimeoutError, subprocess.SubprocessError) as exc:
+        except (OSError, TimeoutError, subprocess.SubprocessError, AgentRunError) as exc:
             self._release_failed_start(task_name, lease, exc)
             raise
 
@@ -583,7 +583,7 @@ class AxAgentRunner:
         """Remove previous-process Tasks before accepting requests with a new proxy token."""
         result = self._run('get', 'tasks')
         names = [line.split()[0] for line in result.stdout.splitlines()
-                 if line.split() and re.fullmatch(SESSION_ID_RE + r'-chat-', line.split()[0])]
+                 if line.split() and re.fullmatch(r"popot-chat-" + SESSION_ID_RE, line.split()[0])]
         for name in names:
             # Failure blocks startup, so an orphan cannot bypass the new limit.
             self._run('delete', 'task', name)
