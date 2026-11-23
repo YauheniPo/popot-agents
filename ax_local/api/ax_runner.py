@@ -387,14 +387,14 @@ class AxAgentRunner:
                 self.worker_pool.acquire(task_name,
                     deadline=deadline or time.monotonic() + self.worker_queue.timeout_seconds,
                     cancel_event=cancel_event)
-        except (OSError, TimeoutError, subprocess.SubprocessError):
+        except Exception:
             self.worker_queue.release(task_name, lease)
             raise
         try:
             emit_progress('preparing_workspace')
             return self._start_reserved_chat(chat_id, role_config, lease,
                                              deadline=deadline, cancel_event=cancel_event)
-        except (OSError, TimeoutError, subprocess.SubprocessError, AgentRunError) as exc:
+        except Exception as exc:
             self._release_failed_start(task_name, lease, exc)
             raise
 
@@ -446,7 +446,7 @@ class AxAgentRunner:
             self._run("apply", "-f", "-", input=json.dumps(self.task_manifest(chat_id, role_config)),
                       timeout=remaining(AX_CONFIG["cli_timeout_seconds"]))
             return self._wait_for_chat(chat, remaining, deadline)
-        except (OSError, TimeoutError, subprocess.SubprocessError):
+        except Exception:
             chat.close()
             raise
 

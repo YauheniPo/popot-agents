@@ -222,6 +222,10 @@ def _run_server(context, kind_ip, kubeconfig):
     return server, worker_pool, proxy, a2a, tracer
 
 
+def stop_on_sigterm(_signum, _frame):
+    raise KeyboardInterrupt
+
+
 def run_server(context, kind_ip, kubeconfig):
     """Start the AX API server and serve until interrupted."""
     proxy = a2a = worker_pool = tracer = None
