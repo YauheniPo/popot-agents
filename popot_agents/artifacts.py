@@ -1,6 +1,5 @@
 """Bounded deliverables, stored with the session before sandbox cleanup."""
 import base64
-import binascii
 import hashlib
 import os
 import re
@@ -68,7 +67,7 @@ def validate_artifacts(artifacts):
                 raise ArtifactError('total_byte_limit')
             try:
                 data = base64.b64decode(item['content'], validate=True)
-            except (ValueError, binascii.Error):
+            except ValueError:
                 raise ArtifactError('invalid_artifact') from None
         else:
             data = item['content'].encode('utf-8')

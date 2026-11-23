@@ -713,7 +713,7 @@ class AxChat:
         retry_policy(limit) -> remaining_seconds for the current attempt.
         diagnostic dict is populated with retry_error_type and error details.
         """
-        limit = retry_policy(30)
+        retry_policy(30)
         delay = min(2 ** attempt, 30)
         retry_at = time.monotonic() + delay
         diagnostic['retry_error_type'] = 'TimeoutExpired'

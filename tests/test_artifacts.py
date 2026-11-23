@@ -81,9 +81,10 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaises(ArtifactError) as caught:
                 collect_artifacts(root)
             self.assertIn('at least 65 bytes', str(caught.exception))
+            extra = {'name': 'extra.bin', 'encoding': 'base64',
+                     'content': '/w==', 'sha256': hashlib.sha256(b'\xff').hexdigest()}
             with self.assertRaises(ArtifactError):
-                validate_artifacts([*artifacts, {'name': 'extra.bin', 'encoding': 'base64',
-                    'content': '/w==', 'sha256': hashlib.sha256(b'\xff').hexdigest()}])
+                validate_artifacts([*artifacts, extra])
 
     def test_binary_validation_rejects_invalid_encoding_corruption_and_oversized_payload(self):
         from popot_agents.artifacts import ArtifactError, validate_artifacts

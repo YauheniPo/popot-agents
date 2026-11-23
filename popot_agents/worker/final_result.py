@@ -133,19 +133,7 @@ def retained_receipts(messages, completed_children, observations=()):
     for item in reversed(observations):
         if item.get('source') != 'tool_result' or item.get('kind') not in {'checks', 'ci'}:
             continue
-        receipt = (f"Observed {item['kind']} {item.get('tool')} ({item.get('callId')}): "
-                   f"{item.get('status')}; {item.get('summary')}; "
-                   f"revision={item.get('revision') or 'unverified'}")
-        if 'exitCode' in item:
-            receipt += f"; exit_code={item['exitCode']}"
-        if 'skipCount' in item:
-            receipt += f"; skipped={item['skipCount']}; unknown_skip_reasons={item.get('unknownSkipReasons', 0)}"
-        receipt += f" [sha256={item.get('outputSha256')}]"
-        if item.get('outputArtifact'):
-            receipt += f" Full output: {item['outputArtifact']}"
-        if item.get('skippedTests'):
-            receipt += '; skip details=' + json.dumps(item['skippedTests'], ensure_ascii=False)
-        receipts.append(scrub(receipt)[:chars])
+        receipts.append(_observation_receipt(item, chars))
     for child in completed_children.values():
         label = f"Child {child['role']} (sessionId={child['sessionId']}) reported: "
         receipts.append(label + scrub(child['answer'])[:chars])
