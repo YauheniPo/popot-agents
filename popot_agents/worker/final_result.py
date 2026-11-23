@@ -43,30 +43,63 @@ def evidence_transcript(messages, context=()):
     return transcript
 
 
+def _quoted_step(char, escaped):
+    """Return (still_quoted, escaped) after one character inside a string."""
+    if escaped:
+        return True, False
+    if char == '\\':
+        return True, True
+    return char != '"', False
+
+
+def _drops_trailing_comma(text, index, previous):
+    """True when this comma is followed (modulo whitespace) by } or ]."""
+    if previous in '[{,:':
+        return False
+    following = index + 1
+    while following < len(text) and text[following] in ' \t\r\n':
+        following += 1
+    return following < len(text) and text[following] in '}]'
+
+
 def _without_trailing_commas(text):
     result = []
     quoted = escaped = False
     previous = ''
     for index, char in enumerate(text):
         if quoted:
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif char == '"':
-                quoted = False
+            quoted, escaped = _quoted_step(char, escaped)
         elif char == '"':
             quoted = True
-        elif char == ',' and previous not in '[{,:':
-            following = index + 1
-            while following < len(text) and text[following] in ' \t\r\n':
-                following += 1
-            if following < len(text) and text[following] in '}]':
-                continue
+        elif char == ',' and _drops_trailing_comma(text, index, previous):
+            continue
         result.append(char)
         if char not in ' \t\r\n':
             previous = char
     return ''.join(result)
+
+
+def _validate_report(report):
+    """Validate the normalized report fields; raise ValueError on violation."""
+    if not isinstance(report, dict):
+        raise ValueError('expected_object')
+    if report.get('status') not in ('completed', 'partial', 'blocked', 'failed'):
+        raise ValueError('invalid_status')
+    if not isinstance(report.get('answer'), str) or not report['answer'].strip():
+        raise ValueError('missing_answer')
+    for key in ('evidence', 'remaining_work', 'errors'):
+        if not isinstance(report.get(key), list) or any(not isinstance(i, str) for i in report[key]):
+            raise ValueError('invalid_' + key)
+        report[key] = [i.strip() for i in report[key] if i.strip()]
+    if report['status'] == 'completed' and (report['remaining_work'] or report['errors']):
+        report['status'] = 'partial'
+    if 'revision' in report and (not isinstance(report['revision'], str) or not re.fullmatch(r'[a-f0-9]{40}', report['revision'])):
+        raise ValueError('invalid_revision')
+    if 'verification_status' in report and report['verification_status'] not in ('passed', 'failed'):
+        raise ValueError('invalid_verification_status')
+    if 'findings' in report:
+        validate_findings(report['findings'])
+    return report
 
 
 def parse_result(content, finish_reason=None):
@@ -90,25 +123,7 @@ def parse_result(content, finish_reason=None):
             report = json.loads(text, strict=False)
         except ValueError:
             raise ValueError('invalid_json') from None
-    if not isinstance(report, dict):
-        raise ValueError('expected_object')
-    if report.get('status') not in ('completed', 'partial', 'blocked', 'failed'):
-        raise ValueError('invalid_status')
-    if not isinstance(report.get('answer'), str) or not report['answer'].strip():
-        raise ValueError('missing_answer')
-    for key in ('evidence', 'remaining_work', 'errors'):
-        if not isinstance(report.get(key), list) or any(not isinstance(i, str) for i in report[key]):
-            raise ValueError('invalid_' + key)
-        report[key] = [i.strip() for i in report[key] if i.strip()]
-    if report['status'] == 'completed' and (report['remaining_work'] or report['errors']):
-        report['status'] = 'partial'
-    if 'revision' in report and (not isinstance(report['revision'], str) or not re.fullmatch(r'[a-f0-9]{40}', report['revision'])):
-        raise ValueError('invalid_revision')
-    if 'verification_status' in report and report['verification_status'] not in ('passed', 'failed'):
-        raise ValueError('invalid_verification_status')
-    if 'findings' in report:
-        validate_findings(report['findings'])
-    return report
+    return _validate_report(report)
 
 
 def _tool_receipt(message, name, chars):

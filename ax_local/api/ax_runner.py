@@ -20,11 +20,11 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError, AgentResumeError
-from ax_local.api.delegation import SESSION_ID_RE
 from popot_agents.role_env import selected_role_env
-from ax_local.config import AX_CONFIG
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.progress import is_progress_message, emit_progress, progress_observer, redact_text, format_progress
+from ax_local.api.delegation import SESSION_ID_RE
+from ax_local.config import AX_CONFIG
 from ..worker.remote_client import RESPONSE_PREFIX, PROGRESS_PREFIX
 from .worker_queue import WorkerQueue
 
