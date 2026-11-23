@@ -23,9 +23,9 @@ from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunErro
 from popot_agents.role_env import selected_role_env
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.progress import is_progress_message, emit_progress, progress_observer, redact_text, format_progress
-from ax_local.api.delegation import SESSION_ID_RE
 from ax_local.config import AX_CONFIG
 from ..worker.remote_client import RESPONSE_PREFIX, PROGRESS_PREFIX
+from .delegation import SESSION_ID_RE
 from .worker_queue import WorkerQueue
 
 
