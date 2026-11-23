@@ -204,22 +204,28 @@ def _run_server(context, kind_ip, kubeconfig):
         server.cron.recover_interrupted()
         server.cron.start()
     except Exception:
-        if worker_pool:
-            worker_pool.close()
-        if a2a:
-            a2a.server_close()
+        _close_server_components(server, worker_pool, proxy, tracer, a2a=a2a)
+        raise
+    return server, worker_pool, proxy, a2a, tracer
+
+
+def _close_server_components(server, worker_pool, proxy, tracer, a2a=None):
+    """Close started components in reverse startup order; tolerate absent ones."""
+    if worker_pool:
+        worker_pool.close()
+    if a2a:
+        a2a.server_close()
+    if server is not None:
         if hasattr(server, 'cron'):
             server.cron.close()
         if server.delegation:
             server.delegation.close()
         server.server_close()
-        if proxy:
-            proxy.shutdown()
-            proxy.server_close()
-        if tracer:
-            tracer.close()
-        raise
-    return server, worker_pool, proxy, a2a, tracer
+    if proxy:
+        proxy.shutdown()
+        proxy.server_close()
+    if tracer:
+        tracer.close()
 
 
 def stop_on_sigterm(_signum, _frame):
@@ -242,35 +248,10 @@ def run_server(context, kind_ip, kubeconfig):
         except KeyboardInterrupt:
             pass
         finally:
-            if worker_pool:
-                worker_pool.close()
-            if hasattr(server, 'cron'):
-                server.cron.close()
-            if server.delegation:
-                server.delegation.close()
-            server.server_close()
-            if proxy:
-                proxy.shutdown()
-                proxy.server_close()
-            if tracer:
-                tracer.close()
+            _close_server_components(server, worker_pool, proxy, tracer)
             signal.signal(signal.SIGTERM, previous_handler)
     except Exception:
-        if worker_pool:
-            worker_pool.close()
-        if a2a:
-            a2a.server_close()
-        if server is not None:
-            if hasattr(server, 'cron'):
-                server.cron.close()
-            if server.delegation:
-                server.delegation.close()
-            server.server_close()
-        if proxy:
-            proxy.shutdown()
-            proxy.server_close()
-        if tracer:
-            tracer.close()
+        _close_server_components(server, worker_pool, proxy, tracer, a2a=a2a)
         raise
 if __name__ == "__main__":
     main()

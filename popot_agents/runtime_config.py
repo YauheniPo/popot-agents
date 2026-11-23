@@ -135,10 +135,8 @@ def validate_workflow_policy(policy, max_turn_seconds):
 
 
 
-def _validate_field_value(field, value, settings):
-    """Validate a single runtime config field value."""
-    if field == "mcp.default_role":
-        return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", value) is not None
+def _validate_model_field(field, value, settings):
+    """Validate the model.* fields with their individual value rules."""
     if field == "model.temperature":
         return value is None or (type(value) in (int, float) and 0 <= value <= 2)
     if field == "model.max_tokens":
@@ -146,11 +144,19 @@ def _validate_field_value(field, value, settings):
     if field == "model.default_max_tool_rounds":
         cap = settings["model"]["max_tool_rounds"]
         return type(value) is int and type(cap) is int and 1 <= value <= cap
-    if field == "model.request_retries":
-        if type(value) is not int or value < 0:
-            raise ValueError("runtime config model.request_retries must be a non-negative integer "
-                             "(0 disables retries)")
-        return True
+    if type(value) is not int or value < 0:
+        raise ValueError("runtime config model.request_retries must be a non-negative integer "
+                         "(0 disables retries)")
+    return True
+
+
+def _validate_field_value(field, value, settings):
+    """Validate a single runtime config field value."""
+    if field == "mcp.default_role":
+        return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", value) is not None
+    if field in {"model.temperature", "model.max_tokens",
+                 "model.default_max_tool_rounds", "model.request_retries"}:
+        return _validate_model_field(field, value, settings)
     if field in {"timeouts.turn_seconds", "timeouts.max_turn_seconds", "timeouts.turn_response_margin_seconds"}:
         return type(value) is int and value > 0
     if field.split(".")[0] == "timeouts" or field == "mcp.discovery_backoff_seconds":
