@@ -79,6 +79,14 @@ def _without_trailing_commas(text):
     return ''.join(result)
 
 
+def _normalize_list_fields(report):
+    """Require string lists for the report list fields and trim their items."""
+    for key in ('evidence', 'remaining_work', 'errors'):
+        if not isinstance(report.get(key), list) or any(not isinstance(i, str) for i in report[key]):
+            raise ValueError('invalid_' + key)
+        report[key] = [i.strip() for i in report[key] if i.strip()]
+
+
 def _validate_report(report):
     """Validate the normalized report fields; raise ValueError on violation."""
     if not isinstance(report, dict):
@@ -87,10 +95,7 @@ def _validate_report(report):
         raise ValueError('invalid_status')
     if not isinstance(report.get('answer'), str) or not report['answer'].strip():
         raise ValueError('missing_answer')
-    for key in ('evidence', 'remaining_work', 'errors'):
-        if not isinstance(report.get(key), list) or any(not isinstance(i, str) for i in report[key]):
-            raise ValueError('invalid_' + key)
-        report[key] = [i.strip() for i in report[key] if i.strip()]
+    _normalize_list_fields(report)
     if report['status'] == 'completed' and (report['remaining_work'] or report['errors']):
         report['status'] = 'partial'
     if 'revision' in report and (not isinstance(report['revision'], str) or not re.fullmatch(r'[a-f0-9]{40}', report['revision'])):
@@ -149,12 +154,7 @@ def retained_receipts(messages, completed_children, observations=()):
         if item.get('source') != 'tool_result' or item.get('kind') not in {'checks', 'ci'}:
             continue
         receipts.append(_observation_receipt(item, chars))
-    for child in completed_children.values():
-        label = f"Child {child['role']} (sessionId={child['sessionId']}) reported: "
-        receipts.append(label + scrub(child['answer'])[:chars])
-        for item in child.get('outcome', {}).get('evidence', []):
-            if isinstance(item, str) and item.strip():
-                receipts.append(label + scrub(item)[:chars])
+    receipts.extend(_child_receipts(completed_children, chars))
     names = {call.get('id'): call.get('function', {}).get('name', 'tool')
              for m in messages for call in m.get('tool_calls', [])}
     for m in [m for m in messages if m.get('role') == 'tool'][-limit:]:
@@ -166,6 +166,18 @@ def retained_receipts(messages, completed_children, observations=()):
         if receipt:
             receipts.append(receipt)
     return list(dict.fromkeys(receipts))[:limit]
+
+
+def _child_receipts(completed_children, chars):
+    """Attributed answer and evidence receipts from completed child sessions."""
+    receipts = []
+    for child in completed_children.values():
+        label = f"Child {child['role']} (sessionId={child['sessionId']}) reported: "
+        receipts.append(label + scrub(child['answer'])[:chars])
+        for item in child.get('outcome', {}).get('evidence', []):
+            if isinstance(item, str) and item.strip():
+                receipts.append(label + scrub(item)[:chars])
+    return receipts
 
 
 def _observation_receipt(item, chars):
