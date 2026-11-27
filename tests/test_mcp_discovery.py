@@ -73,7 +73,7 @@ class DiscoveryRetryTests(unittest.TestCase):
             self.assertEqual(discover.await_count, 2)
             self.assertNotIn('rotated-secret', str(cache.entries))
 
-    def test_nested_connect_timeout_recovers_and_reports_original_diagnostic(self):
+    def test_nested_connect_timeout_recovers_and_reports_progress_without_token(self):
         failure = TransportGroup(TransportGroup(self.httpx.ConnectTimeout('test-secret')))
         with patch.object(mcp_client, '_discover_one', new=AsyncMock(
                 side_effect=[failure, {'mcp__github__get_me': {}}])) as discover, \
@@ -84,7 +84,7 @@ class DiscoveryRetryTests(unittest.TestCase):
         sleep.assert_awaited_once_with(1)
         self.assertIn('mcp_discovery_retry', [event for event, _ in self.events])
         self.assertEqual(self.events[-1][0], 'mcp_discovery_completed')
-        self.assertIn('test-secret', str(self.events))
+        self.assertNotIn('test-secret', str(self.events))
 
     def test_permanent_network_failure_stops_after_three_attempts(self):
         with patch.object(mcp_client, '_discover_one', new=AsyncMock(
@@ -94,7 +94,7 @@ class DiscoveryRetryTests(unittest.TestCase):
                 mcp_client.discover_tools({'github': REMOTE})
         self.assertEqual(discover.await_count, 3)
         self.assertEqual(sleep.await_count, 2)
-        self.assertIn('test-secret', str(raised.exception))
+        self.assertNotIn('test-secret', str(raised.exception))
         self.assertEqual(self.events[-1][0], 'mcp_discovery_failed')
 
     def test_config_controls_attempt_limit_and_linear_backoff(self):

@@ -52,14 +52,14 @@ class WorkflowTests(unittest.TestCase):
         _, _, saved = self.run_workflow([first, second])
         self.assertEqual(saved['roleConfig']['_workflow']['authorization'], ['implement', message])
 
-    def test_list_summary_exposes_bounded_original_terminal_reason(self):
+    def test_list_summary_exposes_bounded_redacted_terminal_reason(self):
         from unittest.mock import patch
         saved={'roleConfig':{'_workflow':{'state':'blocked','phase':'finished','turns':4,
             'deadlineAt':1000,'outcome':{'reason':'workflow_turn_limit'}}}}
         self.assertEqual(public_workflow(saved)['reason'],'workflow_turn_limit')
         with patch.dict('os.environ',{'REPORT_TEST_TOKEN':'test-secret-value'}):
             reason=public_outcome_reason({'reason':'Missing test-secret-value permission '+('x'*500)})
-        self.assertIn('test-secret-value',reason)
+        self.assertNotIn('test-secret-value',reason)
         self.assertLessEqual(len(reason),240)
 
     def run_workflow(self, results, *, allow_error=False, after=None, request_id=None, role="planner", coordination=None,

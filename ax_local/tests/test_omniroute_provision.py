@@ -17,10 +17,19 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class ManagedConfigTests(unittest.TestCase):
-    def test_gateway_provisions_unmasked_credentials(self):
+    def test_gateway_enables_credential_redaction(self):
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / 'config/omniroute/settings.json').read_text())
-        self.assertIs(config['settings']['credentialRedactionEnabled'], False)
+        self.assertIs(config['settings']['credentialRedactionEnabled'], True)
+
+    def test_restricted_key_covers_each_managed_eval_variant(self):
+        root = Path(__file__).resolve().parents[2]
+        settings = json.loads((root / 'config/omniroute/settings.json').read_text())
+        combos = json.loads((root / 'config/omniroute/combos.json').read_text())
+        allowed = {target['model'] for combo in combos.values() for target in combo['models']}
+        allowed.update(settings['apiKey']['permissions'].get('allowedModels', []))
+        variants = json.loads((root / 'evals/config.json').read_text())['x-evals']['variants']
+        self.assertEqual({variant['model'] for variant in variants} - allowed, set())
 
     def test_only_two_distinct_managed_routes_remain(self):
         root = Path(__file__).resolve().parents[2]

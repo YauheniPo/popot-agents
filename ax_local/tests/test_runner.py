@@ -124,7 +124,7 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(command.call_args_list[0].args[2:], command.call_args_list[1].args[2:])
         self.assertEqual(result['answer'], 'done')
 
-    def test_stream_failure_keeps_bounded_original_stderr_and_does_not_retry(self):
+    def test_stream_failure_keeps_bounded_redacted_stderr_and_does_not_retry(self):
         from ax_local.api.delegation import _worker_failure
         secret = 'fixture-stream-capability'
         self.runner.proxy_token = secret
@@ -140,10 +140,10 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(failure['diagnostic']['exit_code'], 7)
         self.assertIn('connection refused', failure['diagnostic']['stderr'])
         self.assertLessEqual(len(failure['diagnostic']['stderr']), 2000)
-        self.assertIn(secret, json.dumps(failure))
+        self.assertNotIn(secret, json.dumps(failure))
         self.assertEqual(popen.call_count, 1)
 
-    def test_failed_command_retains_bounded_original_diagnostics(self):
+    def test_failed_command_retains_bounded_redacted_diagnostics(self):
         from ax_local.api.delegation import _worker_failure
         secret = 'fixture-secret-value'
         self.runner.proxy_token = 'ephemeral-capability-value'
@@ -162,10 +162,10 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual(failure['diagnostic']['command'], 'apply')
         self.assertIn('connection refused', failure['diagnostic']['stderr'])
         self.assertLessEqual(len(failure['diagnostic']['stderr']), 2000)
-        self.assertIn(secret, json.dumps(failure))
-        self.assertIn(self.runner.proxy_token, json.dumps(failure))
-        self.assertIn('child-capability-value', json.dumps(failure))
-        self.assertIn('probe-capability-value', json.dumps(failure))
+        self.assertNotIn(secret, json.dumps(failure))
+        self.assertNotIn(self.runner.proxy_token, json.dumps(failure))
+        self.assertNotIn('child-capability-value', json.dumps(failure))
+        self.assertNotIn('probe-capability-value', json.dumps(failure))
         self.assertNotIn('private task environment', json.dumps(failure))
 
     def test_git_identity_enters_only_pr_publisher_task_environment(self):

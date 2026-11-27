@@ -12,13 +12,8 @@ import sys
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import MEMORY, RUNTIME
 from popot_agents.tools import safe_tool_env
-from popot_agents.progress import trace_event
+from popot_agents.progress import trace_event, redact_text as scrub
 from .cognee_memory import CogneeMemory
-
-
-def scrub(text):
-    """Preserve the original text in memory and evidence records."""
-    return text
 
 
 def trace(event: str, **fields) -> None:

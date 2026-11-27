@@ -14,7 +14,7 @@ import uuid
 from ax_local.omniroute import NoRedirect
 from popot_agents.progress import redact_text
 from popot_agents.telemetry import (VERSION, decode_payload, message_attributes,
-                                    payload_attributes)
+                                    payload_attributes, sensitive_values)
 
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / 'evals/config.json'
@@ -79,10 +79,12 @@ class Span:
             'start_time': _now(), 'status_code': 'OK', 'attributes': dict(attributes or {})}
         self.finished = False
         self.parent = parent
+        self.secrets = set()
 
     def payload(self, side, value):
         value = decode_payload(value)
-        self.data['attributes'].update(payload_attributes(side, value))
+        self.secrets.update(sensitive_values(value))
+        self.data['attributes'].update(payload_attributes(side, value, extra_secrets=self.secrets))
 
     def model_input(self, body, *, request_id=None):
         self.payload('input', body)

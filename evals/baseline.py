@@ -26,7 +26,7 @@ ROOT = Path(os.environ.get('POPOT_EVAL_SOURCE_ROOT', Path(__file__).resolve().pa
 
 
 class ModelCapture:
-    """Record the proxy's original spans without network I/O on model calls."""
+    """Record the proxy's redacted spans without network I/O on model calls."""
 
     def __init__(self, path):
         self.path = Path(path)

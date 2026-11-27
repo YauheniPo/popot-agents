@@ -99,6 +99,14 @@ class RuntimeEvalTests(unittest.TestCase):
         self.assertEqual(cleaned['events'], [{'name': 'work_evidence'}])
         self.assertEqual(cleaned['attributes']['metadata'], {'session_id': 'root'})
 
+    def test_oversize_phoenix_response_is_rejected_before_json_decoding(self):
+        import io
+        from evals.runtime import API
+        api = API('http://localhost:6006', 'fixture')
+        with patch('evals.runtime.MAX_RESPONSE_BYTES', 4), patch.object(
+                api.opener, 'open', return_value=io.BytesIO(b'00000')), self.assertRaisesRegex(ValueError, 'size limit'):
+            api.call('/v1/projects')
+
     def test_capture_paginates_with_same_window_and_rejects_repeated_cursor(self):
         from evals.runtime import fetch_spans
         api = Mock()

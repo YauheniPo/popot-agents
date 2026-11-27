@@ -6,12 +6,15 @@ import uuid
 from datetime import datetime, timezone
 
 from popot_agents.runtime_config import RUNTIME
+from popot_agents.progress import redact_text
+
+
 from popot_agents.workflow_config import POLICY, validate_policy, role_policy
 
 
 def public_outcome_reason(outcome):
     reason = outcome.get('reason') if isinstance(outcome, dict) else None
-    return reason[:240] if isinstance(reason, str) and reason.strip() else None
+    return redact_text(reason)[:240] if isinstance(reason, str) and reason.strip() else None
 
 
 def include_interventions(authority, interventions, ids):

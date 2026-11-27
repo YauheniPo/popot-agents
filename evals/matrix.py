@@ -100,7 +100,7 @@ def _run(output, config, *, cases, resume):
         cancel = '/tmp/matrix-' + run_id + '-' + name + '-' + os.urandom(3).hex() + '.cancel'
         command = ['bash', str(snapshot / 'run-all.sh'), 'matrix-' + run_id + '-' + name,
                    '--model', variant['model'], '--parameters', json.dumps(variant['parameters']),
-                   '--experiment', experiment_name(variant['model'], variant['parameters'], 'evals', run_id),
+                   '--experiment', experiment_name(variant['model'], variant['parameters'], 'evals', run_id + '-' + name),
                    '--run-id', run_id, '--repetitions', str(config['repetitions']),
                    '--matrix-parallelism', str(concurrency), '--cancel-file', cancel]
         for case in cases:

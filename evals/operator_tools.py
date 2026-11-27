@@ -17,7 +17,7 @@ if not __package__:
     # Avoid placing evals/phoenix.py ahead of installed packages.
     sys.path[0] = str(Path(__file__).resolve().parents[1])
 
-from evals import save
+from evals import exclusive, save
 from evals.runtime import API, VERSION, annotate, build_report, fetch_spans, render, timestamp
 
 
@@ -69,14 +69,19 @@ class RuntimeEvals:
         run_id = (hashlib.sha256(json.dumps(provenance, sort_keys=True).encode()).hexdigest()[:32]
                   if end else uuid.uuid4().hex)
         directory = self.directory(run_id)
-        reused = directory.exists()
         api = BoundedAPI(config['endpoint'], key)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with exclusive(directory / '.lock'):
+            return self._capture(directory, provenance, api, publish)
+
+    def _capture(self, directory, provenance, api, publish):
+        run_id = directory.name
+        reused = (directory / 'snapshot.json').is_file()
         if reused:
             snapshot = json.loads((directory / 'snapshot.json').read_text())
             provenance, spans = snapshot['provenance'], snapshot['spans']
         else:
-            spans = fetch_spans(api, config['project'], start.isoformat(), stop.isoformat())
-            directory.mkdir(parents=True, mode=0o700)
+            spans = fetch_spans(api, provenance['project'], provenance['start_time'], provenance['end_time'])
             provenance['captured_at'] = datetime.now(timezone.utc).isoformat()
             save(directory / 'snapshot.json', {'provenance': provenance, 'spans': spans})
         provenance['snapshot_sha256'] = hashlib.sha256((directory / 'snapshot.json').read_bytes()).hexdigest()
@@ -84,7 +89,8 @@ class RuntimeEvals:
         save(directory / 'report.json', report)
         summary = render(report)
         (directory / 'summary.md').write_text(summary)
-        receipt = (json.loads((directory / 'publication.json').read_text()) if reused else
+        receipt_path = directory / 'publication.json'
+        receipt = (json.loads(receipt_path.read_text()) if receipt_path.is_file() else
                    {'run_id': run_id, 'published': False, 'annotations': 0})
         save(directory / 'publication.json', receipt)
         # Keep large snapshots out of native artifact handoff. Compressed JSON

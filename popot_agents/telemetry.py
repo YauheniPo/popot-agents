@@ -1,11 +1,71 @@
-"""Bounded original payloads shared by runtime and offline trace exporters."""
+"""Bounded, redacted payloads shared by runtime and offline trace exporters."""
 
 import hashlib
 import json
+import re
+
+from popot_agents.progress import redact_text
 
 
 VERSION = 'popot-telemetry-v2'
 PAYLOAD_LIMIT = 1024 * 1024
+_SECRET_KEYS = {'authorization', 'cookie', 'setcookie', 'password', 'passwd',
+                'secret', 'token', 'apikey', 'accesstoken', 'refreshtoken',
+                'privatekey', 'clientsecret', 'credential', 'credentials', 'mcpsessionid', 'proxyauthorization'}
+
+
+def _secret_key(key):
+    normalized = re.sub(r'[^a-z0-9]', '', str(key).lower())
+    return normalized in _SECRET_KEYS or normalized.endswith(('password', 'apikey', 'privatekey', 'secret', 'token'))
+
+
+def _credential_pair(value):
+    return (isinstance(value, (list, tuple)) and len(value) == 2
+            and isinstance(value[0], str) and isinstance(value[1], str) and _secret_key(value[0]))
+
+
+def sensitive_values(value):
+    """Retain credential values only in memory to redact unlabelled echoes."""
+    found = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _secret_key(key) and isinstance(item, str) and item:
+                found.add(item)
+            found.update(sensitive_values(item))
+    elif _credential_pair(value):
+        if value[1]:
+            found.add(value[1])
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found.update(sensitive_values(item))
+    elif isinstance(value, str) and value.lstrip().startswith(('{', '[')):
+        try:
+            found.update(sensitive_values(json.loads(value)))
+        except ValueError:
+            pass
+    return found
+
+
+def safe_value(value, extra_secrets=()):
+    if isinstance(value, dict):
+        return {str(key): '[REDACTED]' if _secret_key(key) else safe_value(item, extra_secrets)
+                for key, item in value.items()}
+    if _credential_pair(value):
+        return [value[0], '[REDACTED]']
+    if isinstance(value, (list, tuple)):
+        return [safe_value(item, extra_secrets) for item in value]
+    if isinstance(value, str):
+        if value.lstrip().startswith(('{', '[')):
+            try:
+                parsed = json.loads(value)
+                clean = safe_value(parsed, extra_secrets)
+                return value if clean == parsed else json.dumps(clean, ensure_ascii=False)
+            except ValueError:
+                pass
+        for secret in sorted(extra_secrets, key=len, reverse=True):
+            value = value.replace(secret, '[REDACTED]')
+        return redact_text(value)
+    return value
 
 
 def decode_payload(value):
@@ -17,9 +77,10 @@ def decode_payload(value):
     return value
 
 
-def payload_attributes(side, value, *, limit=PAYLOAD_LIMIT):
+def payload_attributes(side, value, *, limit=PAYLOAD_LIMIT, extra_secrets=()):
     value = decode_payload(value)
-    encoded = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()
+    clean = safe_value(value, set(extra_secrets) | sensitive_values(value))
+    encoded = json.dumps(clean, ensure_ascii=False, separators=(',', ':')).encode()
     truncated = len(encoded) > limit
     result = encoded
     if truncated:

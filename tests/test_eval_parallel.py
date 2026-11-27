@@ -188,4 +188,3 @@ class ParallelEvalTests(unittest.TestCase):
         self.assertEqual(result['status'], 'failed')
         self.assertEqual(set(result['runs']), {'a', 'c'})
         self.assertEqual(result['failures']['b']['exit_code'], 7)
-

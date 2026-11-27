@@ -10,13 +10,34 @@ import uuid
 from urllib import error, parse, request
 
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.progress import is_progress_message
+from popot_agents.progress import is_progress_message, redact_text
 
 MAX_LOG_BODY_BYTES = RUNTIME["logging"]["mcp_body_max_bytes"]
+SECRET_NAMES = {"authorization", "proxy-authorization", "cookie", "set-cookie",
+                "mcp-session-id", "x-api-key", "api_key", "apikey", "password",
+                "secret", "token", "access_token", "refresh_token"}
+
+
+def _secret_name(name: str) -> bool:
+    name = name.lower()
+    return name in SECRET_NAMES or name.endswith(
+        ("-api-key", "_api_key", "-password", "_password", "-secret",
+         "_secret", "-token", "_token"))
+
+
+def _safe_json(value):
+    if isinstance(value, dict):
+        return {key: "[REDACTED]" if _secret_name(key) else _safe_json(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_safe_json(item) for item in value]
+    return value
 
 
 def _safe_headers(headers):
-    return [[name.decode("latin-1"), value.decode("latin-1")]
+    return [[name.decode("latin-1"),
+             "[REDACTED]" if _secret_name(name.decode("latin-1"))
+             else value.decode("latin-1")]
             for name, value in headers]
 
 
@@ -104,7 +125,7 @@ class MCPHTTPLoggingMiddleware:
                         event["body_truncated"] = True
                     elif content_type.lower().startswith("application/json"):
                         try:
-                            event["body"] = json.loads(captured)
+                            event["body"] = _safe_json(json.loads(captured))
                         except (UnicodeDecodeError, json.JSONDecodeError):
                             event["invalid_json"] = True
                     _log_mcp_event(event)
@@ -138,7 +159,7 @@ async def _tool_call(action):
     except (OrchestratorError, TimeoutError) as exc:
         from mcp.server.mcpserver.exceptions import ToolError
         detail = str(exc) if isinstance(exc, OrchestratorError) else 'orchestrator is unavailable or timed out'
-        raise ToolError(detail) from None
+        raise ToolError(redact_text(detail)) from None
 
 
 class OrchestratorClient:

@@ -307,14 +307,14 @@ class FinalResultTests(unittest.TestCase):
             with self.subTest(content=content), self.assertRaises(ValueError):
                 parse_result(content)
 
-    def test_retained_receipts_preserve_credentials_and_keep_errors_as_receipts(self):
+    def test_retained_receipts_redact_credentials_and_keep_errors_as_receipts(self):
         from popot_agents.worker.final_result import retained_receipts
         with patch.dict('os.environ', {'GITHUB_PERSONAL_ACCESS_TOKEN': 'secret-test-value'}):
             receipts = retained_receipts([{'role': 'assistant', 'tool_calls': [
                 {'id': 'write', 'function': {'name': 'mcp__github__write'}}]},
                 {'role': 'tool', 'tool_call_id': 'write',
                  'content': '{"isError":true,"error":"secret-test-value"}'}], {})
-        self.assertIn('secret-test-value', '\n'.join(receipts))
+        self.assertNotIn('secret-test-value', '\n'.join(receipts))
         self.assertIn('isError', receipts[0])
         self.assertIn('outcome requires interpretation', receipts[0])
 
@@ -347,7 +347,7 @@ class FinalResultTests(unittest.TestCase):
         self.assertNotIn('claimed review passed', joined)
         self.assertEqual(len(receipts), 3)
 
-    def test_child_receipts_preserve_values_order_deduplication_and_limit(self):
+    def test_child_receipts_preserve_order_deduplication_and_limit_after_redaction(self):
         from popot_agents.worker.final_result import retained_receipts
         from popot_agents.runtime_config import RUNTIME
         children = {
@@ -361,4 +361,4 @@ class FinalResultTests(unittest.TestCase):
             receipts = retained_receipts([], children)
         first = f"Child backend_engineer (sessionId={'a'*16}) reported: "
         second = f"Child qa_engineer (sessionId={'b'*16}) reported: "
-        self.assertEqual(receipts, [first + 'first secret-test-value', first + 'check passed', second + 'second'])
+        self.assertEqual(receipts, [first + 'first [REDACTED]', first + 'check passed', second + 'second'])

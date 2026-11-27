@@ -145,7 +145,7 @@ class EvalMatrixTests(unittest.TestCase):
         from evals.matrix import run
         config = {**unified_settings(), 'baseline': 'a', 'repetitions': 3, 'variants': [
             {'name': 'a', 'model': 'provider/a', 'parameters': {'max_tokens': 100}},
-            {'name': 'b', 'model': 'provider/b', 'parameters': {'max_tokens': 200}}]}
+            {'name': 'b', 'model': 'provider/a', 'parameters': {'max_tokens': 200}}]}
         commands = []
 
         def launch(command, **kwargs):
@@ -163,7 +163,9 @@ class EvalMatrixTests(unittest.TestCase):
             self.assertTrue((output / 'b/baseline/comparison.md').exists())
         self.assertEqual(len(commands), 2)
         self.assertTrue(commands[0][commands[0].index('--experiment') + 1].startswith('a-default-evals-'))
-        self.assertTrue(commands[1][commands[1].index('--experiment') + 1].startswith('b-default-evals-'))
+        experiment_keys = [cmd[cmd.index('--experiment') + 1] for cmd in commands]
+        self.assertNotEqual(*experiment_keys)
+        self.assertTrue(experiment_keys[1].endswith('-b'))
         self.assertIn('--parameters', commands[1])
         self.assertIn('--case', commands[1])
         self.assertEqual(commands[1][commands[1].index('--repetitions') + 1], '3')

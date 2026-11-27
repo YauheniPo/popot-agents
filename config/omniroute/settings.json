@@ -5,7 +5,7 @@
   },
   "settings": {
     "cloudEnabled": false,
-    "credentialRedactionEnabled": false,
+    "credentialRedactionEnabled": true,
     "call_log_pipeline_enabled": true,
     "debugMode": false,
     "memoryEnabled": false,
@@ -76,6 +76,7 @@
       "compressionEnabled": false,
       "cacheDefaultMode": "bypass",
       "allowAutoCombos": false,
+      "allowedModels": ["ollama-cloud/mistral-large-4", "ollama-cloud/minimax-m3.1-flash"],
       "chaosModeEnabled": false,
       "scopes": ["self:usage"]
     }

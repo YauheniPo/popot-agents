@@ -9,7 +9,6 @@ import shutil
 
 from evals import save, scoring
 from evals.metrics import measure
-from evals.names import from_config
 
 
 def regrade(source, output):
@@ -19,7 +18,7 @@ def regrade(source, output):
         raise ValueError('Regrade only a finished capture')
     output.mkdir(parents=True, exist_ok=False)
     config = deepcopy(config)
-    config['experiment_name'] = from_config(config, 'judge-v2')
+    config['experiment_name'] = config['experiment_name'] + '-judge-v2'
     config['evaluation'] = {'version': scoring.VERSION,
         'source_report_sha256': hashlib.sha256((source / 'report.json').read_bytes()).hexdigest(),
         'source_config_sha256': hashlib.sha256((source / 'config.json').read_bytes()).hexdigest(),
@@ -29,6 +28,11 @@ def regrade(source, output):
     config['judge_fingerprint'] = scoring.fingerprint(scoring.settings())
     config['scoring'] = scoring.settings()
     save(output / 'config.json', config)
+    model_spans = source / 'model-spans.jsonl'
+    if model_spans.is_file():
+        destination = output / model_spans.name
+        destination.touch(mode=0o600, exist_ok=False)
+        shutil.copyfile(model_spans, destination)
     rows, report['results'] = report['results'], []
     report['source_finished_at'] = report.pop('finished_at')
     report.setdefault('planned_runs', len(rows))

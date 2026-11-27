@@ -22,7 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError, AgentResumeError
 from popot_agents.role_env import selected_role_env
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
-from popot_agents.progress import is_progress_message, emit_progress, progress_observer, format_progress
+from popot_agents.progress import is_progress_message, emit_progress, progress_observer, redact_text, format_progress
 from ax_local.config import AX_CONFIG
 from ..worker.remote_client import RESPONSE_PREFIX, PROGRESS_PREFIX
 from .delegation import SESSION_ID_RE
@@ -30,8 +30,12 @@ from .worker_queue import WorkerQueue
 
 
 class AxCommandError(AgentRunError):
-    def __init__(self, command, result):
-        stderr = (result.stderr or '')[-2000:]
+    def __init__(self, command, result, secrets=()):
+        stderr = redact_text(result.stderr or '')
+        for secret in secrets:
+            if isinstance(secret, str) and len(secret) >= 4:
+                stderr = stderr.replace(secret, '[REDACTED]')
+        stderr = stderr[-2000:]
         self.diagnostic = {'command': command, 'exit_code': result.returncode, 'stderr': stderr}
         super().__init__(stderr.splitlines()[-1] if stderr.strip() else 'AX command failed: ' + command)
 
@@ -70,7 +74,11 @@ class AxAgentRunner:
         self._cleanup_lock = threading.RLock()
 
     def _command_error(self, command, result):
-        return AxCommandError(command, result)
+        secrets = [self.proxy_token, *self.harness2_environment.values()]
+        if self.delegation:
+            for grant in self.delegation.tokens.copy().values():
+                secrets.extend((grant.token, grant.probe_token))
+        return AxCommandError(command, result, secrets)
 
     def _run(self, *args: str, input: str | None = None,
              timeout: int = AX_CONFIG["cli_timeout_seconds"],
@@ -298,7 +306,7 @@ class AxAgentRunner:
                             selector.unregister(key.fileobj)
                             continue
                         if key.data == 'err':
-                            # Keep a bounded tail of the original diagnostic output
+                            # Keep a bounded tail; _command_error redacts capabilities
                             # before any diagnostic leaves the adapter.
                             stderr = (stderr + chunk)[-8192:]
                             continue

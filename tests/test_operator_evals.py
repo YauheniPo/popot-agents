@@ -100,6 +100,11 @@ class OperatorEvalTests(unittest.TestCase):
             self.assertEqual(first['run_id'], second['run_id'])
             self.assertTrue(second['reused'])
             self.assertEqual(annotate.call_count, 1)
+            (runner.directory(first['run_id']) / 'publication.json').unlink()
+            recovered = runner.run(end='2026-11-12T11:00:00Z')
+            self.assertTrue(recovered['published'])
+            self.assertTrue(recovered['reused'])
+            self.assertEqual(annotate.call_count, 2)
             self.assertEqual(api.return_value.call.call_count, 1)
 
     def test_bad_windows_and_report_paths_fail_before_access(self):

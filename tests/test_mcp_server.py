@@ -327,7 +327,7 @@ class HttpLoggingTests(unittest.TestCase):
         self.assertEqual(received[0]["body"], body)
         self.assertEqual(sent[1]["body"], b"{}")
         for secret in ("request-secret", "session-secret", "body-secret", "response-secret"):
-            self.assertIn(secret, output.getvalue())
+            self.assertNotIn(secret, output.getvalue())
 
 
 if __name__ == "__main__":

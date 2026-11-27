@@ -22,7 +22,7 @@ class EvalRequestUsageTests(unittest.TestCase):
         metrics = measure(row, [])
         self.assertEqual((metrics['prompt_tokens'], metrics['completion_tokens']), (5, 2))
 
-    def test_generated_request_id_is_not_regenerated_or_masked(self):
+    def test_generated_request_id_survives_secret_redaction_without_bypassing_it(self):
         from popot_agents.worker import http_harness as harness
         from popot_agents.progress import observe_progress, format_progress
         events = []
@@ -35,10 +35,9 @@ class EvalRequestUsageTests(unittest.TestCase):
                 patch.object(harness, 'trace_output'), \
                 observe_progress(lambda message: events.append(json.loads(message))):
             harness._model_request(call, round_number=1, messages=[], schemas=[], remaining_seconds=lambda: 100)
-            self.assertEqual(json.loads(format_progress('output', content='secret 1234'))['content'], 'secret 1234')
-        expected = candidates[0].hex
-        self.assertEqual(call.get_header('X-popot-request-id'), expected)
-        self.assertEqual([e['request_id'] for e in events], [expected, expected])
+            self.assertNotIn('1234', format_progress('output', content='secret 1234'))
+        self.assertEqual(call.get_header('X-popot-request-id'), 'b' * 32)
+        self.assertEqual([e['request_id'] for e in events], ['b' * 32, 'b' * 32])
 
     def test_transport_failure_has_a_correlated_error_receipt(self):
         from popot_agents.worker import http_harness as harness
@@ -80,6 +79,16 @@ class EvalRequestUsageTests(unittest.TestCase):
                       'tokens': 7, 'requested_model': 'cloud/fixed', 'provider': 'cloud', 'model': 'fixed'}]
             enrich({'results': [row]}, calls, directory, {'primary_model': 'cloud/fixed'})
             self.assertEqual(row['tokens'], 7)
+            self.assertTrue(row['model_pin_verified'])
+            enrich({'results': [row]}, [*calls, {**calls[0], 'id': 'gateway-retry'}], directory,
+                   {'primary_model': 'cloud/fixed'})
+            self.assertTrue(row['model_pin_verified'])
+            self.assertEqual(row['tokens'], 14)
+            events.append({**events[0], 'request_id': 'd' * 32})
+            (directory / 'events.jsonl').write_text('\n'.join(json.dumps(e) for e in events))
+            enrich({'results': [row]}, calls, directory, {'primary_model': 'cloud/fixed'})
+            self.assertEqual(row['metrics']['llm_requests'], 2)
+            self.assertFalse(row['model_pin_verified'])
             calls[0]['request_id'] = 'c' * 32
             enrich({'results': [row]}, calls, directory, {'primary_model': 'cloud/fixed'})
             self.assertIsNone(row['tokens'])

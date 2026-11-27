@@ -142,7 +142,7 @@ class RequestLoggingTests(unittest.TestCase):
         self.assertEqual(events[0]["request_id"], events[1]["request_id"])
 
     @patch("popot_agents.orchestrator.main.ChatServer")
-    def test_logs_full_task_exchange_with_client_and_original_credentials(self, server_class):
+    def test_logs_full_task_exchange_with_client_and_redacts_credentials(self, server_class):
         create_server({"test_agent": lambda task: {"answer": "готово: " + task}})
         handler_class = server_class.call_args.args[1]
         handler = handler_class.__new__(handler_class)
@@ -175,16 +175,16 @@ class RequestLoggingTests(unittest.TestCase):
         self.assertEqual(events[0]["method"], "POST")
         self.assertEqual(events[0]["path"], "/tasks")
         self.assertEqual(events[0]["body"], {"agent": "test_agent", "task": "проверить каталог",
-                                             "api_key": "private-value",
-                                             "OPENROUTER_API_KEY": "provider-secret"})
+                                             "api_key": "[REDACTED]",
+                                             "OPENROUTER_API_KEY": "[REDACTED]"})
         self.assertEqual(events[1]["status"], 200)
         self.assertEqual(events[1]["client_ip"], "192.0.2.7")
         self.assertEqual(events[1]["method"], "POST")
         self.assertEqual(events[1]["path"], "/tasks")
         self.assertEqual(events[1]["body"], {"answer": "готово: проверить каталог"})
         self.assertEqual(events[0]["request_id"], events[1]["request_id"])
-        self.assertIn("private-value", output.getvalue())
-        self.assertIn("provider-secret", output.getvalue())
+        self.assertNotIn("private-value", output.getvalue())
+        self.assertNotIn("provider-secret", output.getvalue())
         self.assertNotIn("private-header", output.getvalue())
 
 
@@ -375,7 +375,7 @@ class HttpHarnessTests(unittest.TestCase):
         self.assertFalse(result['output_truncated'])
 
     @patch("popot_agents.worker.http_harness.request.urlopen")
-    def test_tool_trace_retains_unexpected_secret_argument_for_diagnostics(self, urlopen):
+    def test_tool_trace_omits_unexpected_secret_argument(self, urlopen):
         from popot_agents.worker.http_harness import run_http
 
         message = {"choices": [{"message": {"content": None, "tool_calls": [{
@@ -388,7 +388,7 @@ class HttpHarnessTests(unittest.TestCase):
                                   "HARNESS_MODEL": "example-model"}), redirect_stderr(output):
             answer = run_http("calculate", {"tools": ["calculate"], "max_tool_rounds": 2})
             self.assertIn('Tool input requires reconciliation', answer)
-        self.assertIn("private-token", output.getvalue())
+        self.assertNotIn("private-token", output.getvalue())
 
     @patch("popot_agents.worker.http_harness.request.urlopen")
     def test_logs_provider_progress_without_prompt_or_key(self, urlopen):

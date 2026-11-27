@@ -48,6 +48,9 @@ class NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+
 class API:
     def __init__(self, endpoint, api_key, *, timeout_seconds=30):
         url = parse.urlsplit(endpoint)
@@ -65,7 +68,10 @@ class API:
                                        'Content-Type': 'application/json'})
         try:
             with self.opener.open(req, timeout=self.timeout_seconds) as response:
-                return json.load(response)
+                body = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise ValueError('Phoenix response exceeds the runtime evaluation size limit')
+                return json.loads(body)
         except error.HTTPError as exc:
             # Error bodies can echo request attributes or credentials.
             status = exc.code
@@ -96,7 +102,8 @@ def sanitize_span(span):
 
 
 def fetch_spans(api, project, start, end):
-    params = {'limit': 1000, 'sort': 'id', 'order': 'asc', 'start_time': start, 'end_time': end}
+    # Full spans can each include two 1 MiB payloads and indexed messages.
+    params = {'limit': 8, 'sort': 'id', 'order': 'asc', 'start_time': start, 'end_time': end}
     spans, cursors = {}, set()
     while True:
         page = api.call('/v1/projects/' + parse.quote(project, safe='') + '/spans', params=dict(params))

@@ -30,6 +30,20 @@ class ResourceMonitoringTests(unittest.TestCase):
         self.assertIn({'name': 'data', 'persistentVolumeClaim': {'claimName': 'grafana-resource-data'}}, spec['volumes'])
         self.assertTrue(any(m.get('subPath') == 'evals.json' for m in spec['containers'][0]['volumeMounts']))
 
+    def test_evals_only_install_waits_for_grafana_before_forwarding(self):
+        with patch.object(monitoring, 'Cluster') as cluster_type, patch.object(monitoring, 'ensure_forward') as forward:
+            cluster = cluster_type.return_value
+            monitoring.install_evals()
+            manifests = cluster.apply.call_args.args[0]
+            self.assertEqual([item['metadata']['name'] for item in manifests], ['popot-grafana-config', 'grafana', 'grafana'])
+            cluster.run.assert_called_once_with('-n', monitoring.NS, 'rollout', 'status', 'deployment/grafana', '--timeout=120s')
+            forward.assert_called_once_with()
+            forward.reset_mock()
+            cluster.run.side_effect = subprocess.CalledProcessError(1, 'kubectl')
+            with self.assertRaises(subprocess.CalledProcessError):
+                monitoring.install_evals()
+            forward.assert_not_called()
+
     def test_collector_debug_removal_preserves_metrics_traces_and_is_idempotent(self):
         original = ('receivers:\n  otlp: {}\nexporters:\n  debug:\n    verbosity: detailed\n'
                     '  prometheus:\n    endpoint: 0.0.0.0:8889\n  otlp/jaeger: {}\n'

@@ -36,6 +36,25 @@ MAX_REQUEST_BYTES = RUNTIME["limits"]["request_bytes"]
 MAX_TASK_LENGTH = RUNTIME["limits"]["message_chars"]
 WORKFLOW_RUNNING_ERROR = "workflow is already running; read get_chat instead"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOG_SECRET_FIELDS = {"api_key", "apikey", "authorization", "cookie", "password",
+                     "secret", "token", "access_token", "refresh_token"}
+
+
+def _is_secret_field(key) -> bool:
+    if not isinstance(key, str):
+        return False
+    name = key.lower()
+    return name in LOG_SECRET_FIELDS or name.endswith(
+        ("_api_key", "_password", "_secret", "_token"))
+
+
+def _log_body(value):
+    if isinstance(value, dict):
+        return {key: "[REDACTED]" if _is_secret_field(key) else _log_body(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_log_body(item) for item in value]
+    return value
 
 
 class AgentResumeError(AgentRunError):
@@ -404,7 +423,7 @@ def create_server(
                 "client_ip": self.client_address[0],
                 "client_port": self.client_address[1],
                 "user_agent": self.headers.get("User-Agent"),
-                "method": self.command, "path": self.path, "body": body,
+                "method": self.command, "path": self.path, "body": _log_body(body),
             }, ensure_ascii=False), file=sys.stderr, flush=True)
 
         def _workspace(self, saved: dict, live: ChatRecord | None = None) -> str | None:
@@ -474,7 +493,7 @@ def create_server(
                 "event": "response", "request_id": self._request_id,
                 "client_ip": self.client_address[0],
                 "method": self.command, "path": self.path,
-                "status": status, "body": payload,
+                "status": status, "body": _log_body(payload),
             }, ensure_ascii=False), file=sys.stderr, flush=True)
 
         def do_GET(self) -> None:

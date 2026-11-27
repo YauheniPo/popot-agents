@@ -19,15 +19,22 @@ from ax_local.config import AX_CONFIG
 from ax_local.cluster.holmes import investigation_job, manifests, scope
 from ax_local.omniroute import Api, NoRedirect, contains
 from ax_local.resource_config import SERVICES, load_monitoring, validate_resources
-from popot_agents.progress import trace_event
+from popot_agents.progress import redact_text, trace_event
 
 ROOT = Path(__file__).resolve().parents[2]
 COMBOS_PATH = '/api/combos'
 
 
 def safe_result(value):
-    """Keep the operations/RPC result unchanged."""
-    return value
+    sensitive = {'apikey', 'apikeys', 'key', 'keyhash', 'password', 'secret', 'authorization',
+                 'cookie', 'token', 'accesstoken', 'refreshtoken', 'providerspecificdata',
+                 'byapikey', 'byaccount'}
+    if isinstance(value, dict):
+        return {k: '[REDACTED]' if re.sub('[^a-z]', '', k.lower()) in sensitive else safe_result(v)
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [safe_result(v) for v in value]
+    return redact_text(value) if isinstance(value, str) else value
 
 
 class ProjectOperations:
@@ -181,7 +188,7 @@ class ProjectOperations:
                     '--timestamps=true','--limit-bytes=8192']
             if params.get('previous') is True:
                 args.append('--previous')
-            return {'logs': self._kube(*args)}
+            return {'logs': redact_text(self._kube(*args))}
         args = ['-n',namespace,'get',kind,'-o','json']
         if pod is not None:
             field = 'involvedObject.name' if kind == 'events' else 'metadata.name'
@@ -307,8 +314,8 @@ class ProjectOperations:
         result = {'job':job, 'status':saved.get('status',{}), 'model':os.environ['HOLMES_MODEL'],
                   'source_type': 'analysis', 'observed_at': datetime.now(timezone.utc).isoformat()}
         try:
-            result['report'] = self._kube('-n','ax-diagnostics','logs','job/'+job,
-                                          '--tail=200','--timestamps=true')
+            result['report'] = redact_text(self._kube('-n','ax-diagnostics','logs','job/'+job,
+                                                    '--tail=200','--timestamps=true'))
         except (RuntimeError, subprocess.TimeoutExpired):
             result['report'] = 'Holmes pod is not ready yet. Poll this job in a later tool call.'
         return result

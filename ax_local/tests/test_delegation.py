@@ -865,7 +865,7 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(event['root_session_id'], self.parent)
             self.assertEqual(event['parent_session_id'],
                              parent_id if event['agent_session_id'] == child_id else self.parent)
-        self.assertIn('PRIVATE', json.dumps(received))
+        self.assertNotIn('PRIVATE', json.dumps(received))
         wait_for(lambda: not self.service.jobs)
         self.assertTrue(all(chat.closed for chat in self.runner.chats))
 
@@ -896,7 +896,7 @@ class DelegationTests(unittest.TestCase):
             task = self.wait_task(task_id)
             self.assertEqual(task['status']['state'], 'TASK_STATE_COMPLETED')
             self.assertIn('activity', task['metadata'])
-            self.assertIn('PRIVATE', json.dumps(task))
+            self.assertNotIn('PRIVATE', json.dumps(task))
 
     def test_large_progress_does_not_hide_completed_child_result_over_a2a(self):
         from ax_local.worker.delegation import make_tools

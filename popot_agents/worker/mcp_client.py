@@ -76,6 +76,8 @@ def _error_text(config: dict, exc: Exception) -> str:
         return f"{type(error).__name__}: {error}"
 
     text = details(exc)
+    token = _bearer_token(config)
+    text = text.replace(token, "[REDACTED]") if token else text
     return text[:MAX_TOOL_OUTPUT]
 
 
@@ -264,6 +266,7 @@ def call_tool(config: dict, native_name: str, arguments: dict,
         return asyncio.run(asyncio.wait_for(
             _call_one(config, native_name, arguments), timeout))
     except MCPToolError as exc:
+        # Redact before truncation so a token cut in the middle cannot leak.
         raise MCPToolError(_error_text(config, exc)[:MAX_TOOL_OUTPUT]) from None
     except (TimeoutError, asyncio.TimeoutError) as exc:
         raise MCPTransportError("MCP tool call timed out; outcome is unknown") from None

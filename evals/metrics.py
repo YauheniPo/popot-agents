@@ -49,7 +49,7 @@ def measure(row, events):
               'false_completion': float(row.get('false_completion', False)),
               'latency_seconds': row['elapsed_seconds'],
               'total_tokens': row.get('tokens'),
-              'llm_requests': len(calls) if calls is not None else len(requests),
+              'llm_requests': len(requests) if requests or calls is None else len(calls),
               'steps': sum(e.get('attempt', 1) == 1 for e in requests),
               'model_retries': sum(e.get('attempt', 1) > 1 for e in requests),
               'request_errors': sum(counts[k] for k in ('model_timeout', 'model_http_error', 'model_transport_error')),

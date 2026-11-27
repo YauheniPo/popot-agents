@@ -124,7 +124,7 @@ class WorkflowStabilityTests(unittest.TestCase):
         self.assertNotIn('private', diagnostic)
         self.assertNotIn('private transport detail', str(response))
 
-    def test_root_ssh_interruption_retains_the_original_error_tail(self):
+    def test_root_ssh_interruption_retains_the_redacted_error_tail(self):
         import os
         import subprocess
         from unittest.mock import patch
@@ -139,7 +139,7 @@ class WorkflowStabilityTests(unittest.TestCase):
         self.assertEqual(diagnostic['exit_code'], 1)
         self.assertIn('connection reset', diagnostic['stderr'])
         self.assertLessEqual(len(diagnostic['stderr']), 2000)
-        self.assertIn(secret, json.dumps(response))
+        self.assertNotIn(secret, json.dumps(response))
         self.assertEqual(response['outcome']['reason'], 'workflow_execution_uncertain')
 
     def test_planner_accepts_attributed_child_pr_readback_without_own_git_tools(self):

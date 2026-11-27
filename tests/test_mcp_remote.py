@@ -55,13 +55,13 @@ class RemoteMCPTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_roles(path, agents)
 
-    def test_probe_diagnostics_preserve_credentials_without_forwarding_them_to_shell_tools(self):
+    def test_probe_credentials_are_redacted_without_forwarding_them_to_shell_tools(self):
         probe = {**REMOTE, 'url': 'https://api.githubcopilot.com/mcp/x/all/readonly',
                  'bearer_token_env': 'AX_HARNESS2_GITHUB_TOKEN'}
         with patch.dict(os.environ, {'AX_HARNESS2_GITHUB_TOKEN': 'private-probe-key',
                                     'HARNESS_TOOL_ENV_NAMES_JSON': '[]'}):
             self.assertNotIn('AX_HARNESS2_GITHUB_TOKEN', mcp_client.safe_tool_env())
-            self.assertIn('private-probe-key',
+            self.assertNotIn('private-probe-key',
                 mcp_client._error_text(probe, ValueError('private-probe-key was rejected')))
 
     def setUp(self):
@@ -167,7 +167,7 @@ class RemoteMCPTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'GITHUB_PERSONAL_ACCESS_TOKEN'):
                     asyncio.run(connect())
 
-    def test_auth_errors_keep_status_and_original_token(self):
+    def test_auth_errors_keep_status_and_redact_token(self):
         for status in (401, 403):
             async def fail(*args):
                 raise RuntimeError(f'HTTP {status}, Authorization: Bearer test-secret')
@@ -179,11 +179,11 @@ class RemoteMCPTests(unittest.TestCase):
                      patch.object(mcp_client, target, side_effect=fail):
                     with self.assertRaisesRegex(RuntimeError, f'HTTP {status}') as raised:
                         operation()
-                    self.assertIn('Bearer test-secret', str(raised.exception))
-                    self.assertIn('test-secret', str(raised.exception))
+                    self.assertIn('[REDACTED]', str(raised.exception))
+                    self.assertNotIn('test-secret', str(raised.exception))
                     self.assertTrue(raised.exception.__suppress_context__)
 
-    def test_nested_transport_errors_expose_original_cause(self):
+    def test_nested_transport_errors_expose_cause_without_token(self):
         # anyio's TaskGroup wraps HTTP transport failures, including on Python 3.10.
         class TransportGroup(Exception):
             def __init__(self, *errors):
@@ -200,8 +200,8 @@ class RemoteMCPTests(unittest.TestCase):
             with self.subTest(target=target), patch.object(mcp_client, target, side_effect=fail):
                 with self.assertRaisesRegex(RuntimeError, 'HTTP 503') as raised:
                     operation()
-                self.assertIn('Bearer test-secret', str(raised.exception))
-                self.assertIn('test-secret', str(raised.exception))
+                self.assertIn('[REDACTED]', str(raised.exception))
+                self.assertNotIn('test-secret', str(raised.exception))
                 self.assertTrue(raised.exception.__suppress_context__)
 
     def test_missing_transport_dependency_preserves_original_discovery_error(self):

@@ -133,7 +133,7 @@ class PhoenixRuntimeTests(unittest.TestCase):
                 self.assertEqual(model['attributes']['llm.model_name'], 'actual-model')
                 self.assertEqual(parent['attributes']['popot.skills.loaded'], ['engineering/code-review'])
                 self.assertTrue(any(e['name'] == 'mcp_discovery_failed' for e in parent['events']))
-                self.assertIn('private-value', json.dumps(spans))
+                self.assertNotIn('private-value', json.dumps(spans))
                 self.assertNotIn('test-secret', ''.join(p.read_text() for p in Path(tmp).glob('*.json')))
             finally:
                 tracer.close()

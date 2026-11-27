@@ -26,12 +26,15 @@ class EvalRegradeTests(unittest.TestCase):
             save(source / 'report.json', {'finished_at': 'done', 'results': [row]})
             (source / 'events.jsonl').write_text('')
             (source / 'phoenix.json').write_text('{"experiment_id":"old-id"}')
+            (source / 'model-spans.jsonl').write_text('{}\n')
             before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in source.iterdir()}
             with patch('evals.scoring.evaluate_judge', return_value={'score': 1, 'status': 'ok'}) as evaluate:
                 regrade(source, output)
             self.assertEqual(before, {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in source.iterdir()})
+            self.assertEqual((output / 'model-spans.jsonl').read_bytes(), (source / 'model-spans.jsonl').read_bytes())
+            self.assertEqual((output / 'model-spans.jsonl').stat().st_mode & 0o777, 0o600)
             new = json.loads((output / 'report.json').read_text())['results'][0]
-            self.assertEqual(json.loads((output / 'config.json').read_text())['experiment_name'], 'model-max-judge-v2-old')
+            self.assertEqual(json.loads((output / 'config.json').read_text())['experiment_name'], 'old-judge-v2')
             self.assertEqual(new['self_assessment'], row['self_assessment'])
             self.assertEqual(new['elapsed_seconds'], 4)
             self.assertEqual(new['judge']['score'], 1)

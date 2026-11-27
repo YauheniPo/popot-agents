@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from evals import exclusive
-from popot_agents.telemetry import VERSION, payload_attributes
+from popot_agents.telemetry import VERSION, payload_attributes, safe_value, sensitive_values
 
 
 def identifier(value, width=16):
@@ -47,6 +47,7 @@ def build_spans(row, events, experiment, *, model_records=()):
         'checks': row.get('checks'), 'passed': row['passed']}))
     sessions = {}
     for event in events:
+        event = safe_value(event, sensitive_values(event))
         sid = event.get('agent_session_id') or root_sid
         when = event.get('observed_at_ns', start)
         if sid not in sessions:
@@ -161,7 +162,13 @@ def build_spans(row, events, experiment, *, model_records=()):
     for key in list(pending):
         finish(key, end, incomplete=True)
     for record in model_records:
-        attrs = dict(record['attributes'])
+        original = record['attributes']
+        attrs = safe_value(original, sensitive_values(original))
+        for side in ('input', 'output', 'error'):
+            if attrs.get(side + '.value') != original.get(side + '.value'):
+                # Historical fingerprints describe the original, unmasked payload.
+                for suffix in ('bytes', 'sha256'):
+                    attrs.pop('popot.' + side + '.' + suffix, None)
         sid, rid = attrs.get('popot.agent_session_id'), attrs.get('popot.request_id')
         receipts = [c for c in row.get('gateway_calls', []) if rid and
                     (c.get('session_id'), c.get('request_id')) == (sid, rid)]
@@ -382,11 +389,11 @@ def _export(directory, *, baseline, endpoint):
                         raise RuntimeError('Phoenix span export failed')
                 try:
                     run = client.experiments.log_run(experiment_id=experiment['id'], dataset_example_id=examples[row['case_id']],
-                        output={'session_id': row['session_id'], 'status': row['outcome'].get('status'),
+                        output=safe_value({'session_id': row['session_id'], 'status': row['outcome'].get('status'),
                                 'checks': row['checks'], 'answer': row['result'].get('answer'),
                                 'tokens': row.get('tokens'), 'tokens_known': row.get('tokens_known'),
                                 'usage_complete': row.get('usage_complete'), 'gateway_calls': row.get('gateway_calls', []),
-                                'observed': row['observed'], 'runner_error': row['result'].get('runner_error')},
+                                'observed': row['observed'], 'runner_error': row['result'].get('runner_error')}),
                         start_time=datetime.fromtimestamp(row['started_at_ns'] / 1e9, timezone.utc),
                         end_time=datetime.fromtimestamp(row['finished_at_ns'] / 1e9, timezone.utc),
                         repetition_number=row['repetition'], trace_id=records[0]['trace'])
@@ -417,7 +424,7 @@ def _export(directory, *, baseline, endpoint):
                     annotator_kind='LLM' if name in {'judge_score', 'self_score'} else 'CODE',
                     score=float(value) if value is not None else None,
                     error='Measurement unavailable' if value is None else None,
-                    explanation=source.get('explanation'),
+                    explanation=safe_value(source.get('explanation')),
                     metadata={'optimization_direction': METRICS[name][0], 'source': name,
                               'judge_fingerprint': config.get('judge_fingerprint'),
                               'measurement_status': source.get('status'), 'error_type': source.get('error_type')},

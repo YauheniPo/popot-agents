@@ -27,6 +27,10 @@ class EvalScoringTests(unittest.TestCase):
         artifact = {'name': 'self-evaluation.json', 'content': body,
                     'sha256': hashlib.sha256(body.encode()).hexdigest()}
         self.assertEqual(self_assessment({'artifacts': [artifact]})['score'], .7)
+        for raw in ('[]', 'null', '1'):
+            with self.subTest(raw=raw):
+                malformed = {**artifact, 'content': raw, 'sha256': hashlib.sha256(raw.encode()).hexdigest()}
+                self.assertEqual(self_assessment({'artifacts': [malformed]})['status'], 'missing_or_invalid')
         artifact['sha256'] = '0' * 64
         self.assertIsNone(self_assessment({'artifacts': [artifact]})['score'])
         self.assertIsNone(self_assessment({})['score'])

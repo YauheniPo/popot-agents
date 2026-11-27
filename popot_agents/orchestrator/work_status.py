@@ -2,6 +2,8 @@
 import json
 import re
 
+from popot_agents.progress import redact_text
+
 _MAX_BYTES = 16384
 _REFERENCE = re.compile(
     r'https://github\.com/[\w.-]+/[\w.-]+/(?P<kind>commit/[a-f0-9]{40}|pull/\d+|actions/runs/\d+(?:/job/\d+)?)',
@@ -42,13 +44,13 @@ def _report(saved):
         return report
     report['artifacts'] = [{key: artifact[key] for key in ('name', 'sha256')}
                            for artifact in outcome.get('artifacts', [])]
-    labels = {key: str(outcome[key]) for key in ('status', 'reason') if key in outcome}
+    labels = {key: redact_text(str(outcome[key])) for key in ('status', 'reason') if key in outcome}
     report['outcome'] = {key: text[:200] for key, text in labels.items()}
     report['truncated'] |= any(len(text) > 200 for text in labels.values())
     for key, count in (('evidence', 8), ('remaining_work', 2), ('errors', 2), ('warnings', 2)):
         values = outcome.get(key, [])
         values = [item for item in values if isinstance(item, str)] if isinstance(values, list) else []
-        texts = values[:count]
+        texts = [redact_text(item) for item in values[:count]]
         report['outcome'][key] = [text[:240] for text in texts]
         report['truncated'] |= len(values) > count or any(len(text) > 240 for text in texts)
     # Links remain complete even when the surrounding evidence is shortened.
@@ -62,7 +64,7 @@ def _report(saved):
         if not isinstance(text, str):
             continue
         report['truncated'] |= len(text) > 12000
-        text = text[:12000]
+        text = redact_text(text[:12000])
         for match in _REFERENCE.finditer(text):
             url, kind = match.group(), match.group('kind').lower()
             if url in seen:
@@ -82,7 +84,7 @@ def _report(saved):
     report['truncated'] |= len(commits) > 6
     failure = child.get('failure') or outcome.get('failure')
     if isinstance(failure, dict):
-        report['failure'] = {key: str(failure[key])[:160]
+        report['failure'] = {key: redact_text(str(failure[key]))[:160]
                              for key in ('code', 'stage', 'error_type') if key in failure}
         child_ids = failure.get('childSessionIds')
         if isinstance(child_ids, list):

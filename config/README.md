@@ -69,21 +69,7 @@
 `x-tracing` в том же JSON управляет постоянным экспортом всех рабочих ролей
 в отдельный проект. После его изменения пересоберите API/worker через
 `bash ax_local/rebuild-worker.sh`; подробности — в [гайде](../evals/README.md#постоянные-трейсы-ax).
-Код v2 включает исходные LLM/tool payload и управляющие события harness без
-маскирования значений, включая credentials. Логи HTTP/MCP также сохраняют исходные
-поля; `credentialRedactionEnabled=false` закреплён в deploy-конфиге OmniRoute.
-Исторические spans сохраняют прежнюю полноту и уже записанные подмены.
-Email для входа — `admin@localhost`; пароль — значение
-`PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD`. Это initial password: его изменение
-в конфиге не сбрасывает пароль уже существующего пользователя.
-Для прямого чтения Phoenix ролью `project_operator` используется отдельный
-пользователь `MEMBER` и его API key в `PHOENIX_API_KEY`. Этот ключ передаётся
-worker через `env_names`; `PHOENIX_ADMIN_SECRET` служит экспорту в API.
-MEMBER позволяет оператору публиковать CODE-оценки через MCP `evals`, который
-выполняет оценщик внутри worker и напрямую обращается к Phoenix. Подключение
-Phoenix MCP предоставляет запросы чтения. `evals/config.json → x-operator`
-управляет ролью существующего пользователя; bootstrap проверяет её при deploy.
-Встроенный MCP и его инструменты описаны в [AX operations](../ax_local/README.md#project-operator-единая-роль-для-анализа-проекта).
+Код v2 сохраняет LLM/tool payload после маскирования известных секретов. HTTP/MCP скрывают транспортные ключи. OmniRoute использует `credentialRedactionEnabled=true`. Исторические записи сохраняют прежний формат.
 
 ```bash
 bash evals/up.sh

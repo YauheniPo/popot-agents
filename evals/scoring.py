@@ -72,7 +72,7 @@ def self_assessment(outcome):
         items = validate_artifacts(outcome.get('artifacts', []))
         item = next(a for a in items if a['name'] == 'self-evaluation.json')
         data = json.loads(item['content'])
-        if data.get('rubric') != VERSION:
+        if not isinstance(data, dict) or data.get('rubric') != VERSION:
             raise ValueError('Wrong rubric')
         return {**_grade(data), 'status': 'ok'}
     except (ValueError, KeyError, TypeError, StopIteration):
