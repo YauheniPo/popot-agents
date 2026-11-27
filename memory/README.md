@@ -42,7 +42,7 @@ read-only and bundled scripts are not ingested or executed. Roles continue to
 load their configured local skills; this import makes them visible in Cognee.
 Each skill is indexed synchronously and can take several minutes on a local CPU.
 The importer prints the current skill before uploading it. Its per-request timeout
-is `timeouts.memory_skill_import_seconds` in `config/runtime.json` (600 seconds),
+is `x-agent.timeouts.memory_skill_import_seconds` in `memory/config.json` (600 seconds),
 separate from agent memory request budgets. Healthy containers do not mean skill
 indexing has finished. If an import fails, the services remain running; rerun
 `bash memory/up.sh` to update the same nodes.
@@ -61,6 +61,22 @@ verified, and the overlay fails if the upstream component contract changes.
 nginx and the Node base image also use the shared pins. The launcher and
 `bash compose.sh --env-file .env -f memory/compose.yaml ...` load these values
 automatically and require Python 3.11+.
+
+Service settings live in [config.json](config.json): Cognee extraction, caches,
+authentication, process settings and healthcheck, plus the gateway port and UI
+backend address. [compose.yaml](compose.yaml) reads these with native Compose
+`extends`; it retains image pins, secrets, mounts and service dependencies.
+Apply service changes with `bash memory/up.sh`. Passwords stay in the root `.env`.
+
+The same file's `x-agent` section configures agent recall/capture, summary token
+budgets, memory text limits, the Cognee tool journal and `memory_*` timeouts.
+These values are validated and read by the Python runtime; Compose ignores the
+extension. Worker/API/MCP images include the file. After changing `x-agent`, run
+`bash ax_local/rebuild-worker.sh` and start a new session. Direct Python runs can
+select another file with `POPOT_MEMORY_CONFIG` before startup. Inside Cognee this
+variable points at `/app/popot-sync/config.json`, the mounted source file.
+The shared `tool_evidence_chars` and `tool_evidence_count` remain in
+`config/runtime.json → limits`: both memory capture and final task reports use them.
 
 In **Mindmap**, select an entity to open **Saved knowledge**. The panel follows
 its graph links to source chunks and their documents in the selected brain,
@@ -279,7 +295,8 @@ The SDK dashboard counts failed traces, including a failed tool batch, rather
 than individual failed tools; individual outcomes remain in `tool_batches`.
 Lifecycle failures include a redacted error message and the start/finish phase.
 
-Optional memory summary requests are capped by `timeouts.memory_summary_seconds`
+Optional memory summary requests are capped by `x-agent.timeouts.memory_summary_seconds`
+(in `memory/config.json`)
 (default 30 seconds). Capture failures record `phase=summary` or `phase=save` and
 the exception type in `memory.capture`, so model extraction timeouts are distinguishable
 from writes to Cognee. They remain separate from the main task outcome.

@@ -202,16 +202,18 @@ class ProjectOperations:
             'resources': [{'container': c['name'], 'resources': c.get('resources', {})}
                           for c in r['spec']['containers']]} for r in rows]
 
-    def _metric_range(self, params):
+    @staticmethod
+    def _metric_range(args, params):
+        if 'start' not in params and 'end' not in params:
+            return
         start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
-        if any(type(value) not in {int, float} for value in (start, end, step)) \
+        if any(type(v) not in {int, float} for v in (start, end, step)) \
                 or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
             raise ValueError('range must be <=7d, step>=15s and <=1500 points')
-        return {'start': start, 'end': end, 'step': step}
+        args.update(start=start, end=end, step=step)
 
     @staticmethod
-    def _metric_availability(result):
-        data = result.get('data', {})
+    def _metric_availability(result, data):
         if result.get('status') != 'success' or not isinstance(data.get('result'), list):
             return 'unknown'
         samples = data['result']
@@ -226,15 +228,16 @@ class ProjectOperations:
         query = params.get('query', '')
         if not isinstance(query, str) or not query.strip() or len(query) > 3000:
             raise ValueError('PromQL query of 1..3000 characters is required')
-        args = {'query': query, 'timeout': '5s'}
-        if 'start' in params or 'end' in params:
-            args.update(self._metric_range(params))
+        args = {'query': query, 'timeout':'5s'}
+        self._metric_range(args, params)
         endpoint = 'query_range' if 'start' in args else 'query'
         result = self._proxy('prometheus', '/api/v1/' + endpoint + '?' + urlencode(args))
+        data = result.get('data', {})
+        availability = self._metric_availability(result, data)
         return {**result, 'observation': {
             'source_type': 'observation', 'observed_at': datetime.now(timezone.utc).isoformat(),
             'query': query, 'range': {key: args[key] for key in ('start', 'end', 'step') if key in args},
-            'availability': self._metric_availability(result),
+            'availability': availability,
             'interpretation': 'no_data means no samples for this query and scope, not zero utilization; '
                               'unknown means availability could not be established.',
         }}

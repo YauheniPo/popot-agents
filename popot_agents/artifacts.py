@@ -48,40 +48,30 @@ class ArtifactError(ValueError):
         super().__init__(artifact_error_message(code, minimum))
 
 
-def _artifact_payload(item, total):
-    """Decode one validated artifact and report its text byte count."""
-    if 'encoding' not in item:
-        data = item['content'].encode('utf-8')
-        return data, len(data)
+def _binary_artifact_data(item, total):
+    """Decode one base64 artifact within the remaining combined byte budget."""
     if item['encoding'] != 'base64':
         raise ArtifactError('invalid_artifact')
     remaining = RUNTIME['limits']['artifact_bytes'] - total
     if len(item['content']) > 4 * ((remaining + 2) // 3):
         raise ArtifactError('total_byte_limit')
     try:
-        return base64.b64decode(item['content'], validate=True), 0
+        return base64.b64decode(item['content'], validate=True)
     except ValueError:
         raise ArtifactError('invalid_artifact') from None
 
 
-def _validate_artifact(item, names, total, text_total):
-    """Validate one artifact and return the updated byte counters."""
+def _artifact_item_data(item, names):
+    """Validate one artifact's shape and return (bytes, utf8_text_bytes)."""
     if (not isinstance(item, dict) or set(item) not in (
             {'name', 'content', 'sha256'}, {'name', 'content', 'sha256', 'encoding'})
             or not isinstance(item['name'], str) or not _NAME.fullmatch(item['name'])
             or item['name'] in names or not isinstance(item['content'], str)):
         raise ArtifactError('invalid_artifact')
-    data, text_bytes = _artifact_payload(item, total)
-    text_total += text_bytes
-    if text_total > RUNTIME['limits']['tool_output_chars']:
-        raise ArtifactError('byte_limit', text_total)
-    total += len(data)
-    if total > RUNTIME['limits']['artifact_bytes']:
-        raise ArtifactError('total_byte_limit', total)
-    if item['sha256'] != hashlib.sha256(data).hexdigest():
-        raise ArtifactError('checksum')
-    names.add(item['name'])
-    return total, text_total
+    if 'encoding' in item:
+        return None, 0
+    data = item['content'].encode('utf-8')
+    return data, len(data)
 
 
 def validate_artifacts(artifacts):
@@ -90,7 +80,19 @@ def validate_artifacts(artifacts):
     total = text_total = 0
     names = set()
     for item in artifacts:
-        total, text_total = _validate_artifact(item, names, total, text_total)
+        data, text_size = _artifact_item_data(item, names)
+        if data is None:
+            data = _binary_artifact_data(item, total)
+        else:
+            text_total += text_size
+            if text_total > RUNTIME['limits']['tool_output_chars']:
+                raise ArtifactError('byte_limit', text_total)
+        total += len(data)
+        if total > RUNTIME['limits']['artifact_bytes']:
+            raise ArtifactError('total_byte_limit', total)
+        if item['sha256'] != hashlib.sha256(data).hexdigest():
+            raise ArtifactError('checksum')
+        names.add(item['name'])
     return artifacts
 
 

@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from collections import deque
 from dataclasses import dataclass, field
@@ -36,6 +36,10 @@ ACTIVE = {"TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"}
 TRANSIENT_RESUME_PROBES = {'AX ssh failed', 'AX ssh timed out',
                           'AX ssh connection failed', 'AX ssh OS error'}
 
+
+
+SESSION_ID_RE = r'[0-9a-f]{16}'
+DELEGATION_CANCELED_ERROR = 'delegation canceled'
 
 def _revision_observations(saved):
     config = saved.get('roleConfig') or {}
@@ -151,7 +155,7 @@ def _failure_classification(exc):
 
 def _run_error_detail(detail):
     """Known AgentRunError texts as publication-safe codes."""
-    model_http = re.fullmatch(r"model endpoint returned HTTP ([0-9]{3})", detail)
+    model_http = re.fullmatch(r"model endpoint returned HTTP (\d{3})", detail)
     if model_http:
         return "model_http_error", model_http[0]
     if re.fullmatch(r"(?:\[Errno (?:54|104)\] )?Connection reset by peer", detail):
@@ -242,12 +246,15 @@ class DelegationService:
         self.runners, self.store = runners, store
         self.base_url = base_url.rstrip("/")
         self.lock = threading.RLock()
+        self.closed = False
+        self.discovery_samples = {}
+        self._reset_state_maps()
+
+    def _reset_state_maps(self):
         self.grants: dict[str, Grant] = {}
         self.tokens: dict[str, Grant] = {}
         self.jobs: dict[str, Job] = {}
         self.retained: dict[str, tuple[object, float]] = {}
-        self.closed = False
-        self.discovery_samples = {}
 
     @contextmanager
     def workflow(self, session_id, deadline, *, max_turns, metadata=None):
@@ -403,10 +410,13 @@ class DelegationService:
         selection = checkpoint.get('await_tasks')
         mode = 'all'
         if selection is not None:
-            ids = selection.get('session_ids') if isinstance(selection,dict) else None
-            mode = selection.get('wait_for','all') if isinstance(selection,dict) else None
+            ids = None
+            mode = 'all'
+            if isinstance(selection, dict):
+                ids = selection.get('session_ids')
+                mode = selection.get('wait_for', 'all')
             if not isinstance(ids,list) or not 1 <= len(ids) <= 16 or any(
-                    not isinstance(sid,str) or not re.fullmatch(r'[0-9a-f]{16}',sid) for sid in ids) \
+                    not isinstance(sid,str) or not re.fullmatch(SESSION_ID_RE, sid) for sid in ids) \
                     or len(set(ids)) != len(ids) or mode not in {'all','any'}:
                 raise AgentRunError('Invalid child wait selection')
             pending = set(ids)
@@ -741,7 +751,7 @@ class DelegationService:
                     if job.config["_ax_delegation"]["state"] not in ACTIVE:
                         raise A2AError("task is no longer cancelable", -32002)
                     job.canceled.set()
-                    self._save(job, "TASK_STATE_CANCELED", error="delegation canceled")
+                    self._save(job, "TASK_STATE_CANCELED", error=DELEGATION_CANCELED_ERROR)
                 if job.chat:
                     job.chat.close()
                 self._cancel_children(job.session_id)
@@ -758,7 +768,7 @@ class DelegationService:
             raise A2AError("messageId must be a nonempty string up to 100 characters")
         session_id = message.get('taskId')
         if session_id is not None and (not isinstance(session_id, str) or
-                not re.fullmatch(r'[0-9a-f]{16}', session_id)):
+                not re.fullmatch(SESSION_ID_RE, session_id)):
             raise A2AError('invalid continuation session ID')
         if message.get("contextId", root_id) != root_id:
             raise A2AError("task must belong to the caller's context")
@@ -860,7 +870,7 @@ class DelegationService:
             raise A2AError('invalid target revision')
         dependencies = extra.get('depends_on',[])
         if not isinstance(dependencies,list) or len(dependencies)>16 or any(
-                not isinstance(sid,str) or not re.fullmatch(r'[0-9a-f]{16}',sid) for sid in dependencies) \
+                not isinstance(sid,str) or not re.fullmatch(SESSION_ID_RE, sid) for sid in dependencies) \
                 or len(set(dependencies))!=len(dependencies):
             raise A2AError('depends_on must contain unique direct child session IDs')
         if dependencies and (not grant.run.persistent or is_probe):
@@ -1113,8 +1123,18 @@ class DelegationService:
     def _execute(self, job: Job):
         # Each child owns its observer; parent clients read only their authorized
         # Task's bounded activity through the existing A2A polling transport.
-        with observe_progress(lambda message: self._record_progress(job, message)):
-            self._execute_observed(job)
+        tracer = getattr(self, 'tracer', None)
+        meta = job.config.get('_ax_delegation', {})
+        with (tracer.session(job.session_id, job.config['_ax_role'], job.config,
+                parent_session_id=meta.get('parent_session_id')) if tracer else nullcontext()) as span:
+            def record(message):
+                if span:
+                    span.event(message)
+                self._record_progress(job, message)
+            with observe_progress(record):
+                self._execute_observed(job)
+            if span:
+                span.result({'outcome': meta.get('outcome', {'status': 'failed'})})
 
     def _execute_observed(self, job: Job):
         answer, issue, failure = None, None, None

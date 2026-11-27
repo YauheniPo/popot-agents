@@ -10,7 +10,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from popot_agents.runtime_config import RUNTIME
+from popot_agents.runtime_config import MEMORY, RUNTIME
 from popot_agents.progress import trace_event
 from popot_agents.tools import MAX_TOOL_OUTPUT, preserve_tool_output, safe_tool_env
 
@@ -53,14 +53,12 @@ async def _streams(config: dict):
         import httpx2
         from mcp.client.streamable_http import streamable_http_client
 
-        async with (
-            httpx2.AsyncClient(headers=headers,
-                               follow_redirects=False,
-                               # Outer discovery/tool deadlines still apply.
-                               timeout=httpx2.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
-                                   read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client,
-            streamable_http_client(config["url"], http_client=client) as (read, write),
-        ):
+        async with (httpx2.AsyncClient(headers=headers,
+                                      follow_redirects=False,
+                                      # Outer discovery/tool deadlines still apply.
+                                      timeout=httpx2.Timeout(RUNTIME['timeouts']['mcp_http_seconds'],
+                                          read=RUNTIME['timeouts']['mcp_sse_read_seconds'])) as client,
+                    streamable_http_client(config["url"], http_client=client) as (read, write)):
             yield read, write
     else:
         from mcp.client.stdio import stdio_client
@@ -188,7 +186,7 @@ def discover_tools(servers: dict, *, timeout_seconds: float | None = None,
         try:
             timeout = RUNTIME["timeouts"]["mcp_discovery_seconds"]
             if alias == 'cognee':
-                timeout = min(timeout, RUNTIME['timeouts']['memory_session_start_seconds'])
+                timeout = min(timeout, MEMORY['timeouts']['memory_session_start_seconds'])
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

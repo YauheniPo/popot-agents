@@ -241,10 +241,14 @@ def load_roles(path: str | Path, agents: Mapping[str, AgentProfile]) -> dict[str
                 if not isinstance(url, str):
                     raise ValueError(f"role {name} has invalid MCP URL")
                 parsed = urlsplit(url)
-                if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                local_phoenix = (name == 'project_operator' and alias == 'phoenix'
+                    and parsed.scheme == 'http' and parsed.netloc == 'host.docker.internal:6006'
+                    and parsed.path == '/mcp'
+                    and server.get('bearer_token_env') == 'PHOENIX_API_KEY')
+                if ((parsed.scheme != "https" and not local_phoenix) or not parsed.hostname or parsed.username is not None
                         or parsed.password is not None or parsed.query or parsed.fragment
                         or any(char.isspace() for char in url)):
-                    raise ValueError(f"role {name} needs a credential-free HTTPS MCP URL")
+                    raise ValueError(f"role {name} needs a credential-free HTTPS MCP URL or the local Phoenix endpoint")
                 if 'bearer_token_env' in server:
                     token_name = server["bearer_token_env"]
                     if not isinstance(token_name, str) or token_name not in config.get("env_names", []):
@@ -563,13 +567,17 @@ def create_server(
                     live = None
                 child_state = ((saved.get('roleConfig') or {}).get('_ax_delegation') or {}).get('state')
                 stored_status = 'running' if child_state in {'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING'} else 'stopped'
+                if live:
+                    status = "running" if busy else getattr(live.worker, "status", "running")
+                else:
+                    status = stored_status
                 self._reply(200, {
                     "sessionId": session_id, "agent": saved["agent"],
                     "role": saved.get("role"),
                     "createdAt": saved.get("createdAt", saved["updatedAt"]),
                     "expiresAt": (expiry.isoformat() if (expiry := self.server.store.expires_at(saved))
                                   else None),
-                    "status": ("running" if busy else getattr(live.worker, "status", "running")) if live else stored_status,
+                    "status": status,
                     "progress": live.progress.snapshot() if live and live.progress else None,
                     "workflow": public_workflow(saved, include_result=True),
                     "runs": (saved.get('roleConfig') or {}).get('_workflow_runs', []) +
@@ -774,7 +782,12 @@ def create_server(
         def _coordinated_message(self, payload, new_session_id=None):
             saved = self.server.store.get(payload['sessionId']) if isinstance(payload.get('sessionId'), str) else None
             role = saved.get('role') if saved else payload.get('role')
-            config = saved.get('roleConfig') if saved else roles.get(role) if isinstance(role, str) else None
+            if saved:
+                config = saved.get('roleConfig')
+            elif isinstance(role, str):
+                config = roles.get(role)
+            else:
+                config = None
             selected_policy = role_policy(config, workflow_policy, stored=bool(saved)) if role is not None else None
             if selected_policy is None:
                 return self._message_locked(payload, new_session_id)

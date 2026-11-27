@@ -117,7 +117,7 @@ def dispatch_request(routes: dict[str, Provider], path: str,
 
 
 def start_proxy(routes: dict[str, Provider], host: str = "0.0.0.0",
-                port: int = AX_CONFIG["proxy"]["port"]) -> ThreadingHTTPServer:
+                port: int = AX_CONFIG["proxy"]["port"], *, tracer=None) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, status: int, body: bytes) -> None:
             try:
@@ -145,9 +145,18 @@ def start_proxy(routes: dict[str, Provider], host: str = "0.0.0.0",
                 self._reply(413, b'{}')
                 return
             body = self.rfile.read(size)
-            status, answer = dispatch_request(routes, self.path,
-                                              authorization, body, correlation={
-                                                  name:self.headers.get(name) for name in CORRELATION_HEADERS})
+            span = (tracer.model_span(self.headers.get('X-Popot-Session-Id'),
+                    authorized_provider(routes, authorization).model) if tracer else None)
+            try:
+                status, answer = dispatch_request(routes, self.path,
+                                                  authorization, body, correlation={
+                                                      name:self.headers.get(name) for name in CORRELATION_HEADERS})
+            except BaseException:
+                if span:
+                    span.model_result(502, b'{}')
+                raise
+            if span:
+                span.model_result(status, answer)
             self._reply(status, answer)
 
         def log_message(self, _format: str, *_args) -> None:

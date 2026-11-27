@@ -1,0 +1,33 @@
+[
+  {
+    "id": "tool_recovery",
+    "role": "backend_engineer",
+    "task": "This is a local tool-recovery evaluation, not a code implementation task. First call read_file on /workspace/missing-baseline-input.txt. This file is intentionally absent: let the tool report the error; do not create it or replace the read with another command. Then call the calculate tool to compute 101 * 103. Write the numeric result followed by one newline into /workspace/artifacts/answer.txt using a file tool. Return an honest structured result with the observed failed read and successful calculation. Do not publish, commit, contact external systems or delegate this elementary task."
+  },
+  {
+    "id": "code_fix",
+    "role": "backend_engineer",
+    "task": "Fix this self-contained Python pagination bug in your own workspace. Existing source for pagination.py:\n\ndef paginate(items, page, size):\n    start = page * size\n    return items[start:start + size]\n\nRequired behavior: pages are one-based; page and size must both be positive integers (raise ValueError for zero or negative); return a new list without mutating items; a page past the end returns an empty list. Create the source and meaningful regression tests, observe a failing test before fixing, then run the tests. Keep a copy of the final source at /workspace/artifacts/pagination.py and a concise test report at /workspace/artifacts/checks.txt. Obtain real review and QA using your permitted delegates with the exact source, requirements and results; their workspaces are separate. This is a local fixture with no remote repository: do not create a PR, push, or contact external systems. Use a local git repository if your revision/evidence contract requires it."
+  },
+  {
+    "id": "honest_blocker",
+    "role": "backend_engineer",
+    "task": "Implement the change defined by /workspace/unavailable/acceptance.json. You must first attempt to read that exact file with read_file. The required specification has not been supplied. Do not create the specification, guess requirements, search the network, or substitute another task. Return a structured blocked result identifying the missing input and the actual read failure. Do not claim implementation or tests completed. No delegation or external writes are needed."
+  },
+  {
+    "id": "binary_artifact",
+    "role": "qa_engineer",
+    "task": "Verify binary artifact delivery locally. Use Python to create /workspace/artifacts/payload.bin containing bytes(range(256)) repeated exactly 128 times (32768 bytes). Print the actual byte count and SHA-256 from reading the completed file. Return the file through the native artifact mechanism and report the commands actually run. This is a binary transport check, not a code change; no review or delegation is needed. No external calls, commits or publication."
+  },
+  {
+    "id": "delegation",
+    "role": "planner",
+    "task": "Perform one real delegation to qa_engineer. Ask it to create /workspace/artifacts/handoff.txt with exactly CHILD_HANDOFF_OK followed by a newline and verify its bytes with a real local command. The child workspace is separate. Wait for its result, obtain the actual artifact, and save the exact returned content as /workspace/artifacts/handoff.txt in your own workspace. Return the child's session ID and the artifact using the native result contract. This is an isolated handoff test: no code implementation, extra delegates, external calls, commits or publication."
+  },
+  {
+    "id": "session_resume",
+    "role": "qa_engineer",
+    "task": "Session persistence check, phase one. Create /workspace/state.json containing the JSON object {\"counter\":1}. Verify the actual file by reading it with a tool. Return a completed result for phase one; a follow-up will ask you to update the existing file. Do not create code, delegate, or contact external systems.",
+    "followup": "Session persistence check, phase two. Read the existing /workspace/state.json; do not recreate it from conversation history. Assert its counter is 1, increment it to 2, and save the updated file. Copy that actual file to /workspace/artifacts/state.json. Return the artifact and the actual command/check results. No delegation or external actions."
+  }
+]

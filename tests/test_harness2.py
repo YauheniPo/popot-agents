@@ -200,12 +200,14 @@ class PlanningClientTests(unittest.TestCase):
                     self.client([])
 
     def test_proposals_use_improver_capability_and_only_the_prompt_tool(self):
+        self.client.payload['session_id'] = 'a' * 16
         answer = b'{"choices":[{"message":{"content":"plan"}}]}'
         with patch('urllib.request.urlopen', return_value=io.BytesIO(answer)) as upstream:
             self.client([{'role': 'user', 'content': 'Plan'}], improver=True, proposal=True)
         call = upstream.call_args.args[0]
         body = json.loads(call.data)
         self.assertEqual(call.get_header('Authorization'), 'Bearer planning-token')
+        self.assertEqual(call.get_header('X-popot-session-id'), 'a' * 16)
         self.assertEqual(body['model'], 'ax-free')
         self.assertEqual(body['max_tokens'], 2048)
         self.assertEqual([tool['function']['name'] for tool in body['tools']], ['propose_prompt'])

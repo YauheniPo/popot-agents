@@ -10,6 +10,8 @@ import sys
 import threading
 import time
 
+_REDACTED = '[REDACTED]'
+
 _observer = ContextVar('agent_progress', default=None)
 
 
@@ -79,23 +81,41 @@ class TurnProgress:
             return result
 
 
+def _redact_private_keys(text):
+    markers = re.finditer(r'-----(BEGIN|END) [^\r\n-]{0,100}PRIVATE KEY-----', text)
+    parts = []
+    start = None
+    copied = 0
+    for marker in markers:
+        if marker[1] == 'BEGIN':
+            if start is None:
+                start = marker.start()
+        elif start is not None:
+            parts.extend((text[copied:start], _REDACTED))
+            copied, start = marker.end(), None
+    parts.append(text[copied:])
+    return ''.join(parts)
+
+
 def redact_text(text):
     for name, value in os.environ.items():
         if len(value) >= 4 and re.search(r'(TOKEN|PASSWORD|SECRET|_KEY)$', name):
-            text = text.replace(value, '[REDACTED]')
-    text = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----',
-                  '[REDACTED]', text, flags=re.S)
-    text = re.sub(r'\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,})',
-                  '[REDACTED]', text)
-    text = re.sub(r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)(?:"[^"]*"|\x27[^\x27]*\x27|[^\s,;]+)',
-                  r'\1[REDACTED]', text)
-    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1[REDACTED]', text)
-    return re.sub(r'(https?://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text)
+            text = text.replace(value, _REDACTED)
+    text = _redact_private_keys(text)
+    text = re.sub(r'\bgh[pousr]_\w{20,}', _REDACTED, text)
+    text = re.sub(r'\bgithub_pat_\w+', _REDACTED, text)
+    text = re.sub(r'\bsk-[\w-]{20,}', _REDACTED, text)
+    label = r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)'
+    value = r"""(?:"[^"]*"|'[^']*'|[^\s,;]+)"""
+    text = re.sub(label + value, r'\1' + _REDACTED, text)
+    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1' + _REDACTED, text)
+    return re.sub(r'(https?://)([^\s/@]+)@',
+                  lambda m: m[1] + _REDACTED + '@' if ':' in m[2] else m[0], text)
 
 
 def _safe_fields(value):
     if isinstance(value, dict):
-        return {key: '[REDACTED]' if re.search(
+        return {key: _REDACTED if re.search(
                     r'(?i)(?:^|[_-])(?:authorization|cookie|password|passwd|secret|token|api[_-]?key|private[_-]?key)$', key)
                 else _safe_fields(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

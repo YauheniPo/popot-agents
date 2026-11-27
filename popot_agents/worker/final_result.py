@@ -43,10 +43,8 @@ def evidence_transcript(messages, context=()):
     return transcript
 
 
-def _next_quote_state(quoted, escaped, char):
-    """Track whether the scanner sits inside a JSON string after ``char``."""
-    if not quoted:
-        return char == '"', False
+def _quoted_step(char, escaped):
+    """Return (still_quoted, escaped) after one character inside a string."""
     if escaped:
         return True, False
     if char == '\\':
@@ -54,8 +52,10 @@ def _next_quote_state(quoted, escaped, char):
     return char != '"', False
 
 
-def _closes_container(text, index):
-    """Detect a comma whose next non-space character ends an array or object."""
+def _drops_trailing_comma(text, index, previous):
+    """True when this comma is followed (modulo whitespace) by } or ]."""
+    if previous in '[{,:':
+        return False
     following = index + 1
     while following < len(text) and text[following] in ' \t\r\n':
         following += 1
@@ -67,14 +67,44 @@ def _without_trailing_commas(text):
     quoted = escaped = False
     previous = ''
     for index, char in enumerate(text):
-        was_quoted = quoted
-        quoted, escaped = _next_quote_state(quoted, escaped, char)
-        if not was_quoted and char == ',' and previous not in '[{,:' and _closes_container(text, index):
+        if quoted:
+            quoted, escaped = _quoted_step(char, escaped)
+        elif char == '"':
+            quoted = True
+        elif char == ',' and _drops_trailing_comma(text, index, previous):
             continue
         result.append(char)
         if char not in ' \t\r\n':
             previous = char
     return ''.join(result)
+
+
+def _normalize_list_fields(report):
+    """Require string lists for the report list fields and trim their items."""
+    for key in ('evidence', 'remaining_work', 'errors'):
+        if not isinstance(report.get(key), list) or any(not isinstance(i, str) for i in report[key]):
+            raise ValueError('invalid_' + key)
+        report[key] = [i.strip() for i in report[key] if i.strip()]
+
+
+def _validate_report(report):
+    """Validate the normalized report fields; raise ValueError on violation."""
+    if not isinstance(report, dict):
+        raise ValueError('expected_object')
+    if report.get('status') not in ('completed', 'partial', 'blocked', 'failed'):
+        raise ValueError('invalid_status')
+    if not isinstance(report.get('answer'), str) or not report['answer'].strip():
+        raise ValueError('missing_answer')
+    _normalize_list_fields(report)
+    if report['status'] == 'completed' and (report['remaining_work'] or report['errors']):
+        report['status'] = 'partial'
+    if 'revision' in report and (not isinstance(report['revision'], str) or not re.fullmatch(r'[a-f0-9]{40}', report['revision'])):
+        raise ValueError('invalid_revision')
+    if 'verification_status' in report and report['verification_status'] not in ('passed', 'failed'):
+        raise ValueError('invalid_verification_status')
+    if 'findings' in report:
+        validate_findings(report['findings'])
+    return report
 
 
 def parse_result(content, finish_reason=None):
@@ -98,25 +128,7 @@ def parse_result(content, finish_reason=None):
             report = json.loads(text, strict=False)
         except ValueError:
             raise ValueError('invalid_json') from None
-    if not isinstance(report, dict):
-        raise ValueError('expected_object')
-    if report.get('status') not in ('completed', 'partial', 'blocked', 'failed'):
-        raise ValueError('invalid_status')
-    if not isinstance(report.get('answer'), str) or not report['answer'].strip():
-        raise ValueError('missing_answer')
-    for key in ('evidence', 'remaining_work', 'errors'):
-        if not isinstance(report.get(key), list) or any(not isinstance(i, str) for i in report[key]):
-            raise ValueError('invalid_' + key)
-        report[key] = [i.strip() for i in report[key] if i.strip()]
-    if report['status'] == 'completed' and (report['remaining_work'] or report['errors']):
-        report['status'] = 'partial'
-    if 'revision' in report and (not isinstance(report['revision'], str) or not re.fullmatch(r'[a-f0-9]{40}', report['revision'])):
-        raise ValueError('invalid_revision')
-    if 'verification_status' in report and report['verification_status'] not in ('passed', 'failed'):
-        raise ValueError('invalid_verification_status')
-    if 'findings' in report:
-        validate_findings(report['findings'])
-    return report
+    return _validate_report(report)
 
 
 def _tool_receipt(message, name, chars):
@@ -133,18 +145,16 @@ def _tool_receipt(message, name, chars):
 
 def retained_receipts(messages, completed_children, observations=()):
     """Receipts are attributed observations, never proof of whole-task completion."""
-    limit = RUNTIME['memory']['tool_evidence_count']
-    chars = RUNTIME['memory']['tool_evidence_chars']
+    limit = RUNTIME['limits']['tool_evidence_count']
+    chars = RUNTIME['limits']['tool_evidence_chars']
+    receipts = []
     # Check outcomes survive transcript compaction and later file reads. An
     # unbound check remains useful evidence, but cannot verify a specific SHA.
-    receipts = [_observation_receipt(item, chars) for item in reversed(observations)
-                if item.get('source') == 'tool_result' and item.get('kind') in {'checks', 'ci'}]
-    for child in completed_children.values():
-        label = f"Child {child['role']} (sessionId={child['sessionId']}) reported: "
-        receipts.append(label + scrub(child['answer'])[:chars])
-        for item in child.get('outcome', {}).get('evidence', []):
-            if isinstance(item, str) and item.strip():
-                receipts.append(label + scrub(item)[:chars])
+    for item in reversed(observations):
+        if item.get('source') != 'tool_result' or item.get('kind') not in {'checks', 'ci'}:
+            continue
+        receipts.append(_observation_receipt(item, chars))
+    receipts.extend(_child_receipts(completed_children, chars))
     names = {call.get('id'): call.get('function', {}).get('name', 'tool')
              for m in messages for call in m.get('tool_calls', [])}
     for m in [m for m in messages if m.get('role') == 'tool'][-limit:]:
@@ -158,8 +168,20 @@ def retained_receipts(messages, completed_children, observations=()):
     return list(dict.fromkeys(receipts))[:limit]
 
 
+def _child_receipts(completed_children, chars):
+    """Attributed answer and evidence receipts from completed child sessions."""
+    receipts = []
+    for child in completed_children.values():
+        label = f"Child {child['role']} (sessionId={child['sessionId']}) reported: "
+        receipts.append(label + scrub(child['answer'])[:chars])
+        for item in child.get('outcome', {}).get('evidence', []):
+            if isinstance(item, str) and item.strip():
+                receipts.append(label + scrub(item)[:chars])
+    return receipts
+
+
 def _observation_receipt(item, chars):
-    """One attributed check or CI observation, including its skip details."""
+    '''One attributed check or CI observation, including its skip details.'''
     receipt = (f"Observed {item['kind']} {item.get('tool')} ({item.get('callId')}): "
                f"{item.get('status')}; {item.get('summary')}; "
                f"revision={item.get('revision') or 'unverified'}")

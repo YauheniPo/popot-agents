@@ -25,7 +25,7 @@ if not __package__:
         if (parent / 'popot_agents/runtime_config.py').is_file():
             sys.path.insert(0, str(parent))
             break
-from popot_agents.runtime_config import RUNTIME
+from popot_agents.runtime_config import MEMORY
 
 
 class MemoryServiceError(RuntimeError):
@@ -35,6 +35,27 @@ class MemoryServiceError(RuntimeError):
 class _NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
+
+
+def _validate_memory_items(items):
+    """Validate memory record items and return formatted statement strings."""
+    if not isinstance(items, list) or not items:
+        raise ValueError('memory record must contain nonempty memories')
+    statements = []
+    for item in items:
+        if (not isinstance(item, dict) or item.get('kind') not in
+                {'decision', 'constraint', 'fact', 'fix', 'check'}
+                or not isinstance(item.get('text'), str) or not item['text'].strip()):
+            raise ValueError('memory record contains an invalid statement')
+        statements.append(item['kind'].capitalize() + ': ' + item['text'].strip())
+    return statements
+
+
+def _resolve_memory_project(record, dataset_name):
+    """Ensure the memory record project matches dataset_name."""
+    if record.get('project') not in (None, dataset_name):
+        raise ValueError('memory record project must match dataset_name')
+    return record
 
 
 def memory_document(data: str, dataset_name: str) -> tuple[str, dict]:
@@ -48,33 +69,20 @@ def memory_document(data: str, dataset_name: str) -> tuple[str, dict]:
     except ValueError:
         record = None
     if isinstance(record, dict) and 'memories' in record:
-        items = record['memories']
-        if not isinstance(items, list) or not items:
-            raise ValueError('memory record must contain nonempty memories')
-        statements = []
-        for item in items:
-            if (not isinstance(item, dict) or item.get('kind') not in
-                    {'decision', 'constraint', 'fact', 'fix', 'check'}
-                    or not isinstance(item.get('text'), str) or not item['text'].strip()):
-                raise ValueError('memory record contains an invalid statement')
-            statements.append(item['kind'].capitalize() + ': ' + item['text'].strip())
-        text = '\n\n'.join(statements)
+        text = '\n\n'.join(_validate_memory_items(record['memories']))
     elif isinstance(record, dict) and isinstance(record.get('note'), str) and record['note'].strip():
         text = record['note'].strip()
     else:
         text = data.strip()
         record = {'text': data}
-    if record.get('project') not in (None, dataset_name):
-        raise ValueError('memory record project must match dataset_name')
+    _resolve_memory_project(record, dataset_name)
     # A short display title; the complete statements remain in the document.
     title = ' '.join(text.split())
-    title = title[:117].rstrip() + '…' if len(title) > 120 else title
+    title = title[:117].rstrip() + '\u2026' if len(title) > 120 else title
     metadata = {'popot_memory': {'version': 2, 'title': title, 'record': record}}
     return text, metadata
-
-
 class CogneeMemory:
-    def __init__(self, api_url: str, password: str, timeout: float = RUNTIME["timeouts"]["memory_tool_request_seconds"]):
+    def __init__(self, api_url: str, password: str, timeout: float = MEMORY["timeouts"]["memory_tool_request_seconds"]):
         parsed = parse.urlsplit(api_url)
         if (parsed.scheme not in {'http', 'https'} or not parsed.hostname
                 or parsed.username or parsed.password or parsed.query or parsed.fragment
@@ -129,11 +137,11 @@ class CogneeMemory:
             # Never echo upstream bodies, URLs, or authentication values.
             exc.close()
             raise MemoryServiceError(f'Cognee request failed (HTTP {exc.code})') from None
-        except (error.URLError, TimeoutError, OSError):
+        except (error.URLError, TimeoutError):
             phase = {'/api/v1/auth/login': 'login', '/api/v1/datasets': 'dataset lookup',
                      '/api/v1/recall': 'recall'}.get(path, 'request')
             raise MemoryServiceError(f'Cognee {phase} is unreachable or timed out; check memory services') from None
-        except (ValueError, UnicodeError):
+        except ValueError:
             raise MemoryServiceError('Cognee returned an invalid JSON response') from None
 
     def session_event(self, event: dict):

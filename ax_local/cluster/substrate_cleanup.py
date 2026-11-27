@@ -99,16 +99,8 @@ def patch_terminate(source: str) -> str:
     return source[:start] + GUARD + block + '\t}\n' + source[end:]
 
 
-def _lifecycle_boundaries(source: str, name: str):
-    signature = 'func (s *AteomHerder) ' + name + '('
-    if source.count(signature) != 1:
-        raise ValueError('Substrate lifecycle source differs from pinned version')
-    start = source.index(signature)
-    end = source.find('\nfunc ', start + len(signature))
-    return start, len(source) if end < 0 else end
-
-
-def _install_lifecycle_guards(body: str, name: str) -> str:
+def _lifecycle_guarded_body(name: str, body: str) -> str:
+    """Install the workload-operation guard (and Terminate cleanup) once."""
     anchor = '\tactorUID := req.GetActorUid()\n'
     guard = ('\treleaseLifecycle, err := popotBeginWorkloadOperation(ctx, ateompath.ActorPath(actorUID), '
              + ('true' if name == 'Terminate' else 'false') + ')\n'
@@ -120,18 +112,24 @@ def _install_lifecycle_guards(body: str, name: str) -> str:
         if body.count(anchor) != 1 or 'popotBeginWorkloadOperation' in body:
             raise ValueError('Unexpected Substrate lifecycle guard')
         body = body.replace(anchor, anchor + guard, 1)
-    if name != 'Terminate' or EMPTY_ACTOR_GUARD in body:
-        return body
-    anchor = '\tdefer releaseLifecycle()\n'
-    if body.count(anchor) != 1 or 'popotWorkloadHasNoState' in body:
-        raise ValueError('Unexpected empty actor cleanup guard')
-    return body.replace(anchor, anchor + EMPTY_ACTOR_GUARD, 1)
+    if name == 'Terminate' and EMPTY_ACTOR_GUARD not in body:
+        anchor = '\tdefer releaseLifecycle()\n'
+        if body.count(anchor) != 1 or 'popotWorkloadHasNoState' in body:
+            raise ValueError('Unexpected empty actor cleanup guard')
+        body = body.replace(anchor, anchor + EMPTY_ACTOR_GUARD, 1)
+    return body
 
 
 def patch_lifecycle(source: str) -> str:
-    for name in ('Run', 'Restore', 'Terminate'):
-        start, end = _lifecycle_boundaries(source, name)
-        source = source[:start] + _install_lifecycle_guards(source[start:end], name) + source[end:]
+    for name in ('Run','Restore','Terminate'):
+        signature = 'func (s *AteomHerder) ' + name + '('
+        if source.count(signature) != 1:
+            raise ValueError('Substrate lifecycle source differs from pinned version')
+        start = source.index(signature)
+        end = source.find('\nfunc ',start+len(signature))
+        end = len(source) if end < 0 else end
+        body = _lifecycle_guarded_body(name, source[start:end])
+        source = source[:start] + body + source[end:]
     return source
 
 

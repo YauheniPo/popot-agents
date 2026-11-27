@@ -1,0 +1,64 @@
+{
+  "x-tracing": {
+    "enabled": true,
+    "project": "popot-runtime",
+    "endpoint": "http://host.docker.internal:6006",
+    "api_key_env": "PHOENIX_ADMIN_SECRET",
+    "outbox_directory": "/var/lib/popot-traces",
+    "request_timeout_seconds": 3,
+    "retry_seconds": 5
+  },
+  "x-baseline": {
+    "model": "ollama-cloud/deepseek-v4.1-flash:1017",
+    "repetitions": 2,
+    "workflow": {
+      "total_seconds": 600,
+      "turn_seconds": 300,
+      "max_turns": 2,
+      "max_no_progress": 1,
+      "verification_reserve_seconds": 60,
+      "max_child_recoveries": 1,
+      "max_concurrent": 1
+    },
+    "request_timeout_seconds": 660,
+    "inspection_timeout_seconds": 30
+  },
+  "x-providers": [
+    {
+      "name": "OpenRouter", "provider": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_API_KEY",
+      "models": ["cohere/north-mini-code:free"]
+    },
+    {
+      "name": "NVIDIA NIM", "provider": "nvidia",
+      "base_url": "https://integrate.api.nvidia.com/v1", "api_key_env": "NVIDIA_API_KEY",
+      "models": ["nvidia/nemotron-3.5-bolt-e4b", "nvidia/nemotron-3.5-lightning-30b-a3b"]
+    },
+    {
+      "name": "Ollama Cloud", "provider": "ollama",
+      "base_url": "https://ollama.com/v1", "api_key_env": "OLLAMA_API_KEY",
+      "models": ["deepseek-v4.1-flash:1017", "glm-5.3-flash", "deepseek-v4-pro:0813"]
+    },
+    {
+      "name": "Nous Research", "provider": "nous",
+      "base_url": "https://inference-api.nousresearch.com/v1", "api_key_env": "NOUS_API_KEY",
+      "models": ["upstage/solar-mini4:free"],
+      "extra_body": {"tags": ["product=phoenix", "client=phoenix-v21.0.0", "user=phoenix-local"]}
+    }
+  ],
+  "services": {
+    "phoenix": {
+      "restart": "unless-stopped",
+      "ports": ["127.0.0.1:6006:6006"],
+      "environment": {
+        "PHOENIX_HOST": "0.0.0.0",
+        "PHOENIX_WORKING_DIR": "/data",
+        "PHOENIX_ENABLE_AUTH": "true",
+        "PHOENIX_ENABLE_MCP_CODE_MODE": "false",
+        "PHOENIX_TELEMETRY_ENABLED": "false",
+        "PHOENIX_ALLOW_EXTERNAL_RESOURCES": "false"
+      },
+      "mem_limit": "1g"
+    }
+  }
+}

@@ -20,6 +20,41 @@ REMOTE = {"url": "https://api.githubcopilot.com/mcp/",
 
 
 class RemoteMCPTests(unittest.TestCase):
+    def test_local_phoenix_requires_its_operator_role_and_selected_key(self):
+        agents = load_agents(ROOT / 'config/agents.json')
+        roles = load_roles(ROOT / 'config/roles', agents)
+        phoenix = {'url': 'http://host.docker.internal:6006/mcp',
+                   'optional': True,
+                   'bearer_token_env': 'PHOENIX_API_KEY',
+                   'tools': ['describeGraphqlSchema', 'executeGraphqlQuery']}
+        role = roles['project_operator']
+        self.assertEqual(role['mcpServers'].get('phoenix'), phoenix)
+        self.assertIn('PHOENIX_API_KEY', role['env_names'])
+        role.pop('name')
+        role['allowed_roles'] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'roles.json'
+            path.write_text(json.dumps({'project_operator': role}))
+            load_roles(path, agents)
+            for changes in ({'url': 'http://example.com:6006/mcp'},
+                            {'url': 'http://host.docker.internal:6007/mcp'},
+                            {'url': 'http://host.docker.internal:6006/other'},
+                            {'url': 'http://host.docker.internal:6006/mcp?token=secret'},
+                            {'bearer_token_env': 'COGNEE_PASSWORD'}):
+                with self.subTest(changes=changes):
+                    role['mcpServers']['phoenix'] = dict(phoenix, **changes)
+                    path.write_text(json.dumps({'project_operator': role}))
+                    with self.assertRaises(ValueError):
+                        load_roles(path, agents)
+            role['mcpServers'] = {'phoenix': phoenix}
+            path.write_text(json.dumps({'analyst': role}))
+            with self.assertRaises(ValueError):
+                load_roles(path, agents)
+            role['mcpServers'] = {'other': phoenix}
+            path.write_text(json.dumps({'project_operator': role}))
+            with self.assertRaises(ValueError):
+                load_roles(path, agents)
+
     def test_probe_credentials_are_redacted_without_forwarding_them_to_shell_tools(self):
         probe = {**REMOTE, 'url': 'https://api.githubcopilot.com/mcp/x/all/readonly',
                  'bearer_token_env': 'AX_HARNESS2_GITHUB_TOKEN'}

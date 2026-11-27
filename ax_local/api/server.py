@@ -171,11 +171,24 @@ def main() -> None:
     kind_ip = network_address_toward(kind_control_plane_host(context), 6443)
     os.environ["AX_LOCAL_BASE_URL"] = f"http://{kind_ip}:{AX_CONFIG['proxy']['port']}/v1"
     os.environ["AX_LOCAL_BIND_HOST"] = network_address_toward("db", 5432)
-    proxy = a2a = worker_pool = None
+    run_server(context, kind_ip, kubeconfig)
+
+
+def _run_server(context, kind_ip, kubeconfig):
+    """Start the AX API server and return running components."""
+    proxy = a2a = worker_pool = tracer = None
+    server = make_server()
     try:
-        server = make_server()
+        from .phoenix import PhoenixTracer, load_config
+        tracing = load_config()
+        if tracing['enabled']:
+            tracer = PhoenixTracer(tracing, api_key=os.getenv(tracing['api_key_env'], ''))
+            server.tracer = tracer
+            server.cron.tracer = tracer
+            if server.delegation:
+                server.delegation.tracer = tracer
         configure_ax_server_tunnel(context, AX_CONFIG['atespace'])
-        proxy = start_proxy(server.provider_routes, host=kind_ip)
+        proxy = start_proxy(server.provider_routes, host=kind_ip, tracer=tracer)
         # All profiles use the same AX namespace; recover its Tasks once.
         server.worker_managers[0].recover_workers()
         worker_pool = WorkerPoolController(
@@ -191,44 +204,50 @@ def main() -> None:
         server.cron.recover_interrupted()
         server.cron.start()
     except Exception:
-        if worker_pool:
-            worker_pool.close()
-        if a2a:
-            a2a.server_close()
-        if "server" in locals():
-            if hasattr(server, "cron"):
-                server.cron.close()
-            if server.delegation:
-                server.delegation.close()
-            server.server_close()
-        if proxy:
-            proxy.shutdown()
-            proxy.server_close()
+        _close_server_components(server, worker_pool, proxy, tracer, a2a=a2a)
         raise
-    def stop_on_sigterm(_signum, _frame):
-        raise KeyboardInterrupt
+    return server, worker_pool, proxy, a2a, tracer
 
-    previous_handler = signal.signal(signal.SIGTERM, stop_on_sigterm)
-    try:
-        print(f"AX API: http://{server.server_address[0]}:{server.server_port} "
-              f"profiles={','.join(provider.name for provider in server.provider_routes.values())}",
-              flush=True)
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if worker_pool:
-            worker_pool.close()
-        server.cron.close()
+
+def _close_server_components(server, worker_pool, proxy, tracer, a2a=None):
+    """Close started components in reverse startup order; tolerate absent ones."""
+    if worker_pool:
+        worker_pool.close()
+    if a2a:
+        a2a.server_close()
+    if server is not None:
+        if hasattr(server, 'cron'):
+            server.cron.close()
         if server.delegation:
             server.delegation.close()
-        if a2a:
-            a2a.shutdown()
-            a2a.server_close()
         server.server_close()
+    if proxy:
         proxy.shutdown()
         proxy.server_close()
-        signal.signal(signal.SIGTERM, previous_handler)
+    if tracer:
+        tracer.close()
+
+
+def stop_on_sigterm(_signum, _frame):
+    raise KeyboardInterrupt
+
+
+def run_server(context, kind_ip, kubeconfig):
+    """Start the AX API server and serve until interrupted."""
+    server, worker_pool, proxy, a2a, tracer = _run_server(context, kind_ip, kubeconfig)
+    try:
+        previous_handler = signal.signal(signal.SIGTERM, stop_on_sigterm)
+        try:
+            print(f"AX API: http://{server.server_address[0]}:{server.server_port} "
+                  f"profiles={','.join(provider.name for provider in server.provider_routes.values())}",
+                  flush=True)
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            signal.signal(signal.SIGTERM, previous_handler)
+    finally:
+        _close_server_components(server, worker_pool, proxy, tracer, a2a=a2a)
 
 
 if __name__ == "__main__":
