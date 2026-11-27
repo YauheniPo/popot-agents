@@ -11,6 +11,7 @@ import threading
 from urllib import error, parse, request
 import uuid
 
+from ax_local.omniroute import NoRedirect
 from popot_agents.progress import redact_text
 
 
@@ -244,6 +245,7 @@ class PhoenixTracer:
     def __init__(self, settings, *, api_key):
         self.settings, self.api_key = dict(settings), api_key
         self.outbox = Path(settings['outbox_directory'])
+        self.opener = request.build_opener(NoRedirect())
         self.lock = threading.RLock()
         self.active = {}
         self.stop = threading.Event()
@@ -291,7 +293,7 @@ class PhoenixTracer:
         req = request.Request(endpoint, data=json.dumps({'data': [span]}).encode(),
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self.api_key})
         try:
-            with request.urlopen(req, timeout=self.settings['request_timeout_seconds']) as response:
+            with self.opener.open(req, timeout=self.settings['request_timeout_seconds']) as response:
                 result = json.loads(response.read(65536))
                 if not isinstance(result, dict) or result.get('total_received') != 1 or result.get('total_queued') != 1:
                     raise ValueError('Phoenix did not accept the span')
@@ -311,22 +313,34 @@ class PhoenixTracer:
         duplicates = detail.get('duplicate_spans', []) if isinstance(detail, dict) else []
         return (isinstance(detail, dict) and detail.get('total_received') == 1
                 and detail.get('total_duplicates') == 1 and detail.get('total_invalid') == 0
-                and len(duplicates) == 1 and duplicates[0].get('span_id') == span_id)
+                and isinstance(duplicates, list) and len(duplicates) == 1
+                and isinstance(duplicates[0], dict) and duplicates[0].get('span_id') == span_id)
+
+    def _flush_outbox(self):
+        drained = True
+        for path in sorted(self.outbox.glob('*.json')):
+            if self.stop.is_set():
+                break
+            try:
+                self._deliver(json.loads(path.read_text()))
+                path.unlink()
+            except (ValueError, KeyError, TypeError) as exc:
+                _warning(exc)
+                drained = False
+            except error.HTTPError as exc:
+                _warning(exc)
+                drained = False
+                if exc.code not in {400, 413, 422}:
+                    break
+            except OSError as exc:
+                _warning(exc)
+                drained = False
+                break
+        return drained
 
     def _run(self):
         while not self.stop.is_set():
-            failed = False
-            for path in sorted(self.outbox.glob('*.json')):
-                if self.stop.is_set():
-                    break
-                try:
-                    self._deliver(json.loads(path.read_text()))
-                    path.unlink()
-                except (OSError, ValueError, KeyError) as exc:
-                    _warning(exc)
-                    failed = True
-                    break
-            if failed:
+            if not self._flush_outbox():
                 self.stop.wait(self.settings['retry_seconds'])
             else:
                 self.wake.wait(self.settings['retry_seconds'])

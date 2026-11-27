@@ -24,6 +24,7 @@ class RemoteMCPTests(unittest.TestCase):
         agents = load_agents(ROOT / 'config/agents.json')
         roles = load_roles(ROOT / 'config/roles', agents)
         phoenix = {'url': 'http://host.docker.internal:6006/mcp',
+                   'optional': True,
                    'bearer_token_env': 'PHOENIX_API_KEY',
                    'tools': ['describeGraphqlSchema', 'executeGraphqlQuery']}
         role = roles['project_operator']

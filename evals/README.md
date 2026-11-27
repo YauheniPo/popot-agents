@@ -7,8 +7,9 @@
 
 ## Настройки
 
-[config.json](config.json) содержит три части:
+[config.json](config.json) содержит четыре раздела:
 
+- `x-providers` — подключения моделей, которые Phoenix настраивает при запуске.
 - `services.phoenix` — параметры сервиса Phoenix.
 - `x-tracing` — постоянный экспорт обычных задач AX в проект `popot-runtime`.
 - `x-baseline` — модель, число повторов, бюджеты workflow, лимит допуска
@@ -70,6 +71,7 @@ Spans по умолчанию использует фильтр `parent_id is No
 
 Роль `project_operator` читает Phoenix напрямую из worker через встроенный MCP
 `/mcp` с отдельным пользовательским ключом `VIEWER` в `PHOENIX_API_KEY`.
+При недоступном Phoenix или отсутствующем ключе роль продолжает работу с другими инструментами.
 Ей доступны изучение GraphQL-схемы и выполнение запросов чтения. Сервис работает
 с `PHOENIX_ENABLE_MCP_CODE_MODE=false`, чтобы роль выбирала отдельные инструменты.
 Настройка и правила анализа описаны в [AX operations](../ax_local/README.md#project-operator-единая-роль-для-анализа-проекта).

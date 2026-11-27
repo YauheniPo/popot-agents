@@ -585,6 +585,7 @@ class OperatorRoleTests(unittest.TestCase):
         role = json.loads((root / 'config/roles/project_operator.json').read_text())
         self.assertEqual(role['mcpServers']['phoenix'], {
             'url': 'http://host.docker.internal:6006/mcp',
+            'optional': True,
             'bearer_token_env': 'PHOENIX_API_KEY',
             'tools': ['describeGraphqlSchema', 'executeGraphqlQuery'],
         })

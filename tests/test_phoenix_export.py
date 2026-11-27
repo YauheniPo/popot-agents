@@ -14,6 +14,15 @@ from evals import phoenix
 
 @unittest.skipUnless(importlib.util.find_spec('phoenix'), 'requires the pinned Phoenix container SDK')
 class PhoenixExportTests(unittest.TestCase):
+    def test_empty_measurement_does_not_create_a_dataset_or_experiment(self):
+        with tempfile.TemporaryDirectory() as tmp, patch('phoenix.client.Client') as client:
+            directory = Path(tmp)
+            (directory / 'report.json').write_text('{"results":[],"incomplete":[{}]}')
+            (directory / 'config.json').write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'no measured runs'):
+                phoenix.export(directory)
+            client.assert_not_called()
+
     def test_exported_evaluations_do_not_shadow_native_compare_columns(self):
         cases = json.loads((Path(phoenix.__file__).parent / 'cases.json').read_text())
         dataset = SimpleNamespace(id='dataset', version_id='version', examples=[

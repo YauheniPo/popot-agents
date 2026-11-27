@@ -64,6 +64,27 @@ class RedactTextTests(unittest.TestCase):
         text = 'ordinary progress update without secrets'
         self.assertEqual(redact_text(text), text)
 
+    def test_untyped_pem_keys_and_separate_blocks(self):
+        key = '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----'
+        self.assertEqual(redact_text(f'{key} between {key}'), f'{REDACTED} between {REDACTED}')
+
+    def test_complete_credentials_are_removed_without_truncation(self):
+        value = 'x' * 300
+        for prefix in ('ghp_', 'github_pat_', 'sk-'):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(redact_text(f'({prefix}{value})'), f'({REDACTED})')
+        for label in ('password=', 'Authorization: Bearer '):
+            with self.subTest(label=label):
+                self.assertEqual(redact_text(label + value), label + REDACTED)
+        self.assertEqual(redact_text(f'https://user:{value}:extra@example.org/path'),
+                         f'https://{REDACTED}@example.org/path')
+
+    def test_quoted_password_and_adjacent_log_fields(self):
+        for value in ('"two words"', "'two words'", 'word'):
+            with self.subTest(value=value):
+                self.assertEqual(redact_text(f'password={value},status=ok'),
+                                 f'password={REDACTED},status=ok')
+
 
 if __name__ == '__main__':
     unittest.main()

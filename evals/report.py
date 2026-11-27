@@ -12,7 +12,13 @@ from popot_agents.artifacts import validate_artifacts
 
 
 def enrich(report, calls, directory, config):
+    # Older captures stored evaluator failures in the scored results.
+    measured = []
     for row in report['results']:
+        if row.get('result', {}).get('runner_error'):
+            report.setdefault('incomplete', []).append(row)
+            continue
+        measured.append(row)
         if row['case_id'] == 'delegation':
             children = [t['sessionId'] for t in row['result'].get('saved_chat', {}).get('work', {}).get('tasks', [])
                         if t.get('parentSessionId') == row['session_id'] and re.fullmatch(r'[a-f0-9]{16}', t['sessionId'])]
@@ -32,7 +38,7 @@ def enrich(report, calls, directory, config):
         counts = row['event_counts']
         row['tokens_known'] = sum(c['tokens'] for c in own if c['tokens'] is not None)
         row['usage_complete'] = (bool(own) and all(c['tokens'] is not None for c in own)
-                                 and counts.get('model_request', 0) == counts.get('model_response', 0)
+                                 and len(own) == counts.get('model_request', 0) == counts.get('model_response', 0)
                                  and not any(counts.get(k) for k in ('model_http_error', 'model_timeout', 'model_transport_error')))
         row['tokens'] = row['tokens_known'] if row['usage_complete'] else None
         model = config['primary_model']
@@ -42,8 +48,9 @@ def enrich(report, calls, directory, config):
             (c.get('model') == short_model or c.get('error')) for c in own)
         row.update(evaluate(row['case_id'], row['outcome'], events, row['observed']))
         save(directory / (Path(row['trace_file']).stem + '.json'), row)
-    report['summary'] = summarize(report['results'])
-    report['summary']['model_pin_verified'] = all(r['model_pin_verified'] for r in report['results'])
+    report['results'] = measured
+    report['summary'] = summarize(measured)
+    report['summary']['model_pin_verified'] = all(r['model_pin_verified'] for r in measured) if measured else None
     report['summary']['gateway_calls'] = len(calls)
     report['summary']['observed_models'] = dict(Counter(c.get('model') for c in calls))
     return report

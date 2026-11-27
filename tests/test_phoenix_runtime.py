@@ -239,6 +239,20 @@ class PhoenixRuntimeTests(unittest.TestCase):
             finally:
                 restarted.close()
 
+    def test_bad_outbox_record_does_not_block_healthy_spans(self):
+        from ax_local.api.phoenix import PhoenixTracer
+        with tempfile.TemporaryDirectory() as tmp, receiver() as (endpoint, state):
+            bad = Path(tmp) / '000.json'
+            bad.write_text('invalid')
+            tracer = PhoenixTracer(self.settings(tmp, endpoint), api_key='test')
+            try:
+                with tracer.session('a' * 16, 'qa_engineer', {}) as span:
+                    span.result({'outcome': {'status': 'completed'}})
+                wait_for(lambda: len(state['spans']) == 1)
+                self.assertTrue(bad.exists())
+            finally:
+                tracer.close()
+
     def test_lost_acknowledgement_does_not_duplicate_or_stall_the_outbox(self):
         from ax_local.api.phoenix import PhoenixTracer
 

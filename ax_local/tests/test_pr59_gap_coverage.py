@@ -26,13 +26,17 @@ def test_unreachable_model_endpoint_is_a_response_failure():
 def test_retry_suspend_records_the_retry_error():
     chat = AxChat.__new__(AxChat)
 
-    def refuse(*_args, **_options):
+    calls = []
+
+    def refuse(*args, **options):
+        calls.append((args, options))
         raise subprocess.TimeoutExpired('ax', 1)
 
     chat.container_name = 'fixture-task'
     chat.runner = SimpleNamespace(snapshot_mode='copy', _run=refuse)
     diagnostic = {}
     retry_at, delay = chat._retry_suspend(lambda limit: 10, diagnostic, 1)
+    assert calls == [(('suspend', 'task', 'fixture-task'), {'timeout': 10})]
     assert diagnostic['retry_error_type'] == 'TimeoutExpired'
     assert retry_at > time.monotonic() - 1
     assert delay == 2

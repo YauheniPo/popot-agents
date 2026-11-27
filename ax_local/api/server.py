@@ -74,7 +74,7 @@ def configure_delegation(server, roles, policy, runners):
     if policy["enabled"]:
         host = urlsplit(os.environ["AX_LOCAL_BASE_URL"]).hostname
         server.delegation = DelegationService(
-            roles, policy, runners, server.store, f"https://{host}:{policy['port']}")
+            roles, policy, runners, server.store, f"http://{host}:{policy['port']}")
         if 'project_operator' in roles:
             from .project_operator import ProjectOperations
             server.delegation.operations = ProjectOperations(roles, server.store)
@@ -169,7 +169,7 @@ def main() -> None:
     os.environ["KUBECONFIG"] = str(kubeconfig)
     context = AX_CONFIG["context"]
     kind_ip = network_address_toward(kind_control_plane_host(context), 6443)
-    os.environ["AX_LOCAL_BASE_URL"] = f"https://{kind_ip}:{AX_CONFIG['proxy']['port']}/v1"
+    os.environ["AX_LOCAL_BASE_URL"] = f"http://{kind_ip}:{AX_CONFIG['proxy']['port']}/v1"
     os.environ["AX_LOCAL_BIND_HOST"] = network_address_toward("db", 5432)
     run_server(context, kind_ip, kubeconfig)
 
@@ -234,11 +234,8 @@ def stop_on_sigterm(_signum, _frame):
 
 def run_server(context, kind_ip, kubeconfig):
     """Start the AX API server and serve until interrupted."""
-    proxy = a2a = worker_pool = tracer = None
-    server = None
+    server, worker_pool, proxy, a2a, tracer = _run_server(context, kind_ip, kubeconfig)
     try:
-        server, worker_pool, proxy, a2a, tracer = _run_server(
-            context, kind_ip, kubeconfig)
         previous_handler = signal.signal(signal.SIGTERM, stop_on_sigterm)
         try:
             print(f"AX API: http://{server.server_address[0]}:{server.server_port} "
@@ -248,10 +245,10 @@ def run_server(context, kind_ip, kubeconfig):
         except KeyboardInterrupt:
             pass
         finally:
-            _close_server_components(server, worker_pool, proxy, tracer)
             signal.signal(signal.SIGTERM, previous_handler)
-    except Exception:
+    finally:
         _close_server_components(server, worker_pool, proxy, tracer, a2a=a2a)
-        raise
+
+
 if __name__ == "__main__":
     main()
