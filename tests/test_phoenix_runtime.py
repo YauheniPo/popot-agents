@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import stat
 import tempfile
 import threading
 import time
@@ -22,12 +23,14 @@ def wait_for(predicate):
 
 @contextmanager
 def receiver():
-    state = {'spans': [], 'fail': False, 'requests': 0, 'lose_ack': False}
+    state = {'spans': [], 'fail': False, 'requests': 0, 'lose_ack': False,
+             'authorization': None}
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             state['requests'] += 1
+            state['authorization'] = self.headers.get('Authorization')
             if state['fail']:
                 self.send_response(503)
                 self.end_headers()
@@ -236,6 +239,20 @@ class PhoenixRuntimeTests(unittest.TestCase):
             finally:
                 restarted.close()
 
+    def test_bad_outbox_record_does_not_block_healthy_spans(self):
+        from ax_local.api.phoenix import PhoenixTracer
+        with tempfile.TemporaryDirectory() as tmp, receiver() as (endpoint, state):
+            bad = Path(tmp) / '000.json'
+            bad.write_text('invalid')
+            tracer = PhoenixTracer(self.settings(tmp, endpoint), api_key='test')
+            try:
+                with tracer.session('a' * 16, 'qa_engineer', {}) as span:
+                    span.result({'outcome': {'status': 'completed'}})
+                wait_for(lambda: len(state['spans']) == 1)
+                self.assertTrue(bad.exists())
+            finally:
+                tracer.close()
+
     def test_lost_acknowledgement_does_not_duplicate_or_stall_the_outbox(self):
         from ax_local.api.phoenix import PhoenixTracer
 
@@ -319,3 +336,46 @@ class PhoenixRuntimeTests(unittest.TestCase):
                 proxy.server_close()
                 tracer.close()
 
+    def test_outbox_directory_and_records_are_private_to_the_owner(self):
+        from ax_local.api.phoenix import PhoenixTracer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outbox = Path(tmp) / 'outbox'
+            observed = {}
+            real_replace = Path.replace
+
+            def replace_capturing_modes(temporary, target):
+                observed['temporary'] = stat.S_IMODE(temporary.stat().st_mode)
+                observed['directory'] = stat.S_IMODE(temporary.parent.stat().st_mode)
+                replaced = real_replace(temporary, target)
+                observed['record'] = stat.S_IMODE(target.stat().st_mode)
+                return replaced
+
+            settings = self.settings(str(outbox), 'http://127.0.0.1:9')
+            settings['retry_seconds'] = 30
+            with patch.object(PhoenixTracer, '_deliver', side_effect=OSError('receiver offline')):
+                tracer = PhoenixTracer(settings, api_key='test')
+                try:
+                    with patch.object(Path, 'replace', replace_capturing_modes):
+                        with tracer.session('a' * 16, 'qa_engineer', {}) as scope:
+                            scope.result({'outcome': {'status': 'completed'}})
+                    self.assertEqual(observed['directory'], 0o700)
+                    self.assertEqual(observed['temporary'], 0o600)
+                    self.assertEqual(observed['record'], 0o600)
+                    self.assertEqual(stat.S_IMODE(outbox.stat().st_mode), 0o700)
+                finally:
+                    tracer.close()
+
+    def test_delivery_authenticates_with_the_configured_api_key(self):
+        from ax_local.api.phoenix import PhoenixTracer
+
+        with tempfile.TemporaryDirectory() as tmp, receiver() as (endpoint, state):
+            tracer = PhoenixTracer(self.settings(tmp, endpoint), api_key='test-secret')
+            try:
+                with tracer.session('a' * 16, 'qa_engineer', {}) as scope:
+                    scope.result({'outcome': {'status': 'completed'}})
+                wait_for(lambda: len(state['spans']) == 1)
+                self.assertEqual(state['authorization'], 'Bearer test-secret')
+                self.assertEqual(state['requests'], 1)
+            finally:
+                tracer.close()

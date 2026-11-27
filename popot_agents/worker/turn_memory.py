@@ -12,8 +12,13 @@ import sys
 from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import MEMORY, RUNTIME
 from popot_agents.tools import safe_tool_env
-from popot_agents.progress import trace_event, redact_text as scrub
+from popot_agents.progress import trace_event
 from .cognee_memory import CogneeMemory
+
+
+def scrub(text):
+    """Preserve the original text in memory and evidence records."""
+    return text
 
 
 def trace(event: str, **fields) -> None:
@@ -164,7 +169,7 @@ class TurnMemory:
                                        top_k=MEMORY["recall_top_k"], timeout_seconds=seconds)
             chunks = []
             warming_up = False
-            for item in result if isinstance(result, list) else []:
+            for item in (result if isinstance(result, list) else []):
                 if not isinstance(item, dict) or not isinstance(item.get('text'), str):
                     continue
                 if item.get('status') == 'memory_warming_up':

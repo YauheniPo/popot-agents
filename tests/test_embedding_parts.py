@@ -48,8 +48,9 @@ class EmbeddingPartsTests(unittest.TestCase):
             self.assertEqual(original.await_args.args, (engine, texts))
         error = ValueError('native failure')
         original.side_effect = error
+        pending = split(engine, ['x'])
         with self.assertRaises(ValueError) as caught:
-            asyncio.run(split(engine, ['x']))
+            asyncio.run(pending)
         self.assertIs(caught.exception, error)
 
     def test_cancellation_closes_both_embedding_branches(self):

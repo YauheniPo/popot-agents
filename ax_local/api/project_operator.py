@@ -19,7 +19,7 @@ from ax_local.config import AX_CONFIG
 from ax_local.cluster.holmes import investigation_job, manifests, scope
 from ax_local.omniroute import Api, NoRedirect, contains
 from ax_local.resource_config import SERVICES, load_monitoring, validate_resources
-from popot_agents.progress import redact_text, trace_event
+from popot_agents.progress import trace_event
 
 ROOT = Path(__file__).resolve().parents[2]
 COMBOS_PATH = '/api/combos'
@@ -181,7 +181,7 @@ class ProjectOperations:
                     '--timestamps=true','--limit-bytes=8192']
             if params.get('previous') is True:
                 args.append('--previous')
-            return {'logs': redact_text(self._kube(*args))}
+            return {'logs': self._kube(*args)}
         args = ['-n',namespace,'get',kind,'-o','json']
         if pod is not None:
             field = 'involvedObject.name' if kind == 'events' else 'metadata.name'
@@ -195,28 +195,38 @@ class ProjectOperations:
             'resources': [{'container': c['name'], 'resources': c.get('resources', {})}
                           for c in r['spec']['containers']]} for r in rows]
 
+    @staticmethod
+    def _metric_range(args, params):
+        if 'start' not in params and 'end' not in params:
+            return
+        start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
+        if any(type(v) not in {int, float} for v in (start, end, step)) \
+                or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
+            raise ValueError('range must be <=7d, step>=15s and <=1500 points')
+        args.update(start=start, end=end, step=step)
+
+    @staticmethod
+    def _metric_availability(result, data):
+        if result.get('status') != 'success' or not isinstance(data.get('result'), list):
+            return 'unknown'
+        samples = data['result']
+        if data.get('resultType') == 'matrix':
+            return 'available' if any(row.get('values') or row.get('histograms')
+                                      for row in samples) else 'no_data'
+        if data.get('resultType') in ('vector', 'scalar', 'string'):
+            return 'available' if samples else 'no_data'
+        return 'unknown'
+
     def _metrics(self, params):
         query = params.get('query', '')
         if not isinstance(query, str) or not query.strip() or len(query) > 3000:
             raise ValueError('PromQL query of 1..3000 characters is required')
         args = {'query': query, 'timeout':'5s'}
-        if 'start' in params or 'end' in params:
-            start, end, step = params.get('start'), params.get('end'), params.get('step', 60)
-            if any(type(v) not in {int, float} for v in (start, end, step)) \
-                    or not 0 < end - start <= 7 * 86400 or step < 15 or (end-start)/step > 1500:
-                raise ValueError('range must be <=7d, step>=15s and <=1500 points')
-            args.update(start=start, end=end, step=step)
+        self._metric_range(args, params)
         endpoint = 'query_range' if 'start' in args else 'query'
         result = self._proxy('prometheus', '/api/v1/' + endpoint + '?' + urlencode(args))
         data = result.get('data', {})
-        availability = 'unknown'
-        if result.get('status') == 'success' and isinstance(data.get('result'), list):
-            samples = data['result']
-            if data.get('resultType') == 'matrix':
-                availability = 'available' if any(row.get('values') or row.get('histograms')
-                                                  for row in samples) else 'no_data'
-            elif data.get('resultType') in ('vector', 'scalar', 'string'):
-                availability = 'available' if samples else 'no_data'
+        availability = self._metric_availability(result, data)
         return {**result, 'observation': {
             'source_type': 'observation', 'observed_at': datetime.now(timezone.utc).isoformat(),
             'query': query, 'range': {key: args[key] for key in ('start', 'end', 'step') if key in args},
@@ -297,8 +307,8 @@ class ProjectOperations:
         result = {'job':job, 'status':saved.get('status',{}), 'model':os.environ['HOLMES_MODEL'],
                   'source_type': 'analysis', 'observed_at': datetime.now(timezone.utc).isoformat()}
         try:
-            result['report'] = redact_text(self._kube('-n','ax-diagnostics','logs','job/'+job,
-                                                    '--tail=200','--timestamps=true'))
+            result['report'] = self._kube('-n','ax-diagnostics','logs','job/'+job,
+                                          '--tail=200','--timestamps=true')
         except (RuntimeError, subprocess.TimeoutExpired):
             result['report'] = 'Holmes pod is not ready yet. Poll this job in a later tool call.'
         return result

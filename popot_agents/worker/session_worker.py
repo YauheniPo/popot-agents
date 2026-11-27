@@ -14,7 +14,7 @@ from .agent_worker import run_harness
 from .http_harness import run_http
 from .mcp_client import DiscoveryCache
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.progress import trace_event, observe_progress, is_progress_message
+from popot_agents.progress import emit_progress, trace_event, observe_progress, is_progress_message
 from popot_agents.skills import prepare_role_config
 
 
@@ -130,6 +130,9 @@ def serve(*, extra_tools: dict | None = None) -> None:
                         except OSError:
                             pass  # A disconnected observer must not stop agent work.
                     with observe_progress(notify if payload.get('progress') is True else None):
+                        if role_config.get("_loaded_skills"):
+                            emit_progress("skills_loaded", skills=role_config["_loaded_skills"],
+                                          prompt_sha256=role_config.get("_skills_prompt_sha256", ""))
                         result = {"answer": conversation.ask(payload.get("message"),
                                   timeout_seconds=payload.get('timeout_seconds'),
                                   run_context=payload.get('run_context') if os.getenv('HARNESS_SESSION_MODE') == 'http' else None)}

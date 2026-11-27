@@ -554,5 +554,30 @@ class AxRunnerTests(unittest.TestCase):
                             for arg in call.args if isinstance(arg, str)))
 
 
+    def test_message_deadline_already_expired_raises_timeout_without_a_request(self):
+        with patch.object(self.runner, '_remote_payload') as payload, \
+             patch('ax_local.api.ax_runner.time.monotonic', return_value=100):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.runner.remote('task', {'action': 'message', 'message': 'hi'}, timeout=0)
+        payload.assert_not_called()
+
+    def test_transport_retry_that_exhausts_the_deadline_reports_timeout(self):
+        failure = self.runner._command_error('ssh', subprocess.CompletedProcess([], 1, '',
+            'Error: receiving output stream: rpc error: code = Unavailable desc = EOF'))
+        with patch.object(self.runner, '_remote_payload', side_effect=failure), \
+             patch('ax_local.api.ax_runner.time.monotonic', side_effect=[0, 0, 999]), \
+             patch('ax_local.api.ax_runner.time.sleep'):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.runner.remote('task', {'action': 'message', 'message': 'hi'}, timeout=10)
+
+
+    def test_worker_error_without_recovery_type_keeps_no_diagnostic(self):
+        chat = AxChat(self.runner, "popot-chat-0123456789abcdef", 12)
+        with patch.object(self.runner, 'remote', return_value={'error': 'worker exploded'}):
+            with self.assertRaisesRegex(AgentRunError, 'worker exploded') as caught:
+                chat.send('continue')
+        self.assertIsNone(getattr(caught.exception, 'diagnostic', None))
+
+
 if __name__ == "__main__":
     unittest.main()

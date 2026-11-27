@@ -81,9 +81,10 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaises(ArtifactError) as caught:
                 collect_artifacts(root)
             self.assertIn('at least 65 bytes', str(caught.exception))
+            extra = {'name': 'extra.bin', 'encoding': 'base64',
+                     'content': '/w==', 'sha256': hashlib.sha256(b'\xff').hexdigest()}
             with self.assertRaises(ArtifactError):
-                validate_artifacts([*artifacts, {'name': 'extra.bin', 'encoding': 'base64',
-                    'content': '/w==', 'sha256': hashlib.sha256(b'\xff').hexdigest()}])
+                validate_artifacts([*artifacts, extra])
 
     def test_binary_validation_rejects_invalid_encoding_corruption_and_oversized_payload(self):
         from popot_agents.artifacts import ArtifactError, validate_artifacts
@@ -193,3 +194,18 @@ class ArtifactTests(unittest.TestCase):
                             tools.export_artifacts(timeout_seconds=3)
                         self.assertNotIn('PRIVATE_DATA', str(caught.exception))
 
+
+class ArtifactBudgetTests(unittest.TestCase):
+    def test_combined_text_bytes_count_towards_the_single_artifact_budget(self):
+        import hashlib
+        from unittest.mock import patch
+        from popot_agents.artifacts import ArtifactError, validate_artifacts
+        from popot_agents.runtime_config import RUNTIME
+        artifacts = [{'name': 'a.txt', 'content': 'abc',
+                      'sha256': hashlib.sha256(b'abc').hexdigest()},
+                     {'name': 'b.txt', 'content': 'def',
+                      'sha256': hashlib.sha256(b'def').hexdigest()}]
+        with patch.dict(RUNTIME['limits'], artifact_bytes=5, tool_output_chars=100):
+            with self.assertRaises(ArtifactError) as caught:
+                validate_artifacts(artifacts)
+        self.assertEqual(caught.exception.code, 'total_byte_limit')

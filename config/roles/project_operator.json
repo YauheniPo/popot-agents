@@ -39,6 +39,7 @@
       ]
     },
     "phoenix": {
+      "optional": true,
       "url": "http://host.docker.internal:6006/mcp",
       "bearer_token_env": "PHOENIX_API_KEY",
       "tools": [

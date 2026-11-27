@@ -263,9 +263,6 @@ def run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
 def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
              *, extra_tools: dict | None = None, memory=None, deadline=None, turn_timeout=None,
              state: dict | None = None, discovery_cache=None, run_context=None) -> str:
-    if role_config and role_config.get('_loaded_skills'):
-        _trace('skills_loaded', skills=role_config['_loaded_skills'],
-               prompt_sha256=role_config.get('_skills_prompt_sha256', ''))
     base_url = os.environ.get("HARNESS_BASE_URL", "").rstrip("/")
     model = os.environ.get("HARNESS_MODEL", "")
     if not base_url.startswith(("http://", "https://")) or not model:

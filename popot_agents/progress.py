@@ -4,9 +4,13 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 import json
+import os
+import re
 import sys
 import threading
 import time
+
+_REDACTED = '[REDACTED]'
 
 _observer = ContextVar('agent_progress', default=None)
 
@@ -31,18 +35,18 @@ class TurnProgress:
         event = value['event']
         if event in {'output', 'assistant_reasoning', 'assistant_message', 'assistant_answer'}:
             return
-        action = {'event': redact_text(event)[:160]}
+        action = {'event': event[:160]}
         for key in ('name', 'model', 'server', 'agent_role', 'agent_session_id',
                     'root_session_id', 'parent_session_id', 'error_type',
                     'code', 'stage', 'phase', 'reason'):
             if isinstance(value.get(key), str):
-                action[key] = redact_text(value[key])[:160]
+                action[key] = value[key][:160]
         if 'parent_session_id' in value and value['parent_session_id'] is None:
             action['parent_session_id'] = None
         if (event == 'tool_error' and value.get('recoverable') is True
                 and value.get('error_type') in {'ToolInputError', 'MCPToolError'}
                 and isinstance(value.get('error'), str)):
-            action['message'] = redact_text(value['error'])[:400]
+            action['message'] = value['error'][:400]
         for key in ('round', 'attempt'):
             if type(value.get(key)) is int and 0 <= value[key] <= 1000000:
                 action[key] = value[key]
@@ -77,9 +81,36 @@ class TurnProgress:
             return result
 
 
+def _redact_private_keys(text):
+    markers = re.finditer(r'-----(BEGIN|END) [^\r\n-]{0,100}PRIVATE KEY-----', text)
+    parts = []
+    start = None
+    copied = 0
+    for marker in markers:
+        if marker[1] == 'BEGIN':
+            if start is None:
+                start = marker.start()
+        elif start is not None:
+            parts.extend((text[copied:start], _REDACTED))
+            copied, start = marker.end(), None
+    parts.append(text[copied:])
+    return ''.join(parts)
+
+
 def redact_text(text):
-    """Compatibility helper: runtime text is intentionally preserved verbatim."""
-    return text
+    for name, value in os.environ.items():
+        if len(value) >= 4 and re.search(r'(TOKEN|PASSWORD|SECRET|_KEY)$', name):
+            text = text.replace(value, _REDACTED)
+    text = _redact_private_keys(text)
+    text = re.sub(r'\bgh[pousr]_\w{20,}', _REDACTED, text)
+    text = re.sub(r'\bgithub_pat_\w+', _REDACTED, text)
+    text = re.sub(r'\bsk-[\w-]{20,}', _REDACTED, text)
+    label = r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)'
+    value = r"""(?:"[^"]*"|'[^']*'|[^\s,;]+)"""
+    text = re.sub(label + value, r'\1' + _REDACTED, text)
+    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1' + _REDACTED, text)
+    return re.sub(r'(https?://)([^\s/@]+)@',
+                  lambda m: m[1] + _REDACTED + '@' if ':' in m[2] else m[0], text)
 
 
 def format_progress(event, **fields):
@@ -145,4 +176,4 @@ def trace_event(event, **fields):
 
 def trace_output(text):
     emit_progress('output', stream='stderr', content=text)
-    print(redact_text(text), file=sys.stderr, flush=True)
+    print(text, file=sys.stderr, flush=True)

@@ -10,7 +10,7 @@ import uuid
 from urllib import error, parse, request
 
 from popot_agents.runtime_config import RUNTIME
-from popot_agents.progress import is_progress_message, redact_text
+from popot_agents.progress import is_progress_message
 
 MAX_LOG_BODY_BYTES = RUNTIME["logging"]["mcp_body_max_bytes"]
 
@@ -138,7 +138,7 @@ async def _tool_call(action):
     except (OrchestratorError, TimeoutError) as exc:
         from mcp.server.mcpserver.exceptions import ToolError
         detail = str(exc) if isinstance(exc, OrchestratorError) else 'orchestrator is unavailable or timed out'
-        raise ToolError(redact_text(detail)) from None
+        raise ToolError(detail) from None
 
 
 class OrchestratorClient:

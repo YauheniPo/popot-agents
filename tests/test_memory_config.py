@@ -85,4 +85,3 @@ print(json.dumps([len(memory.task), client.recall.call_args.kwargs['top_k'],
                                     text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [17, 3, 2.5, 1])
-

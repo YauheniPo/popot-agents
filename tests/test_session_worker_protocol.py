@@ -72,6 +72,19 @@ class ResultDetailsProtocolTests(unittest.TestCase):
                 data += chunk
         return json.loads(data.decode())
 
+    def test_loaded_skills_are_forwarded_on_the_worker_socket(self):
+        skills = ['productivity/handoff']
+        with patch.dict(ROLE, skills=skills):
+            self._serve(mode='http')
+        with patch.object(session_worker, 'run_http', return_value='done'), \
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(self.socket_path)
+            client.sendall(b'{"action":"message","message":"work","progress":true}\n')
+            with client.makefile() as stream:
+                frames = [json.loads(line) for line in stream]
+        events = [json.loads(frame['progress']) for frame in frames if 'progress' in frame]
+        self.assertIn(skills, [event['skills'] for event in events if event['event'] == 'skills_loaded'])
+
     def test_message_with_result_details_returns_outcome_and_interventions(self):
         self._serve()
         checkpoint = {'outcome': {'status': 'partial', 'remaining_work': ['finish']},
@@ -139,6 +152,15 @@ class ResultDetailsProtocolTests(unittest.TestCase):
         with patch.object(session_worker, 'run_http') as run:
             result = self._request({'action': 'recover', 'request_id': 'b' * 32})
         self.assertEqual(result['error_type'], 'RecoveryUnavailable')
+        run.assert_not_called()
+
+    def test_invalid_request_ids_are_rejected_for_message_and_recover(self):
+        self._serve(mode='http')
+        with patch.object(session_worker, 'run_http') as run:
+            message = self._request({'action': 'message', 'message': 'work', 'request_id': 'nope'})
+            recovery = self._request({'action': 'recover', 'request_id': 'nope'})
+        self.assertEqual(message, {'error': 'invalid worker request ID'})
+        self.assertEqual(recovery, {'error': 'invalid worker request ID'})
         run.assert_not_called()
 
     def test_ax_reconnect_recovers_over_the_real_worker_socket(self):

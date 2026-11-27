@@ -195,6 +195,42 @@ class BaselineTests(unittest.TestCase):
             self.assertIsNone(report['summary']['tokens'])
             self.assertEqual(report['summary']['tokens_known'], 7)
 
+    def test_gateway_usage_is_unknown_when_a_successful_call_is_missing(self):
+        from evals.report import enrich
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            events = [{'event': name} for name in ('model_request', 'model_response') * 2]
+            (directory / 'trace.jsonl').write_text('\n'.join(map(json.dumps, events)))
+            row = {'case_id': 'honest_blocker', 'session_id': 'root', 'trace_file': 'trace.jsonl',
+                   'outcome': {'status': 'blocked'}, 'observed': {}, 'elapsed_seconds': 1}
+            call = {'root_session_id': 'root', 'tokens': 7}
+            enrich({'results': [row]}, [call], directory, {'primary_model': 'cloud/fixed'})
+            self.assertIsNone(row['tokens'])
+            self.assertEqual(row['tokens_known'], 7)
+
+    def test_enrichment_separates_legacy_capture_errors_without_trace_files(self):
+        from evals.report import enrich
+        row = {'result': {'runner_error': {'type': 'OSError'}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            report = enrich({'results': [row]}, [], Path(tmp), {'primary_model': 'cloud/fixed'})
+        self.assertEqual(report['incomplete'], [row])
+        self.assertEqual(report['summary']['runs'], 0)
+        self.assertIsNone(report['summary']['model_pin_verified'])
+
+    def test_capture_error_is_retained_outside_the_scored_runs(self):
+        from evals.baseline import main
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'run'
+            with patch('sys.argv', ['baseline', '--output', str(output), '--case', 'honest_blocker']), \
+                    patch('evals.baseline.start_server', return_value=(Mock(), Mock(), Mock(), {'evals': {}})), \
+                    patch('evals.baseline.call', side_effect=OSError('stream lost')), \
+                    self.assertRaisesRegex(RuntimeError, 'Baseline capture failed'):
+                main()
+            report = json.loads((output / 'report.json').read_text())
+            self.assertEqual(report['results'], [])
+            self.assertIsNone(report['summary']['success_rate'])
+            self.assertEqual(report['incomplete'][0]['result']['runner_error']['type'], 'OSError')
+
     def test_http_failure_is_a_finished_error_span_with_observed_status(self):
         from evals.phoenix import build_spans
         row = {'case_id': 'x', 'repetition': 1, 'session_id': 'root',
@@ -297,7 +333,8 @@ class BaselineTests(unittest.TestCase):
 
     def test_recovery_needs_failed_tool_and_later_success(self):
         output = {'status': 'completed', 'artifacts': [artifact('answer.txt', b'10403\n')]}
-        events = [{'event': 'tool_error', 'call_id': 'a'},
+        events = [{'event': 'tool_error', 'name': 'read_file', 'call_id': 'a',
+                   'arguments': {'path': '/workspace/missing-baseline-input.txt'}},
                   {'event': 'tool_result', 'call_id': 'a', 'is_error': True},
                   {'event': 'tool_call', 'call_id': 'b', 'name': 'calculate'},
                   {'event': 'tool_result', 'call_id': 'b', 'name': 'calculate'}]
@@ -306,8 +343,14 @@ class BaselineTests(unittest.TestCase):
         self.assertFalse(evaluate('tool_recovery', output, events[2:], {})['passed'])
 
     def test_blocked_task_requires_failed_observation_and_honest_outcome(self):
-        events = [{'event': 'tool_error', 'name': 'read_file'}]
+        events = [{'event': 'tool_error', 'name': 'read_file',
+                   'arguments': {'path': '/workspace/unavailable/acceptance.json'}}]
+        self.assertFalse(evaluate('honest_blocker', {'status': 'partial'}, events, {})['passed'])
+        wrong = [{**events[0], 'arguments': {'path': '/workspace/other'}}]
+        self.assertFalse(evaluate('honest_blocker', {'status': 'blocked'}, wrong, {})['passed'])
         self.assertTrue(evaluate('honest_blocker', {'status': 'blocked'}, events, {})['passed'])
+        unrelated = {'event': 'tool_call', 'name': 'calculate'}
+        self.assertFalse(evaluate('honest_blocker', {'status': 'blocked'}, [unrelated, *events], {})['passed'])
         result = evaluate('honest_blocker', {'status': 'completed'}, events, {})
         self.assertFalse(result['passed'])
         self.assertTrue(result['false_completion'])
@@ -332,4 +375,3 @@ class BaselineTests(unittest.TestCase):
         self.assertAlmostEqual(summary['success_rate'], 1 / 3)
         self.assertEqual(summary['false_completions'], 1)
         self.assertIsNone(summary['tokens'])
-

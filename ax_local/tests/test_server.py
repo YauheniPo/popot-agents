@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ax_local.api import server as server_module
 from ax_local.api.server import kind_control_plane_host, make_server
@@ -204,6 +204,8 @@ class AxServerTests(unittest.TestCase):
         self.assertNotIn("allowed_roles", server.delegation.policy)
         self.assertEqual(roles["backend_engineer"]["allowed_roles"], ["qa_engineer", "analyst", "code_reviewer", "security_engineer"])
         env = server.delegation.worker_environment("0123456789abcdef", roles["backend_engineer"])
+        self.assertEqual(env['AX_DELEGATION_URL'],
+                         f"http://172.18.0.5:{server_module.AX_CONFIG['delegation']['port']}")
         import json
         self.assertEqual(json.loads(env["AX_DELEGATION_ROLES"]), roles["backend_engineer"]["allowed_roles"])
         descriptions = json.loads(env["AX_DELEGATION_DESCRIPTIONS"])
@@ -338,8 +340,8 @@ class ServerMainTests(unittest.TestCase):
 
     def test_main_wires_the_shared_pool_and_closes_it_after_sigterm(self):
         with tempfile.TemporaryDirectory() as temp:
-            server, proxy, pool = FakeServer(), FakeProxy(), self.make_pool()
-            a2a = SimpleNamespace(server_close=lambda: None, shutdown=lambda: None)
+            server, proxy, pool = FakeServer(Mock()), FakeProxy(), self.make_pool()
+            a2a = Mock()
             with patch.object(server_module, 'ROOT', self.make_root(temp)), \
                  patch.object(server_module, 'load_dotenv'), \
                  patch.object(server_module, 'configure_ax_server_tunnel'), \
@@ -354,6 +356,9 @@ class ServerMainTests(unittest.TestCase):
                  patch.dict(os.environ,
                             {'AX_LOCAL_WORKER_IMAGE': 'worker@sha256:' + 'a' * 64}):
                 server_module.main()
+                self.assertEqual(os.environ['AX_LOCAL_BASE_URL'],
+                                 f"http://127.0.0.1:{server_module.AX_CONFIG['proxy']['port']}/v1")
+            a2a.server_close.assert_called_once_with()
             self.assertEqual(pool.started, 1)
             self.assertEqual(pool.closed, 1)
             self.assertEqual(server.worker_managers[0].worker_pool, pool)

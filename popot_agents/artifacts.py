@@ -1,6 +1,5 @@
 """Bounded deliverables, stored with the session before sandbox cleanup."""
 import base64
-import binascii
 import hashlib
 import os
 import re
@@ -49,30 +48,43 @@ class ArtifactError(ValueError):
         super().__init__(artifact_error_message(code, minimum))
 
 
+def _binary_artifact_data(item, total):
+    """Decode one base64 artifact within the remaining combined byte budget."""
+    if item['encoding'] != 'base64':
+        raise ArtifactError('invalid_artifact')
+    remaining = RUNTIME['limits']['artifact_bytes'] - total
+    if len(item['content']) > 4 * ((remaining + 2) // 3):
+        raise ArtifactError('total_byte_limit')
+    try:
+        return base64.b64decode(item['content'], validate=True)
+    except ValueError:
+        raise ArtifactError('invalid_artifact') from None
+
+
+def _artifact_item_data(item, names):
+    """Validate one artifact's shape and return (bytes, utf8_text_bytes)."""
+    if (not isinstance(item, dict) or set(item) not in (
+            {'name', 'content', 'sha256'}, {'name', 'content', 'sha256', 'encoding'})
+            or not isinstance(item['name'], str) or not _NAME.fullmatch(item['name'])
+            or item['name'] in names or not isinstance(item['content'], str)):
+        raise ArtifactError('invalid_artifact')
+    if 'encoding' in item:
+        return None, 0
+    data = item['content'].encode('utf-8')
+    return data, len(data)
+
+
 def validate_artifacts(artifacts):
     if not isinstance(artifacts, list) or len(artifacts) > MAX_ARTIFACTS:
         raise ArtifactError('count_limit', len(artifacts) if isinstance(artifacts, list) else None)
     total = text_total = 0
     names = set()
     for item in artifacts:
-        if (not isinstance(item, dict) or set(item) not in (
-                {'name', 'content', 'sha256'}, {'name', 'content', 'sha256', 'encoding'})
-                or not isinstance(item['name'], str) or not _NAME.fullmatch(item['name'])
-                or item['name'] in names or not isinstance(item['content'], str)):
-            raise ArtifactError('invalid_artifact')
-        if 'encoding' in item:
-            if item['encoding'] != 'base64':
-                raise ArtifactError('invalid_artifact')
-            remaining = RUNTIME['limits']['artifact_bytes'] - total
-            if len(item['content']) > 4 * ((remaining + 2) // 3):
-                raise ArtifactError('total_byte_limit')
-            try:
-                data = base64.b64decode(item['content'], validate=True)
-            except (ValueError, binascii.Error):
-                raise ArtifactError('invalid_artifact') from None
+        data, text_size = _artifact_item_data(item, names)
+        if data is None:
+            data = _binary_artifact_data(item, total)
         else:
-            data = item['content'].encode('utf-8')
-            text_total += len(data)
+            text_total += text_size
             if text_total > RUNTIME['limits']['tool_output_chars']:
                 raise ArtifactError('byte_limit', text_total)
         total += len(data)

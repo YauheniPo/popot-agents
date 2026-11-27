@@ -43,6 +43,20 @@ class SubstrateCleanupTests(unittest.TestCase):
         self.assertEqual(substrate_cleanup.patch_lifecycle(legacy), patched)
         with self.assertRaises(ValueError):substrate_cleanup.patch_lifecycle('unsupported source')
 
+    def test_lifecycle_patch_rejects_unexpected_guard_shapes(self):
+        source = '\n'.join('func (s *AteomHerder) ' + name +
+            '(req Request) {\n\tactorUID := req.GetActorUid()\n\twork()\n}\n'
+            for name in ('Run', 'Restore', 'Terminate'))
+        without_anchor = source.replace('\tactorUID := req.GetActorUid()\n', '')
+        with self.assertRaisesRegex(ValueError, 'Unexpected Substrate lifecycle guard'):
+            substrate_cleanup.patch_lifecycle(without_anchor)
+        patched = substrate_cleanup.patch_lifecycle(source)
+        legacy = patched.replace(substrate_cleanup.EMPTY_ACTOR_GUARD, '').replace(
+            'func (s *AteomHerder) Terminate(req Request) {\n',
+            'func (s *AteomHerder) Terminate(req Request) {\n\t// popotWorkloadHasNoState\n')
+        with self.assertRaisesRegex(ValueError, 'Unexpected empty actor cleanup guard'):
+            substrate_cleanup.patch_lifecycle(legacy)
+
     def test_retry_guard_wraps_only_termination_rpc(self):
         source = 'before\n' + CALL + '\n\t}); err != nil {\n\t\treturn nil, err\n\t}\n' + END + '\nafter\n'
         patched = patch_terminate(source)

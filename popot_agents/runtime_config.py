@@ -41,12 +41,25 @@ def load_memory_config(path: str | Path | None = None) -> dict:
     with config_path.open(encoding="utf-8") as file:
         config = json.load(file)
     settings = config.get('x-agent') if isinstance(config, dict) else None
+    _validate_memory_settings(settings)
+    return settings
+
+
+def _validate_memory_settings(settings):
     if not isinstance(settings, dict) or set(settings) != MEMORY_FIELDS | {'timeouts'}:
         raise ValueError('memory config has invalid x-agent fields')
     for key in MEMORY_FIELDS:
-        if type(settings[key]) is not int or settings[key] <= 0:
-            raise ValueError(f'memory config has invalid {key}')
-    timeouts = settings['timeouts']
+        _validate_memory_int_field(key, settings[key])
+    _validate_memory_timeouts(settings['timeouts'])
+    _validate_memory_limits(settings)
+
+
+def _validate_memory_int_field(key, value):
+    if type(value) is not int or value <= 0:
+        raise ValueError(f'memory config has invalid {key}')
+
+
+def _validate_memory_timeouts(timeouts):
     if not isinstance(timeouts, dict) or set(timeouts) != MEMORY_TIMEOUTS:
         raise ValueError('memory config has invalid timeouts fields')
     for key, value in timeouts.items():
@@ -54,11 +67,13 @@ def load_memory_config(path: str | Path | None = None) -> dict:
             raise ValueError(f'memory config has invalid timeouts.{key}')
     if timeouts['memory_capture_min_seconds'] <= timeouts['memory_capture_margin_seconds']:
         raise ValueError('memory config memory_capture_min_seconds must exceed memory_capture_margin_seconds')
+
+
+def _validate_memory_limits(settings):
     if settings['max_memories'] > 5 or settings['trace_tool_limit'] > 200:
         raise ValueError('memory config limits exceed the Cognee session API contract')
     if settings['recall_top_k'] > 20:
         raise ValueError('memory config recall_top_k must not exceed 20')
-    return settings
 
 
 def validate_model_parameters(parameters: dict, label: str = "model parameters") -> dict:
@@ -120,6 +135,35 @@ def validate_workflow_policy(policy, max_turn_seconds):
 
 
 
+def _validate_model_field(field, value, settings):
+    """Validate the model.* fields with their individual value rules."""
+    if field == "model.temperature":
+        return value is None or (type(value) in (int, float) and 0 <= value <= 2)
+    if field == "model.max_tokens":
+        return value is None or (type(value) is int and value > 0)
+    if field == "model.default_max_tool_rounds":
+        cap = settings["model"]["max_tool_rounds"]
+        return type(value) is int and type(cap) is int and 1 <= value <= cap
+    if type(value) is not int or value < 0:
+        raise ValueError("runtime config model.request_retries must be a non-negative integer "
+                         "(0 disables retries)")
+    return True
+
+
+def _validate_field_value(field, value, settings):
+    """Validate a single runtime config field value."""
+    if field == "mcp.default_role":
+        return isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", value) is not None
+    if field in {"model.temperature", "model.max_tokens",
+                 "model.default_max_tool_rounds", "model.request_retries"}:
+        return _validate_model_field(field, value, settings)
+    if field in {"timeouts.turn_seconds", "timeouts.max_turn_seconds", "timeouts.turn_response_margin_seconds"}:
+        return type(value) is int and value > 0
+    if field.split(".")[0] == "timeouts" or field == "mcp.discovery_backoff_seconds":
+        return type(value) in (int, float) and math.isfinite(value) and value > 0
+    return type(value) is int and value > 0
+
+
 def load_runtime_config(path: str | Path | None = None) -> dict:
     """Read and validate shared settings; changes take effect on restart."""
     config_path = Path(path or os.getenv("POPOT_RUNTIME_CONFIG", DEFAULT_PATH))
@@ -137,27 +181,7 @@ def load_runtime_config(path: str | Path | None = None) -> dict:
             raise ValueError(f"runtime config has invalid {section} fields")
         for name, value in values.items():
             field = f"{section}.{name}"
-            if field == "mcp.default_role":
-                valid = isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]*", value) is not None
-            elif field == "model.temperature":
-                valid = value is None or (type(value) in (int, float) and 0 <= value <= 2)
-            elif field == "model.max_tokens":
-                valid = value is None or (type(value) is int and value > 0)
-            elif field == "model.default_max_tool_rounds":
-                cap = settings["model"]["max_tool_rounds"]
-                valid = type(value) is int and type(cap) is int and 1 <= value <= cap
-            elif field == "model.request_retries":
-                if type(value) is not int or value < 0:
-                    raise ValueError("runtime config model.request_retries must be a non-negative integer "
-                                     "(0 disables retries)")
-                valid = True
-            elif field in {"timeouts.turn_seconds", "timeouts.max_turn_seconds", "timeouts.turn_response_margin_seconds"}:
-                valid = type(value) is int and value > 0
-            elif section == "timeouts" or field == "mcp.discovery_backoff_seconds":
-                valid = type(value) in (int, float) and math.isfinite(value) and value > 0
-            else:
-                valid = type(value) is int and value > 0
-            if not valid:
+            if not _validate_field_value(field, value, settings):
                 raise ValueError(f"runtime config has invalid {field}")
     validate_workflow_policy(settings["workflow"], settings["timeouts"]["max_turn_seconds"])
     if settings["limits"]["socket_message_bytes"] <= max(

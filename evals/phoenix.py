@@ -301,6 +301,8 @@ def _export(directory, *, baseline, endpoint):
     from evals import save
 
     report = json.loads((directory / 'report.json').read_text())
+    if not report['results']:
+        raise ValueError('Baseline has no measured runs to export')
     config = json.loads((directory / 'config.json').read_text())
     cases = config.get('cases') or json.loads((Path(__file__).parent / 'cases.json').read_text())
     fingerprint = hashlib.sha256((directory / 'config.json').read_bytes()).hexdigest()

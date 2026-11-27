@@ -21,10 +21,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 from popot_agents.orchestrator.main import AgentConfigurationError, AgentRunError, AgentResumeError
 from popot_agents.role_env import selected_role_env
-from ax_local.config import AX_CONFIG
 from popot_agents.runtime_config import RUNTIME, validate_model_parameters
 from popot_agents.progress import is_progress_message, emit_progress, progress_observer, format_progress
+from ax_local.config import AX_CONFIG
 from ..worker.remote_client import RESPONSE_PREFIX, PROGRESS_PREFIX
+from .delegation import SESSION_ID_RE
 from .worker_queue import WorkerQueue
 
 
@@ -96,7 +97,7 @@ class AxAgentRunner:
         }
 
     def task_manifest(self, chat_id: str, role_config: dict | None = None) -> dict:
-        if not re.fullmatch(r"[0-9a-f]{16}", chat_id):
+        if not re.fullmatch(SESSION_ID_RE, chat_id):
             raise ValueError("invalid session ID")
         role_config = role_config or {}
         # Server bookkeeping can exceed AX's 32 KiB per-env-value limit. The
@@ -106,7 +107,7 @@ class AxAgentRunner:
                                       '_ax_metrics_call_id'}}
         delegation = role_config.get('_ax_delegation', {})
         root_session_id = delegation.get('root_session_id', chat_id)
-        if not isinstance(root_session_id, str) or not re.fullmatch(r'[0-9a-f]{16}', root_session_id):
+        if not isinstance(root_session_id, str) or not re.fullmatch(SESSION_ID_RE, root_session_id):
             root_session_id = chat_id
         call_id = delegation.get('root_call_id') or role_config.get('_ax_metrics_call_id', '')
         if not isinstance(call_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', call_id):
@@ -212,21 +213,27 @@ class AxAgentRunner:
                     {'action': 'recover', 'request_id': request_id} if recovering else payload,
                     remaining, on_progress=on_progress)
             except AxCommandError as exc:
-                if 'rpc error: code = Unavailable' not in exc.diagnostic.get('stderr', ''):
-                    raise
-                recovering = not getattr(exc, 'request_not_sent', False)
-                attempt += 1
-                if on_progress:
-                    on_progress(format_progress('worker_reconnecting', attempt=attempt,
-                                                reason='ax_transport_unavailable'))
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout) from exc
-                time.sleep(min(2, .5 * attempt, remaining))
+                recovering, attempt = self._transport_retry(
+                    exc, deadline, timeout, attempt, on_progress)
                 continue
             if attempt and not result.get('error') and on_progress:
                 on_progress(format_progress('worker_reconnected', attempt=attempt))
             return result
+
+    def _transport_retry(self, exc, deadline, timeout, attempt, on_progress):
+        """Back off after an Unavailable transport error; return (recovering, attempt)."""
+        if 'rpc error: code = Unavailable' not in exc.diagnostic.get('stderr', ''):
+            raise exc
+        recovering = not getattr(exc, 'request_not_sent', False)
+        attempt += 1
+        if on_progress:
+            on_progress(format_progress('worker_reconnecting', attempt=attempt,
+                                        reason='ax_transport_unavailable'))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(['ax', 'ssh'], timeout) from exc
+        time.sleep(min(2, .5 * attempt, remaining))
+        return recovering, attempt
 
     def _remote_payload(self, task_name: str, payload: dict, timeout: int = 60, *, on_progress=None) -> dict:
         raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
@@ -380,7 +387,7 @@ class AxAgentRunner:
 
     def start_chat(self, chat_id: str, role_config: dict | None = None,
                    *, deadline: float | None = None, cancel_event=None) -> AxChat:
-        if not re.fullmatch(r"[0-9a-f]{16}", chat_id):
+        if not re.fullmatch(SESSION_ID_RE, chat_id):
             raise ValueError("invalid session ID")
         self._reject_ungranted_delegation(chat_id, role_config)
         task_name = f"popot-chat-{chat_id}"
@@ -540,7 +547,7 @@ class AxAgentRunner:
         raise failure
 
     def close_session(self, session_id: str) -> None:
-        if not re.fullmatch(r"[0-9a-f]{16}", session_id):
+        if not re.fullmatch(SESSION_ID_RE, session_id):
             raise ValueError("invalid AX session ID")
         AxChat(self, f"popot-chat-{session_id}", 1).close()
 
@@ -607,7 +614,7 @@ class AxAgentRunner:
         """Remove previous-process Tasks before accepting requests with a new proxy token."""
         result = self._run('get', 'tasks')
         names = [line.split()[0] for line in result.stdout.splitlines()
-                 if line.split() and re.fullmatch(r'popot-chat-[0-9a-f]{16}', line.split()[0])]
+                 if line.split() and re.fullmatch(r"popot-chat-" + SESSION_ID_RE, line.split()[0])]
         for name in names:
             # Failure blocks startup, so an orphan cannot bypass the new limit.
             self._run('delete', 'task', name)
@@ -628,7 +635,7 @@ class AxChat:
     _messages: list[dict[str, str]] = field(default_factory=list, repr=False)
     _snapshot_issue: str | None = field(default=None, repr=False)
     _suspend_pending: bool = field(default=False, repr=False)
-    _checkpoint: dict = field(default_factory=dict, repr=False)
+    _checkpoint: dict[str, object] = field(default_factory=dict, repr=False)
 
     @property
     def idle_timeout_seconds(self) -> int:

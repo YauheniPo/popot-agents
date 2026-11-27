@@ -4,7 +4,6 @@ import json
 import re
 from copy import deepcopy
 
-from popot_agents.progress import redact_text
 from popot_agents.work_evidence import child_resolution, MAX_RECEIPTS
 
 
@@ -53,7 +52,7 @@ def completed_answer(output: str, role: str, *, session_id: str | None = None) -
                                         or outcome.get('errors') or outcome.get('remaining_work')))
             or result.get('role') != role or result.get('truncated')
             or not isinstance(answer, str) or not answer.strip() or not suffix):
-        diagnostic = '; '.join(redact_text(result[key])[:500] for key in ('state', 'error')
+        diagnostic = '; '.join(result[key][:500] for key in ('state', 'error')
                                if isinstance(result.get(key), str) and result[key])
         raise RuntimeError(f'delegation to {role} did not return a complete successful answer{suffix}; '
                            + (diagnostic + '; ' if diagnostic else '')
