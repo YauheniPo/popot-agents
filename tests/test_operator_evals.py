@@ -115,7 +115,7 @@ class OperatorEvalTests(unittest.TestCase):
             for hours in (True, 0, -1, 169, float('nan'), float('inf')):
                 with self.subTest(hours=hours), self.assertRaises(ValueError):
                     runner.run(hours=hours)
-            for run_id in ('../.env', '/etc/passwd', 'not-a-run'):
+            for run_id in ('../.env', '/reports/example.json', 'not-a-run'):
                 with self.subTest(run_id=run_id), self.assertRaises(ValueError):
                     runner.read(run_id, 'summary')
             with self.assertRaises(ValueError):
