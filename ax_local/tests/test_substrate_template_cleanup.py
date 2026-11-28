@@ -10,6 +10,33 @@ from ax_local.cluster import substrate_api as cleanup
 
 
 class TemplateCleanupPatchTests(unittest.TestCase):
+    def test_cli_requires_the_pinned_checkout_and_releases_the_lock_on_failure(self):
+        import runpy
+        import sys
+        script = Path(cleanup.__file__)
+        script_name = str(script)
+        original_open = Path.open
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / 'substrate-api.lock'
+            def open_file(path, *args, **kwargs):
+                return original_open(lock if path.name == lock.name else path, *args, **kwargs)
+            with patch.object(sys, 'path', [str(script.parent), *sys.path]), patch.object(Path, 'open', open_file):
+                for effect, message in [(subprocess.CompletedProcess([], 0, 'wrong-pin', ''), 'pinned version'),
+                                        (OSError('missing git'), 'deployment failed')]:
+                    with self.subTest(message=message), patch('subprocess.run', side_effect=[effect]), \
+                            self.assertRaisesRegex(SystemExit, message):
+                        runpy.run_path(script_name, run_name='__main__')
+            self.assertTrue(lock.is_file())
+
+    def test_deploy_rejects_missing_or_ambiguous_api_containers(self):
+        local = Path('/unused')
+        for containers in ([], [{'name': 'ate-api-server'}] * 2):
+            deployment = {'spec': {'template': {'spec': {'containers': containers}}}}
+            commands = [subprocess.CompletedProcess([], 0, cleanup.PIN), subprocess.CompletedProcess([], 0, json.dumps(deployment))]
+            with patch.object(cleanup.subprocess, 'run', side_effect=commands) as run, self.assertRaisesRegex(ValueError, 'one ate-api-server'):
+                cleanup.deploy(local, {'context': 'kind-test'})
+            self.assertEqual(run.call_count, 2)
+
     def test_patch_guards_template_deletion_and_is_idempotent(self):
         source = 'before\n' + cleanup.ANCHOR + '\nafter\n'
         updated = cleanup.patched_source(source)
@@ -55,6 +82,7 @@ class TemplateCleanupPatchTests(unittest.TestCase):
             live = {'metadata': {'resourceVersion': '1'}, 'spec': {'template': {'spec': {
                 'containers': [{'name': 'ate-api-server', 'image': 'old'}]}}}}
             calls = []
+            image = 'localhost:5001/ateapi@sha256:' + 'a' * 64
             fail = True
 
             def run(command, **kwargs):
@@ -69,7 +97,7 @@ class TemplateCleanupPatchTests(unittest.TestCase):
                 elif command[:2] == ['go', 'env']:
                     output = 'arm64'
                 elif command[0].endswith('/ko'):
-                    output = 'localhost:5001/ateapi@sha256:' + 'a' * 64
+                    output = image
                 elif 'patch' in command:
                     live['spec']['template']['spec']['containers'][0]['image'] = json.loads(command[-1])[-1]['value']
                 return subprocess.CompletedProcess(command, 0, output, '')
@@ -81,6 +109,11 @@ class TemplateCleanupPatchTests(unittest.TestCase):
                 self.assertFalse(any('patch' in c for c in calls))
                 self.assertFalse((local / 'substrate-api.json').exists())
                 fail = False
+                saved_image, image = image, 'localhost:5001/ateapi:latest'
+                with self.assertRaisesRegex(ValueError, 'pinned local image'):
+                    cleanup.deploy(local, {'context': 'kind-test'})
+                self.assertFalse(any('patch' in command for command in calls))
+                image = saved_image
                 calls.clear()
                 cleanup.deploy(local, {'context': 'kind-test'})
                 self.assertTrue(any('patch' in c for c in calls))

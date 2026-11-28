@@ -189,8 +189,9 @@ class RuntimeEvalTests(unittest.TestCase):
         from evals.runtime import annotate
         api = Mock()
         api.call.return_value = {'data': []}
+        spans = [span()]
         with self.assertRaisesRegex(ValueError, 'confirm'):
-            annotate(api, [span()])
+            annotate(api, spans)
 
 
 if __name__ == '__main__':

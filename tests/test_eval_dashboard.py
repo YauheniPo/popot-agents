@@ -83,7 +83,7 @@ class EvalDashboardTests(unittest.TestCase):
         from ax_local.cluster.eval_dashboard import dashboard
         result = dashboard()
         variables = {v['name'] for v in result['templating']['list']}
-        self.assertTrue({'series', 'experiment', 'baseline'} <= variables)
+        self.assertLessEqual({'series', 'experiment', 'baseline'}, variables)
         serialized = str(result)
         for text in ('popot_eval', 'popot-prometheus', 'baseline', 'objective_score', 'judge_score', 'tool_calls'):
             self.assertIn(text, serialized)

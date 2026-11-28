@@ -69,8 +69,9 @@ class OperatorEvalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.dict('os.environ', {'PHOENIX_ADMIN_SECRET': 'admin-only'}, clear=True), \
                 patch('evals.operator_tools.BoundedAPI') as api:
+            runner = RuntimeEvals(tmp)
             with self.assertRaisesRegex(ValueError, 'PHOENIX_API_KEY'):
-                RuntimeEvals(tmp).run()
+                runner.run()
             api.assert_not_called()
 
     def test_failed_publish_returns_saved_run_and_unknown_write_count(self):
@@ -174,7 +175,7 @@ class OperatorEvalTests(unittest.TestCase):
                      'Phoenix experiments and saved reports', 'separate retention',
                      'Качество результата', 'Ошибки и повторы'):
             with self.subTest(text=text):
-                self.assertTrue(text in instructions, 'Runbook must cover: ' + text)
+                self.assertIn(text, instructions, 'Runbook must cover: ' + text)
 
     def test_worker_packages_evaluator_and_local_mcp_entrypoint(self):
         dockerfile = (ROOT / 'ax_local/docker/worker.Dockerfile').read_text()

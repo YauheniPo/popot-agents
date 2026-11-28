@@ -17,6 +17,26 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_missing_capacity_condition_does_not_retry(self):
+        for status, stdout in [(1, ''), (0, 'Conditions:\n  Status Unknown'), (0, 'Phase: Failed')]:
+            with self.subTest(status=status, stdout=stdout), patch.object(
+                    self.runner, '_run', return_value=subprocess.CompletedProcess([], status, stdout)):
+                self.assertFalse(self.runner._capacity_unavailable('fixture-task', 1))
+
+    def test_capacity_probe_consuming_the_deadline_never_resumes(self):
+        chat = AxChat(self.runner, 'fixture-task', 30)
+        now = [0]
+        def delayed_probe(*args):
+            now[0] = 5
+            return True
+        with patch.object(chat, 'is_alive', return_value=False), patch.object(chat, 'close'), \
+                patch.object(self.runner, 'task_status', return_value=('Failed', 'ActorResumeFailed')), \
+                patch.object(self.runner, '_capacity_unavailable', side_effect=delayed_probe), \
+                patch.object(self.runner, '_run') as command, patch('time.monotonic', side_effect=lambda: now[0]), \
+                self.assertRaises(AgentRunError):
+            self.runner._wait_for_chat(chat, lambda limit: limit, 5)
+        command.assert_not_called()
+
     def test_capacity_race_retries_same_task_before_any_message_is_sent(self):
         chat = AxChat(self.runner, 'fixture-task', 30)
         description = subprocess.CompletedProcess([], 0,
@@ -31,6 +51,15 @@ class AxRunnerTests(unittest.TestCase):
         self.assertEqual([c.args[:3] for c in command.call_args_list],
                          [('describe', 'task', 'fixture-task'), ('resume', 'task', 'fixture-task')])
         close.assert_not_called()
+
+    def test_capacity_polling_waits_before_retrying_again(self):
+        chat = AxChat(self.runner, 'fixture-task', 30)
+        with patch.object(chat, 'is_alive', side_effect=[False, False, True]), \
+                patch.object(self.runner, 'task_status', return_value=('Failed', 'ActorResumeFailed')), \
+                patch.object(self.runner, '_capacity_unavailable', return_value=True), patch.object(self.runner, '_run') as command, \
+                patch('time.monotonic', return_value=1), patch('time.sleep'):
+            self.assertIs(self.runner._wait_for_chat(chat, lambda limit: limit, 5), chat)
+        self.assertEqual([call.args[:2] for call in command.call_args_list], [('resume', 'task')])
 
     def test_capacity_retry_keeps_original_startup_deadline(self):
         chat = AxChat(self.runner, 'fixture-task', 30)

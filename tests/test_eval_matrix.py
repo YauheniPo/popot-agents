@@ -176,8 +176,9 @@ class EvalMatrixTests(unittest.TestCase):
         for config in ({'baseline': 'missing', 'variants': [{'name': 'a', 'model': 'p/a', 'parameters': {}}]},
                        {'baseline': 'a', 'variants': [{'name': 'a', 'model': 'p/a', 'parameters': {}}] * 2}):
             with tempfile.TemporaryDirectory() as tmp, patch('evals.matrix.subprocess.run') as launch:
+                output, settings = Path(tmp) / 'matrix', {**unified_settings(), **config}
                 with self.assertRaises(ValueError):
-                    run(Path(tmp) / 'matrix', {**unified_settings(), **config})
+                    run(output, settings)
                 launch.assert_not_called()
 
     def test_cli_baseline_selection_and_repetition_override_share_one_configuration(self):

@@ -11,6 +11,46 @@ from ax_local.cluster.resource_dashboard import dashboard
 
 
 class ResourceMonitoringTests(unittest.TestCase):
+    def test_full_install_provisions_grafana_and_checks_prometheus(self):
+        for manage_collector in (True, False):
+            with self.subTest(manage_collector=manage_collector):
+                self.check_full_install(manage_collector)
+
+    def check_full_install(self, manage_collector):
+        cluster = MagicMock(context='kind-test')
+        node = {'metadata': {'name': 'test-control-plane'}, 'status': {'addresses': [{'type': 'InternalIP', 'address': '10.0.0.2'}]}}
+        cluster.run.side_effect = lambda *args, **kwargs: json.dumps({'items': [node]}) if args[0] == 'get' else 'ok'
+        spec = {'containers': [{'args': [], 'volumeMounts': []}], 'volumes': []}
+        cluster.get.side_effect = [{'data': {'prometheus.yml': 'scrape_configs: []'}}, {'spec': {'template': {'spec': spec}}}]
+        settings = monitoring.load_monitoring(monitoring.ROOT)
+        if not manage_collector:
+            settings['opentelemetry-collector'].pop('resources')
+        with patch.object(monitoring, 'load_monitoring', return_value=settings), \
+                patch.object(monitoring, 'Cluster', return_value=cluster), \
+                patch.object(monitoring.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'certificate')), \
+                patch.object(monitoring, 'configure_collector') as collector, patch.object(monitoring, 'ensure_forward') as forward:
+            monitoring.install()
+        manifests = [obj for call in cluster.apply.call_args_list for obj in call.args[0]]
+        grafana = next(obj for obj in manifests if obj['metadata']['name'] == 'popot-grafana-config')
+        self.assertEqual(json.loads(grafana['data']['evals.json'])['uid'], 'popot-evals')
+        self.assertEqual(collector.call_count, int(manage_collector))
+        forward.assert_called_once_with()
+        cluster.run.assert_any_call('-n', monitoring.NS, 'exec', 'deployment/prometheus', '--', 'promtool',
+                                    'check', 'config', '/etc/prometheus/prometheus.yml')
+
+    def test_cli_install_evals_returns_failure_if_kubectl_cannot_apply(self):
+        import runpy
+        import sys
+        script = Path(monitoring.__file__)
+        script_name = str(script)
+        failed = subprocess.CalledProcessError(1, 'kubectl', stderr='fixture apply failed')
+        with patch.object(sys, 'argv', [str(script), 'install-evals']), \
+                patch.object(sys, 'path', [str(script.parent), *sys.path]), \
+                patch('subprocess.run', side_effect=failed) as run, self.assertRaises(SystemExit) as caught:
+            runpy.run_path(script_name, run_name='__main__')
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn('apply', run.call_args.args[0])
+
     def test_prometheus_deploy_has_headroom_above_observed_512_mib_oom(self):
         from ax_local.resource_config import load_monitoring, memory_mib
         resources = load_monitoring(monitoring.ROOT)['prometheus']['resources']

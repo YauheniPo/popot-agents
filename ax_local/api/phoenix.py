@@ -128,19 +128,28 @@ class Span:
             self.data['status_code'] = 'ERROR'
         if isinstance(response.get('model'), str):
             self.data['attributes']['llm.model_name'] = redact_text(response['model'])[:256]
+        self._record_usage(response)
+        self._index_choices()
+        self.data['attributes']['popot.output.available'] = bool(body and body != b'{}')
+        self.finish()
+
+    def _record_usage(self, response):
         usage = response.get('usage')
-        if isinstance(usage, dict):
-            for source, target in [('prompt_tokens', 'prompt'), ('completion_tokens', 'completion'),
-                                   ('total_tokens', 'total')]:
-                value = usage.get(source)
-                if type(value) is int and value >= 0:
-                    self.data['attributes']['llm.token_count.' + target] = value
-            for source, field, target in [('prompt_tokens_details', 'cached_tokens', 'prompt_details.cache_read'),
-                                          ('completion_tokens_details', 'reasoning_tokens', 'completion_details.reasoning')]:
-                details = usage.get(source)
-                value = details.get(field) if isinstance(details, dict) else None
-                if type(value) is int and value >= 0:
-                    self.data['attributes']['llm.token_count.' + target] = value
+        if not isinstance(usage, dict):
+            return
+        for source, target in [('prompt_tokens', 'prompt'), ('completion_tokens', 'completion'),
+                               ('total_tokens', 'total')]:
+            value = usage.get(source)
+            if type(value) is int and value >= 0:
+                self.data['attributes']['llm.token_count.' + target] = value
+        for source, field, target in [('prompt_tokens_details', 'cached_tokens', 'prompt_details.cache_read'),
+                                      ('completion_tokens_details', 'reasoning_tokens', 'completion_details.reasoning')]:
+            details = usage.get(source)
+            value = details.get(field) if isinstance(details, dict) else None
+            if type(value) is int and value >= 0:
+                self.data['attributes']['llm.token_count.' + target] = value
+
+    def _index_choices(self):
         clean = json.loads(self.data['attributes']['output.value'])
         if isinstance(clean, dict) and not self.data['attributes']['popot.output.truncated']:
             choices = clean.get('choices') if isinstance(clean.get('choices'), list) else []
@@ -148,8 +157,6 @@ class Span:
                 [item['message'] for item in choices if isinstance(item, dict) and isinstance(item.get('message'), dict)]))
             if choices and isinstance(choices[0], dict) and isinstance(choices[0].get('finish_reason'), str):
                 self.data['attributes']['llm.finish_reason'] = choices[0]['finish_reason']
-        self.data['attributes']['popot.output.available'] = bool(body and body != b'{}')
-        self.finish()
 
 
 class AgentSpan(Span):
@@ -248,12 +255,15 @@ class AgentSpan(Span):
             for suffix in ('truncated', 'bytes', 'sha256'):
                 if 'input_' + suffix in event:
                     span.data['attributes']['popot.input.' + suffix] = event['input_' + suffix]
+        self._mark_skill_reference(span, event, arguments)
+        self.pending[key] = span
+
+    def _mark_skill_reference(self, span, event, arguments):
         path = arguments.get('path', '') if isinstance(arguments, dict) else ''
         if event.get('name') == 'read_file' and isinstance(path, str):
             for skill in self.data['attributes'][SKILLS_CONFIGURED]:
                 if '/skills/' + skill + '/' in '/' + path:
                     span.data['attributes'][SKILL_REFERENCE_REQUESTED] = skill
-        self.pending[key] = span
 
     def _finish_tool(self, kind, event):
         key = event.get('call_id')
@@ -264,24 +274,29 @@ class AgentSpan(Span):
             self.event(json.dumps({**event, 'event': 'tool_call'}))
             span = self.pending.get(key)
             span.data['attributes']['popot.call_started_missing'] = True
-        if span:
-            if 'output' in event:
-                span.payload('output', event['output'])
-            elif kind == 'tool_error':
-                span.payload('output', {k: event[k] for k in ('error_type', 'message') if k in event})
-            span.data['attributes']['popot.output.available'] = 'output' in event
-            for suffix in ('truncated', 'bytes', 'sha256'):
-                if 'output_' + suffix in event:
-                    span.data['attributes']['popot.output.' + suffix] = event['output_' + suffix]
-            if kind == 'tool_error':
-                span.data['status_code'] = 'ERROR'
-                if isinstance(event.get('error_type'), str):
-                    span.data['attributes']['popot.error_type'] = redact_text(event['error_type'])[:160]
-            elif span.data['status_code'] != 'ERROR' and SKILL_REFERENCE_REQUESTED in span.data['attributes']:
-                span.data['attributes']['popot.skill.reference_read'] = span.data['attributes'][SKILL_REFERENCE_REQUESTED]
-            if kind == 'tool_result':
-                self.pending.pop(key)
-                span.finish()
+        if span is None:
+            return
+        self._record_tool_output(span, kind, event)
+        if kind == 'tool_error':
+            span.data['status_code'] = 'ERROR'
+            if isinstance(event.get('error_type'), str):
+                span.data['attributes']['popot.error_type'] = redact_text(event['error_type'])[:160]
+        elif span.data['status_code'] != 'ERROR' and SKILL_REFERENCE_REQUESTED in span.data['attributes']:
+            span.data['attributes']['popot.skill.reference_read'] = span.data['attributes'][SKILL_REFERENCE_REQUESTED]
+        if kind == 'tool_result':
+            self.pending.pop(key)
+            span.finish()
+
+    @staticmethod
+    def _record_tool_output(span, kind, event):
+        if 'output' in event:
+            span.payload('output', event['output'])
+        elif kind == 'tool_error':
+            span.payload('output', {k: event[k] for k in ('error_type', 'message') if k in event})
+        span.data['attributes']['popot.output.available'] = 'output' in event
+        for suffix in ('truncated', 'bytes', 'sha256'):
+            if 'output_' + suffix in event:
+                span.data['attributes']['popot.output.' + suffix] = event['output_' + suffix]
 
     def base_attributes(self):
         return {key: value for key, value in self.data['attributes'].items()

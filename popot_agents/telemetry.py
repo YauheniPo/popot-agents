@@ -9,6 +9,7 @@ from popot_agents.progress import redact_text
 
 VERSION = 'popot-telemetry-v2'
 PAYLOAD_LIMIT = 1024 * 1024
+REDACTED = '[REDACTED]'
 _SECRET_KEYS = {'authorization', 'cookie', 'setcookie', 'password', 'passwd',
                 'secret', 'token', 'apikey', 'accesstoken', 'refreshtoken',
                 'privatekey', 'clientsecret', 'credential', 'credentials', 'mcpsessionid', 'proxyauthorization'}
@@ -26,16 +27,15 @@ def _credential_pair(value):
 
 def sensitive_values(value):
     """Retain credential values only in memory to redact unlabelled echoes."""
-    found = set()
     if isinstance(value, dict):
-        for key, item in value.items():
-            if _secret_key(key) and isinstance(item, str) and item:
-                found.add(item)
+        found = {item for key, item in value.items() if _secret_key(key) and isinstance(item, str) and item}
+        for item in value.values():
             found.update(sensitive_values(item))
-    elif _credential_pair(value):
-        if value[1]:
-            found.add(value[1])
-    elif isinstance(value, (list, tuple)):
+        return found
+    if _credential_pair(value):
+        return {value[1]} if value[1] else set()
+    found = set()
+    if isinstance(value, (list, tuple)):
         for item in value:
             found.update(sensitive_values(item))
     elif isinstance(value, str) and value.lstrip().startswith(('{', '[')):
@@ -48,31 +48,35 @@ def sensitive_values(value):
 
 def safe_value(value, extra_secrets=()):
     if isinstance(value, dict):
-        return {str(key): '[REDACTED]' if _secret_key(key) else safe_value(item, extra_secrets)
+        return {str(key): REDACTED if _secret_key(key) else safe_value(item, extra_secrets)
                 for key, item in value.items()}
     if _credential_pair(value):
-        return [value[0], '[REDACTED]']
+        return [value[0], REDACTED]
     if isinstance(value, (list, tuple)):
         return [safe_value(item, extra_secrets) for item in value]
     if isinstance(value, str):
-        if value.lstrip().startswith(('{', '[')):
-            try:
-                parsed = json.loads(value)
-                clean = safe_value(parsed, extra_secrets)
-                return value if clean == parsed else json.dumps(clean, ensure_ascii=False)
-            except ValueError:
-                pass
-        for secret in sorted(extra_secrets, key=len, reverse=True):
-            value = value.replace(secret, '[REDACTED]')
-        return redact_text(value)
+        return _safe_text(value, extra_secrets)
     return value
+
+
+def _safe_text(value, extra_secrets):
+    if value.lstrip().startswith(('{', '[')):
+        try:
+            parsed = json.loads(value)
+            clean = safe_value(parsed, extra_secrets)
+            return value if clean == parsed else json.dumps(clean, ensure_ascii=False)
+        except ValueError:
+            pass
+    for secret in sorted(extra_secrets, key=len, reverse=True):
+        value = value.replace(secret, REDACTED)
+    return redact_text(value)
 
 
 def decode_payload(value):
     if isinstance(value, bytes):
         try:
             return json.loads(value)
-        except (ValueError, UnicodeError):
+        except ValueError:
             return value.decode('utf-8', errors='replace')
     return value
 
@@ -96,10 +100,11 @@ def payload_attributes(side, value, *, limit=PAYLOAD_LIMIT, extra_secrets=()):
             else:
                 high = middle - 1
         result = json.dumps({'truncated': True, 'preview': encoded[:low].decode('utf-8', errors='ignore')}, ensure_ascii=False).encode()
+    prefix = f'popot.{side}.'
     return {side + '.value': result.decode(), side + '.mime_type': 'application/json',
-            'popot.' + side + '.truncated': truncated,
-            'popot.' + side + '.bytes': len(encoded),
-            'popot.' + side + '.sha256': hashlib.sha256(encoded).hexdigest(),
+            prefix + 'truncated': truncated,
+            prefix + 'bytes': len(encoded),
+            prefix + 'sha256': hashlib.sha256(encoded).hexdigest(),
             'popot.telemetry.version': VERSION}
 
 
@@ -112,20 +117,27 @@ def message_attributes(side, messages):
         if not isinstance(message, dict):
             continue
         prefix = f'llm.{side}_messages.{index}.message.'
-        for key in ('role', 'content', 'name', 'tool_call_id'):
-            value = message.get(key)
-            if value is not None:
-                attrs[prefix + key] = (value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))[:16000]
-        calls = message.get('tool_calls')
-        for number, call in enumerate(calls[:16] if isinstance(calls, list) else []):
-            if not isinstance(call, dict):
-                continue
-            call_prefix = prefix + f'tool_calls.{number}.tool_call.'
-            if isinstance(call.get('id'), str):
-                attrs[call_prefix + 'id'] = call['id']
-            for key in ('name', 'arguments'):
-                function = call.get('function')
-                value = function.get(key) if isinstance(function, dict) else None
-                if value is not None:
-                    attrs[call_prefix + 'function.' + key] = str(value)[:16000]
+        _index_message(attrs, prefix, message)
     return attrs
+
+
+def _index_message(attrs, prefix, message):
+    for key in ('role', 'content', 'name', 'tool_call_id'):
+        value = message.get(key)
+        if value is not None:
+            attrs[prefix + key] = (value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))[:16000]
+    calls = message.get('tool_calls')
+    if isinstance(calls, list):
+        for number, call in enumerate(calls[:16]):
+            if isinstance(call, dict):
+                _index_tool_call(attrs, prefix + f'tool_calls.{number}.tool_call.', call)
+
+
+def _index_tool_call(attrs, prefix, call):
+    if isinstance(call.get('id'), str):
+        attrs[prefix + 'id'] = call['id']
+    function = call.get('function')
+    if isinstance(function, dict):
+        for key in ('name', 'arguments'):
+            if function.get(key) is not None:
+                attrs[prefix + 'function.' + key] = str(function[key])[:16000]

@@ -39,62 +39,103 @@ func (s popotObserveDeletion) DeleteActorTemplate(ctx context.Context, ref resou
 	return s.serviceStore.DeleteActorTemplate(ctx, ref)
 }
 
+type popotDeletionFixture struct {
+	st     store.Interface
+	svc    *RPCService
+	ref    resources.ActorTemplateRef
+	golden resources.ActorRef
+	req    *ateapipb.DeleteActorTemplateRequest
+}
+
+func newPopotDeletionFixture(t *testing.T, mode string) popotDeletionFixture {
+	t.Helper()
+	ctx := context.Background()
+	st, cleanup := storetest.SetupTestStore(t)
+	t.Cleanup(cleanup)
+	ref := resources.ActorTemplateRef{Atespace: "team-a", Name: "popot-template"}
+	workflow := newTestActorWorkflow(t, st, ref.Atespace, ref.Name)
+	tmpl, err := st.GetActorTemplate(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden := resources.ActorRef{Atespace: resources.GoldenActorAtespace, Name: tmpl.GetMetadata().GetUid()}
+	if mode != "absent" {
+		seedWorkflowActor(t, ctx, st, golden, ref.Atespace, ref.Name, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+	}
+	if mode == "busy" {
+		lease, err := st.AcquireLease(ctx, "lease:actortemplate:"+ref.Atespace+":"+ref.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { lease.Close() })
+	}
+	if mode == "cleanup-failure" {
+		workflow.store = popotFailGoldenStore{workflow.store}
+	}
+	svc := &RPCService{impl: popotObserveDeletion{newServiceImpl(st, nil), t, golden}, actorWorkflow: workflow}
+	req := &ateapipb.DeleteActorTemplateRequest{ActorTemplate: &ateapipb.ObjectRef{Atespace: ref.Atespace, Name: ref.Name}}
+	return popotDeletionFixture{st, svc, ref, golden, req}
+}
+
+func (f popotDeletionFixture) checkBlocked(t *testing.T, mode string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected deletion to fail")
+	}
+	if mode == "busy" && status.Code(err) != codes.Aborted {
+		t.Fatalf("busy lease: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := f.st.GetActorTemplate(ctx, f.ref); err != nil {
+		t.Fatalf("lost template: %v", err)
+	}
+	if _, err := f.st.GetActor(ctx, f.golden); err != nil {
+		t.Fatalf("lost golden: %v", err)
+	}
+}
+
+type popotLeaseFailure struct {
+	serviceStore
+	err error
+}
+
+func (s popotLeaseFailure) AcquireLease(context.Context, string) (*store.Lease, error) {
+	return nil, s.err
+}
+
 func TestPopotTemplateDeletion(t *testing.T) {
+	t.Run("lease-store-error", func(t *testing.T) {
+		failure := errors.New("lease storage unavailable")
+		svc := &RPCService{impl: popotLeaseFailure{err: failure}}
+		_, release, err := svc.popotPrepareTemplateDeletion(context.Background(), resources.ActorTemplateRef{})
+		if !errors.Is(err, failure) || release != nil {
+			t.Fatalf("unexpected lease result: %v", err)
+		}
+	})
 	for _, mode := range []string{"running", "absent", "busy", "cleanup-failure"} {
-		t.Run(mode, func(t *testing.T) {
-			ctx := context.Background()
-			st, cleanup := storetest.SetupTestStore(t)
-			defer cleanup()
-			workflow := newTestActorWorkflow(t, st, "team-a", "popot-template")
-			ref := resources.ActorTemplateRef{Atespace: "team-a", Name: "popot-template"}
-			tmpl, err := st.GetActorTemplate(ctx, ref)
-			if err != nil {
-				t.Fatal(err)
-			}
-			golden := resources.ActorRef{Atespace: resources.GoldenActorAtespace, Name: tmpl.GetMetadata().GetUid()}
-			if mode != "absent" {
-				seedWorkflowActor(t, ctx, st, golden, ref.Atespace, ref.Name, ateapipb.ActorState_ACTOR_STATE_RUNNING)
-			}
-			if mode == "busy" {
-				lease, err := st.AcquireLease(ctx, "lease:actortemplate:"+ref.Atespace+":"+ref.Name)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer lease.Close()
-			}
-			if mode == "cleanup-failure" {
-				workflow.store = popotFailGoldenStore{workflow.store}
-			}
-			svc := &RPCService{impl: popotObserveDeletion{newServiceImpl(st, nil), t, golden}, actorWorkflow: workflow}
-			req := &ateapipb.DeleteActorTemplateRequest{ActorTemplate: &ateapipb.ObjectRef{Atespace: ref.Atespace, Name: ref.Name}}
-			_, err = svc.DeleteActorTemplate(ctx, req)
-			if mode == "busy" || mode == "cleanup-failure" {
-				if err == nil {
-					t.Fatal("template deletion must fail while golden teardown is unconfirmed")
-				}
-				if mode == "busy" && status.Code(err) != codes.Aborted {
-					t.Fatalf("busy lease: %v", err)
-				}
-				if _, err := st.GetActorTemplate(ctx, ref); err != nil {
-					t.Fatalf("cleanup failure lost template: %v", err)
-				}
-				if _, err := st.GetActor(ctx, golden); err != nil {
-					t.Fatalf("cleanup failure lost golden: %v", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := st.GetActor(ctx, golden); !errors.Is(err, store.ErrNotFound) {
-				t.Fatalf("golden survives template deletion: %v", err)
-			}
-			if _, err := st.GetActorTemplate(ctx, ref); !errors.Is(err, store.ErrNotFound) {
-				t.Fatalf("template survives deletion: %v", err)
-			}
-			if _, err := svc.DeleteActorTemplate(ctx, req); status.Code(err) != codes.NotFound {
-				t.Fatalf("repeat delete: %v", err)
-			}
-		})
+		t.Run(mode, func(t *testing.T) { checkPopotTemplateDeletion(t, mode) })
+	}
+}
+
+func checkPopotTemplateDeletion(t *testing.T, mode string) {
+	t.Helper()
+	f := newPopotDeletionFixture(t, mode)
+	ctx := context.Background()
+	_, err := f.svc.DeleteActorTemplate(ctx, f.req)
+	if mode == "busy" || mode == "cleanup-failure" {
+		f.checkBlocked(t, mode, err)
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.st.GetActor(ctx, f.golden); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("golden survives deletion: %v", err)
+	}
+	if _, err := f.st.GetActorTemplate(ctx, f.ref); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("template survives deletion: %v", err)
+	}
+	if _, err := f.svc.DeleteActorTemplate(ctx, f.req); status.Code(err) != codes.NotFound {
+		t.Fatalf("repeat delete: %v", err)
 	}
 }

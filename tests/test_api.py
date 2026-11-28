@@ -390,6 +390,23 @@ class HttpHarnessTests(unittest.TestCase):
             self.assertIn('Tool input requires reconciliation', answer)
         self.assertNotIn("private-token", output.getvalue())
 
+    def test_compaction_emits_the_observed_context_size_change(self):
+        from popot_agents.worker import http_harness as harness
+        from popot_agents.progress import observe_progress
+        events = []
+        def compact(messages, *args, **kwargs):
+            messages[-1]['content'] = 'short fixture receipt'
+            return 1
+        body = io.BytesIO(b'{"choices":[{"message":{"content":"ok"}}]}')
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://example.test/v1', 'HARNESS_MODEL': 'test'}), \
+                patch.object(harness, 'compact_tool_results', side_effect=compact), \
+                patch.object(harness.request, 'urlopen', return_value=body), \
+                observe_progress(lambda message: events.append(json.loads(message))):
+            self.assertEqual(harness.run_http('large prior output ' * 100), 'ok')
+        event = next(item for item in events if item['event'] == 'context_compacted')
+        self.assertEqual(event['tool_results'], 1)
+        self.assertLess(event['after_chars'], event['before_chars'])
+
     @patch("popot_agents.worker.http_harness.request.urlopen")
     def test_logs_provider_progress_without_prompt_or_key(self, urlopen):
         from popot_agents.worker.http_harness import run_http

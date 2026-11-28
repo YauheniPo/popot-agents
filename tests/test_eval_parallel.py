@@ -112,8 +112,9 @@ class ParallelEvalTests(unittest.TestCase):
                 patch('evals.matrix.wait', side_effect=interrupt), \
                 patch('evals.matrix._cancel', side_effect=cancel):
             output = Path(tmp) / 'matrix'
+            settings = configuration()
             with self.assertRaises(KeyboardInterrupt):
-                run(output, configuration())
+                run(output, settings)
             result = json.loads((output / 'matrix.json').read_text())
         self.assertEqual(finished, {'a', 'b'})
         self.assertEqual(result['status'], 'cancelled')
@@ -182,8 +183,9 @@ class ParallelEvalTests(unittest.TestCase):
                 patch('evals.matrix.subprocess.run', side_effect=launch), \
                 patch('evals.metrics.publish_comparison', return_value={'ok': True}):
             output = Path(tmp) / 'matrix'
+            settings = configuration()
             with self.assertRaises(subprocess.CalledProcessError):
-                run(output, configuration())
+                run(output, settings)
             result = json.loads((output / 'matrix.json').read_text())
         self.assertEqual(result['status'], 'failed')
         self.assertEqual(set(result['runs']), {'a', 'c'})

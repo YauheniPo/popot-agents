@@ -66,6 +66,42 @@ def dashboard():
         '-1': {'text': 'ХУЖЕ', 'color': 'red'}, '0': {'text': 'БЕЗ ИЗМЕНЕНИЙ', 'color': 'text'},
         '1': {'text': 'ЛУЧШЕ', 'color': 'green'}, '2': {'text': 'КОМПРОМИСС', 'color': 'yellow'},
         '3': {'text': 'НЕДОСТАТОЧНО ДАННЫХ', 'color': 'text'}}}]
+    metric_panels = _metric_panels(panel, selected, paired)
+    panels.append({'id': len(panels) + 1, 'title': 'Параметры экспериментов', 'type': 'table',
+        'datasource': datasource,
+        'targets': [{'refId': 'A', 'expr': names(selected + ',phoenix_url!=""'),
+                     'instant': True, 'format': 'table'}],
+        'fieldConfig': {'defaults': {}, 'overrides': [{'matcher': {'id': 'byName', 'options': 'phoenix_url'},
+            'properties': [{'id': 'links', 'value': [{'title': 'Открыть Phoenix', 'url': '${__value.raw}', 'targetBlank': True}]}]}]},
+        'transformations': [{'id': 'organize', 'options': {'excludeByName': {'Time': True, 'Value': True, 'experiment': True},
+            'indexByName': {'display_name': 0, 'model': 1, 'harness': 2, 'parallel_models': 3,
+                            'parameters': 4, 'source_revision': 5},
+            'renameByName': {'parallel_models': 'Параллельных моделей'}}}]})
+    layout = _layout(panels, metric_panels)
+    experiments = names(scope)
+    baselines = (experiments + ' and on(series,experiment) label_replace('
+                 f'last_over_time(popot_eval_comparison{{{scope},metric="comparable"}}[$__range]),'
+                 '"experiment","$1","baseline","(.+)")')
+    suites = ('max by(series,series_display_name) (last_over_time(popot_eval_info{series_display_name!=""}[$__range])) '
+              'or on(series) label_replace(max by(series) (last_over_time(popot_eval_progress[$__range])), '
+              '"series_display_name","popot-harness-local-$1","series","(.{12}).*")')
+    return {'uid': 'popot-evals', 'title': 'Popot Evals — сравнение моделей и параметров',
+            'schemaVersion': 39, 'version': 1, 'refresh': '15s', 'timezone': 'utc',
+            'tags': ['popot', 'evals'], 'time': {'from': 'now-7d', 'to': 'now'},
+            'templating': {'list': [
+                {'name': name, 'label': label, 'type': 'query', 'datasource': datasource,
+                 'query': f'query_result({query})', 'refresh': 2, 'multi': multi, 'includeAll': multi,
+                 'regex': ('/series_display_name="(?<text>[^"]+)|series="(?<value>[^"]+)/g' if name == 'series' else
+                           '/display_name="(?<text>[^"]+)|experiment="(?<value>[^"]+)/g'),
+                 'allValue': '.*' if multi else None}
+                for name, label, query, multi in [
+                    ('series', 'Набор задач', suites, False),
+                    ('experiment', 'Эксперименты', experiments, True),
+                    ('baseline', 'Baseline', baselines, False)]]},
+            'panels': layout}
+
+
+def _metric_panels(panel, selected, paired):
     metric_panels = {}
     for name, (direction, label, unit) in METRICS.items():
         raw = panel(label + {'MAXIMIZE': ': больше — лучше ↑', 'MINIMIZE': ': меньше — лучше ↓',
@@ -90,16 +126,10 @@ def dashboard():
                                     'вместе с качеством результата.')
             if name == 'total_tokens':
                 delta['description'] += ' Пример: baseline 1000, эксперимент 800 → Δ улучшения +200.'
-    panels.append({'id': len(panels) + 1, 'title': 'Параметры экспериментов', 'type': 'table',
-        'datasource': datasource,
-        'targets': [{'refId': 'A', 'expr': names(selected + ',phoenix_url!=""'),
-                     'instant': True, 'format': 'table'}],
-        'fieldConfig': {'defaults': {}, 'overrides': [{'matcher': {'id': 'byName', 'options': 'phoenix_url'},
-            'properties': [{'id': 'links', 'value': [{'title': 'Открыть Phoenix', 'url': '${__value.raw}', 'targetBlank': True}]}]}]},
-        'transformations': [{'id': 'organize', 'options': {'excludeByName': {'Time': True, 'Value': True, 'experiment': True},
-            'indexByName': {'display_name': 0, 'model': 1, 'harness': 2, 'parallel_models': 3,
-                            'parameters': 4, 'source_revision': 5},
-            'renameByName': {'parallel_models': 'Параллельных моделей'}}}]})
+    return metric_panels
+
+
+def _layout(panels, metric_panels):
     sections = [('Обзор запуска', [panels[1:4], panels[4:6]])]
     for title, metrics in [
         ('Качество результата', ['objective_score', 'functional_success', 'false_completion']),
@@ -125,24 +155,4 @@ def dashboard():
                 item['gridPos'] = {'x': column * width, 'y': y, 'w': width, 'h': height}
                 layout.append(item)
             y += height
-    experiments = names(scope)
-    baselines = (experiments + ' and on(series,experiment) label_replace('
-                 f'last_over_time(popot_eval_comparison{{{scope},metric="comparable"}}[$__range]),'
-                 '"experiment","$1","baseline","(.+)")')
-    suites = ('max by(series,series_display_name) (last_over_time(popot_eval_info{series_display_name!=""}[$__range])) '
-              'or on(series) label_replace(max by(series) (last_over_time(popot_eval_progress[$__range])), '
-              '"series_display_name","popot-harness-local-$1","series","(.{12}).*")')
-    return {'uid': 'popot-evals', 'title': 'Popot Evals — сравнение моделей и параметров',
-            'schemaVersion': 39, 'version': 1, 'refresh': '15s', 'timezone': 'utc',
-            'tags': ['popot', 'evals'], 'time': {'from': 'now-7d', 'to': 'now'},
-            'templating': {'list': [
-                {'name': name, 'label': label, 'type': 'query', 'datasource': datasource,
-                 'query': query, 'refresh': 2, 'multi': multi, 'includeAll': multi,
-                 'regex': ('/series_display_name="(?<text>[^"]+)|series="(?<value>[^"]+)/g' if name == 'series' else
-                           '/display_name="(?<text>[^"]+)|experiment="(?<value>[^"]+)/g'),
-                 'allValue': '.*' if multi else None}
-                for name, label, query, multi in [
-                    ('series', 'Набор задач', 'query_result(' + suites + ')', False),
-                    ('experiment', 'Эксперименты', 'query_result(' + experiments + ')', True),
-                    ('baseline', 'Baseline', 'query_result(' + baselines + ')', False)]]},
-            'panels': layout}
+    return layout

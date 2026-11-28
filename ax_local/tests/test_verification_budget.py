@@ -210,7 +210,7 @@ def test_soft_cutoff_returns_resumable_checkpoint_through_real_child_execution(h
         job = Job('d' * 16, config, 'prepare change', run, started + 3480)
         helper.service.jobs[job.session_id] = job
         with patch.object(delegation_tests.FakeChat, 'send', send), \
-             patch.object(delegation_tests.FakeChat, 'get_checkpoint', lambda _: checkpoint, create=True), \
+             patch.object(delegation_tests.FakeChat, 'get_checkpoint', return_value=checkpoint, create=True), \
              patch('time.monotonic', side_effect=lambda: clock[0]):
             helper.service._execute(job)
         saved = helper.store.get(job.session_id)['roleConfig']['_ax_delegation']

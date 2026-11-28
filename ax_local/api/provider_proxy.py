@@ -88,6 +88,16 @@ def authorized_provider(routes: dict[str, Provider], authorization: str) -> Prov
     return None
 
 
+def _observe_http_error(error_observer, exc):
+    if error_observer:
+        try:
+            captured = exc.read(65537)
+            observe(error_observer, {'status': exc.code, 'body': captured[:65536].decode('utf-8', errors='replace'),
+                                     'truncated': len(captured) > 65536})
+        except OSError as failure:
+            observe(error_observer, {'status': exc.code, 'error_type': type(failure).__name__})
+
+
 def dispatch_request(routes: dict[str, Provider], path: str,
                      authorization: str, body: bytes, *, correlation=None, error_observer=None) -> tuple[int, bytes]:
     if path != "/v1/chat/completions":
@@ -113,27 +123,25 @@ def dispatch_request(routes: dict[str, Provider], path: str,
                 return 502, b'{}'
             return response.status, answer
     except error.HTTPError as exc:
-        if error_observer:
-            try:
-                captured = exc.read(65537)
-                observe(error_observer, {'status': exc.code, 'body': captured[:65536].decode('utf-8', errors='replace'),
-                                         'truncated': len(captured) > 65536})
-            except OSError as failure:
-                observe(error_observer, {'status': exc.code, 'error_type': type(failure).__name__})
+        _observe_http_error(error_observer, exc)
         exc.close()
         return exc.code, b'{}'
     except (error.URLError, TimeoutError, OSError) as exc:
-        if error_observer:
-            observe(error_observer, {'error_type': type(exc).__name__, 'reason': str(exc)})
-        timed_out = isinstance(exc, TimeoutError) or (
-            isinstance(exc, error.URLError) and isinstance(exc.reason, TimeoutError))
-        print(json.dumps({
-            "event": "model_upstream_timeout" if timed_out else "model_upstream_error",
-            "provider": selected.name, "model": selected.model,
-            "elapsed_seconds": round(time.monotonic() - started_at, 1),
-            "timeout_seconds": timeout,
-        }), file=sys.stderr, flush=True)
-        return (504 if timed_out else 502), b'{}'
+        return _transport_failure(selected, exc, timeout, started_at, error_observer)
+
+
+def _transport_failure(selected, exc, timeout, started_at, error_observer):
+    if error_observer:
+        observe(error_observer, {'error_type': type(exc).__name__, 'reason': str(exc)})
+    timed_out = isinstance(exc, TimeoutError) or (
+        isinstance(exc, error.URLError) and isinstance(exc.reason, TimeoutError))
+    print(json.dumps({
+        "event": "model_upstream_timeout" if timed_out else "model_upstream_error",
+        "provider": selected.name, "model": selected.model,
+        "elapsed_seconds": round(time.monotonic() - started_at, 1),
+        "timeout_seconds": timeout,
+    }), file=sys.stderr, flush=True)
+    return (504 if timed_out else 502), b'{}'
 
 
 def start_proxy(routes: dict[str, Provider], host: str = "0.0.0.0",
