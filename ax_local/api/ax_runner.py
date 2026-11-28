@@ -361,6 +361,21 @@ class AxAgentRunner:
                     reason = fields[2]
         return phase, reason
 
+    def _capacity_unavailable(self, task_name, timeout):
+        result = self._run('describe', 'task', task_name, timeout=timeout, allow_failure=True)
+        if result.returncode:
+            return False
+        conditions = False
+        for line in result.stdout.splitlines():
+            if line == 'Conditions:':
+                conditions = True
+            elif conditions:
+                fields = line.split(maxsplit=3)
+                if len(fields) == 4 and fields[:3] == ['Ready', 'False', 'ActorResumeFailed']:
+                    return ('code = ResourceExhausted' in fields[3]
+                            and 'no free workers available' in fields[3])
+        return False
+
     def _reject_ungranted_delegation(self, chat_id: str, role_config: dict | None) -> None:
         if (role_config or {}).get('_ax_delegation') and self.delegation \
                 and chat_id not in self.delegation.jobs:
@@ -465,6 +480,7 @@ class AxAgentRunner:
         last_phase = None
         last_reason = None
         last_report = None
+        capacity_retry_at, capacity_attempt = 0, 0
         while True:
             try:
                 if chat.is_alive(timeout_seconds=remaining(AX_CONFIG["probe_timeout_seconds"])):
@@ -483,6 +499,23 @@ class AxAgentRunner:
                 last_report = report
             if phase:
                 last_phase, last_reason = phase, reason
+            if phase == 'Failed' and reason == 'ActorResumeFailed':
+                if time.monotonic() >= deadline:
+                    break
+                if self._capacity_unavailable(task_name, remaining(min(
+                        AX_CONFIG['probe_timeout_seconds'], deadline-time.monotonic()))):
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    if now >= capacity_retry_at:
+                        # Resume was rejected before allocation; no agent message
+                        # has been submitted, so retry the same Task and deadline.
+                        self._run('resume', 'task', task_name, timeout=remaining(min(
+                            AX_CONFIG['cli_timeout_seconds'], deadline-now)))
+                        capacity_attempt += 1
+                        capacity_retry_at = now + 1
+                        emit_progress('worker_capacity_wait', task=task_name, attempt=capacity_attempt)
+                    phase = 'Pending'
             if phase in {"Failed", "Completed", "Terminating"}:
                 if not resuming:
                     chat.close()

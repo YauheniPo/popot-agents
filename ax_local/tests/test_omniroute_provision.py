@@ -17,6 +17,20 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class ManagedConfigTests(unittest.TestCase):
+    def test_gateway_enables_credential_redaction(self):
+        root = Path(__file__).resolve().parents[2]
+        config = json.loads((root / 'config/omniroute/settings.json').read_text())
+        self.assertIs(config['settings']['credentialRedactionEnabled'], True)
+
+    def test_restricted_key_covers_each_managed_eval_variant(self):
+        root = Path(__file__).resolve().parents[2]
+        settings = json.loads((root / 'config/omniroute/settings.json').read_text())
+        combos = json.loads((root / 'config/omniroute/combos.json').read_text())
+        allowed = {target['model'] for combo in combos.values() for target in combo['models']}
+        allowed.update(settings['apiKey']['permissions'].get('allowedModels', []))
+        variants = json.loads((root / 'evals/config.json').read_text())['x-evals']['variants']
+        self.assertEqual({variant['model'] for variant in variants} - allowed, set())
+
     def test_only_two_distinct_managed_routes_remain(self):
         root = Path(__file__).resolve().parents[2]
         combos = json.loads((root / 'config/omniroute/combos.json').read_text())
@@ -151,6 +165,26 @@ class ProvisionTests(unittest.TestCase):
 
     def apply(self):
         return provision(self.gateway, self.config, self.combos, self.env)
+
+    def test_explicit_direct_models_extend_allowlist_without_changing_fallbacks(self):
+        self.config['apiKey']['permissions']['allowedModels'] = ['nvidia/eval-only', 'nvidia/backup']
+        self.apply()
+        key = self.gateway.state['apiKeys'][0]
+        self.assertEqual(key['allowedModels'], ['openrouter/code:free', 'nvidia/backup', 'nvidia/eval-only'])
+        self.assertEqual([x['model'] for x in self.gateway.state['combos'][0]['models']],
+                         ['openrouter/code:free', 'nvidia/backup'])
+        self.assertEqual(key['modelAccessMode'], 'restricted')
+        writes = len(self.gateway.writes)
+        self.apply()
+        self.assertEqual(len(self.gateway.writes), writes)
+
+    def test_invalid_direct_model_fails_before_mutation(self):
+        for invalid in ('*', ['*'], ['unknown/model'], ['nvidia/'], [None]):
+            with self.subTest(invalid=invalid):
+                self.config['apiKey']['permissions']['allowedModels'] = invalid
+                with self.assertRaises(ProvisionError):
+                    self.apply()
+                self.assertEqual(self.gateway.writes, [])
 
     def test_fresh_gateway_and_repeated_apply_preserve_order_policy_and_ids(self):
         self.apply()

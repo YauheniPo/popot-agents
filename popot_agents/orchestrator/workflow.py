@@ -110,7 +110,7 @@ class WorkflowRun:
         """Continue the run unless progress, time or the turn budget ran out."""
         material = _progress_material(checkpoint, outcome, self.meta['authorization'])
         fingerprint = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
-        self.meta['no_progress'] = self.meta['no_progress'] + 1 if fingerprint == self.meta.get('fingerprint') else 1
+        self.meta['no_progress'] = self.meta['no_progress'] + 1 if fingerprint == self.meta.get('fingerprint') else 0
         self.meta['fingerprint'] = fingerprint
         if self.meta['no_progress'] >= self.policy['max_no_progress']:
             return self.stop(result, 'workflow_no_progress')

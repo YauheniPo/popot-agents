@@ -6,10 +6,10 @@
     "resources": {
       "requests": {
         "cpu": "100m",
-        "memory": "128Mi"
+        "memory": "512Mi"
       },
       "limits": {
-        "memory": "512Mi"
+        "memory": "2Gi"
       }
     }
   },

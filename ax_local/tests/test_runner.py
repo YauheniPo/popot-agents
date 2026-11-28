@@ -17,6 +17,77 @@ from popot_agents.runtime_config import RUNTIME
 
 
 class AxRunnerTests(unittest.TestCase):
+    def test_missing_capacity_condition_does_not_retry(self):
+        for status, stdout in [(1, ''), (0, 'Conditions:\n  Status Unknown'), (0, 'Phase: Failed')]:
+            with self.subTest(status=status, stdout=stdout), patch.object(
+                    self.runner, '_run', return_value=subprocess.CompletedProcess([], status, stdout)):
+                self.assertFalse(self.runner._capacity_unavailable('fixture-task', 1))
+
+    def test_capacity_probe_consuming_the_deadline_never_resumes(self):
+        chat = AxChat(self.runner, 'fixture-task', 30)
+        now = [0]
+        def delayed_probe(*args):
+            now[0] = 5
+            return True
+        with patch.object(chat, 'is_alive', return_value=False), patch.object(chat, 'close'), \
+                patch.object(self.runner, 'task_status', return_value=('Failed', 'ActorResumeFailed')), \
+                patch.object(self.runner, '_capacity_unavailable', side_effect=delayed_probe), \
+                patch.object(self.runner, '_run') as command, patch('time.monotonic', side_effect=lambda: now[0]), \
+                self.assertRaises(AgentRunError):
+            self.runner._wait_for_chat(chat, lambda limit: limit, 5)
+        command.assert_not_called()
+
+    def test_capacity_race_retries_same_task_before_any_message_is_sent(self):
+        chat = AxChat(self.runner, 'fixture-task', 30)
+        description = subprocess.CompletedProcess([], 0,
+            'Phase: Failed\nConditions:\n  Ready False ActorResumeFailed rpc error: code = ResourceExhausted desc = no free workers available\n')
+        with patch.object(chat, 'is_alive', side_effect=[False, False, True]), \
+                patch.object(self.runner, 'task_status', side_effect=[('Failed', 'ActorResumeFailed'), ('Running', 'TaskRunning')]), \
+                patch.object(self.runner, '_run', return_value=description) as command, \
+                patch.object(chat, 'close') as close, \
+                patch('ax_local.api.ax_runner.time.sleep'):
+            result = self.runner._wait_for_chat(chat, lambda limit: limit, None)
+        self.assertIs(result, chat)
+        self.assertEqual([c.args[:3] for c in command.call_args_list],
+                         [('describe', 'task', 'fixture-task'), ('resume', 'task', 'fixture-task')])
+        close.assert_not_called()
+
+    def test_capacity_polling_waits_before_retrying_again(self):
+        chat = AxChat(self.runner, 'fixture-task', 30)
+        with patch.object(chat, 'is_alive', side_effect=[False, False, True]), \
+                patch.object(self.runner, 'task_status', return_value=('Failed', 'ActorResumeFailed')), \
+                patch.object(self.runner, '_capacity_unavailable', return_value=True), patch.object(self.runner, '_run') as command, \
+                patch('time.monotonic', return_value=1), patch('time.sleep'):
+            self.assertIs(self.runner._wait_for_chat(chat, lambda limit: limit, 5), chat)
+        self.assertEqual([call.args[:2] for call in command.call_args_list], [('resume', 'task')])
+
+    def test_capacity_retry_keeps_original_startup_deadline(self):
+        chat = AxChat(self.runner, 'fixture-task', 30)
+        clock = [0.0]
+        description = subprocess.CompletedProcess([], 0,
+            'Phase: Failed\nConditions:\n  Ready False ActorResumeFailed rpc error: code = ResourceExhausted desc = no free workers available\n')
+        with patch.object(chat, 'is_alive', return_value=False), \
+                patch.object(self.runner, 'task_status', return_value=('Failed', 'ActorResumeFailed')), \
+                patch.object(self.runner, '_run', return_value=description) as command, \
+                patch.object(chat, 'close'), \
+                patch('ax_local.api.ax_runner.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('ax_local.api.ax_runner.time.sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0]+seconds)), \
+                self.assertRaises(AgentRunError):
+            self.runner._wait_for_chat(chat, lambda limit: min(limit, 3-clock[0]), 3)
+        self.assertLessEqual(clock[0], 3)
+        self.assertGreater(sum(c.args[0]=='resume' for c in command.call_args_list), 0)
+
+    def test_other_resume_failures_are_terminal_and_do_not_repeat_resume(self):
+        chat = AxChat(self.runner, 'fixture-task', 30)
+        description = subprocess.CompletedProcess([], 0,
+            'Phase: Failed\nConditions:\n  Ready False ActorResumeFailed rpc error: code = PermissionDenied desc = unauthorized\n')
+        with patch.object(chat, 'is_alive', return_value=False), \
+                patch.object(self.runner, 'task_status', return_value=('Failed', 'ActorResumeFailed')), \
+                patch.object(self.runner, '_run', return_value=description) as command, \
+                patch.object(chat, 'close'), self.assertRaises(AgentRunError):
+            self.runner._wait_for_chat(chat, lambda limit: limit, None)
+        self.assertEqual([c.args[0] for c in command.call_args_list], ['describe'])
+
     def test_transport_disconnect_recovers_the_same_request_without_resending_work(self):
         failure = self.runner._command_error('ssh', subprocess.CompletedProcess([], 1, '',
             'Error: receiving output stream: rpc error: code = Unavailable desc = EOF, '

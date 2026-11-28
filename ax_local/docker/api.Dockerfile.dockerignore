@@ -8,6 +8,7 @@
 !popot_agents/skills.py
 !popot_agents/prompts.py
 !popot_agents/progress.py
+!popot_agents/telemetry.py
 !skills/
 !skills/**
 !popot_agents/orchestrator/

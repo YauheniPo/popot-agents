@@ -14,7 +14,7 @@
 | [prompts/](prompts/) | Markdown-шаблоны общих инструкций: делегирование, ревью, отчёт, память, Harness2, skills и Holmes |
 | [runtime.json](runtime.json) | Роль MCP по умолчанию (`mcp.default_role`), лимиты координации (`workflow`), общие таймауты, ограничения сообщений/инструментов и доказательств, разрешённые имена env |
 | [../ax_local/config.json](../ax_local/config.json) | Контекст kind, namespace/workers, ресурсы AX Task, прокси и backend сессий |
-| [../evals/config.json](../evals/config.json) | Phoenix, baseline и `x-tracing`: постоянный проект трейсов AX, endpoint, очередь и повторы доставки |
+| [../evals/config.json](../evals/config.json) | Phoenix, общие настройки и варианты `x-evals`; `x-tracing`: постоянный проект трейсов AX, endpoint, очередь и повторы доставки |
 | [../memory/config.json](../memory/config.json) | Сервисы Cognee, UI и шлюза; `x-agent`: recall/capture, summary, журнал и таймауты памяти |
 | [../pyproject.toml](../pyproject.toml) | Версии образов и зависимостей, включая Phoenix, OmniRoute, Cognee, Holmes, Grafana и kube-state-metrics |
 
@@ -27,7 +27,8 @@
 
 Модели выбираются в `.env` через `OMNIROUTE_FREE_MODEL`, `OMNIROUTE_CLOUD_MODEL`,
 `HARNESS2_IMPROVER_MODEL` и `HOLMES_MODEL`.
-`project_operator` и Holmes по умолчанию используют `ax-free`.
+`project_operator` использует `ax-ollama` через `OMNIROUTE_CLOUD_MODEL` и
+параметры модели инженерных ролей. Holmes по умолчанию использует `ax-free`.
 `tech_lead` использует `omniroute_cloud`, как остальные инженерные роли.
 Он делегирует доступ к репозиторию и выполнение команд специалистам;
 его собственные инструменты и разрешения остаются ограниченными координацией.
@@ -68,13 +69,7 @@
 `x-tracing` в том же JSON управляет постоянным экспортом всех рабочих ролей
 в отдельный проект. После его изменения пересоберите API/worker через
 `bash ax_local/rebuild-worker.sh`; подробности — в [гайде](../evals/README.md#постоянные-трейсы-ax).
-Email для входа — `admin@localhost`; пароль — значение
-`PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD`. Это initial password: его изменение
-в конфиге не сбрасывает пароль уже существующего пользователя.
-Для прямого чтения Phoenix ролью `project_operator` используется отдельный
-пользователь `VIEWER` и его API key в `PHOENIX_API_KEY`. Этот ключ передаётся
-worker через `env_names`; `PHOENIX_ADMIN_SECRET` служит экспорту в API.
-Встроенный MCP и его инструменты описаны в [AX operations](../ax_local/README.md#project-operator-единая-роль-для-анализа-проекта).
+Код v2 сохраняет LLM/tool payload после маскирования известных секретов. HTTP/MCP скрывают транспортные ключи. OmniRoute использует `credentialRedactionEnabled=true`. Исторические записи сохраняют прежний формат.
 
 ```bash
 bash evals/up.sh

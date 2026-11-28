@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from evals.baseline import evaluate, summarize
+from tests.test_eval_settings import unified_settings
 
 
 def artifact(name, data, *, binary=False):
@@ -18,42 +19,89 @@ def artifact(name, data, *, binary=False):
 
 
 class BaselineTests(unittest.TestCase):
-    def test_cli_defaults_come_from_json_and_explicit_overrides_are_frozen(self):
-        from evals.baseline import load_config, main
+    def test_code_snapshot_hashes_actual_staged_evaluator_sources(self):
+        from evals import baseline
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for name in ('config.json', 'cases.json'):
+                (directory / name).write_bytes((baseline.ROOT / 'evals' / name).read_bytes())
+            staged = directory / 'baseline.py'
+            staged.write_text('# isolated evaluator snapshot\n')
+            with patch('evals.baseline.__file__', str(staged)):
+                config = baseline.frozen_config({}, {}, 'fixture', 'fixture')
+            self.assertEqual(config['source_sha256']['evals/baseline.py'],
+                             hashlib.sha256(staged.read_bytes()).hexdigest())
 
-        settings = load_config()
-        settings.update(model='cloud/from-config', repetitions=3)
+    def test_cancelled_capture_stops_before_another_case_and_closes_server(self):
+        from evals.baseline import main
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch('evals.baseline.start_server') as start, \
+                patch('evals.baseline.call') as call, patch('builtins.print'):
+            directory = Path(tmp)
+            cancel = directory / 'cancel'
+            cancel.touch()
+            start.return_value = (Mock(), Mock(), Mock(), {'evals': {}})
+            with patch('sys.argv', ['baseline', '--output', str(directory / 'run'),
+                                   '--cancel-file', str(cancel)]), self.assertRaises(InterruptedError):
+                main()
+            call.assert_not_called()
+            start.return_value[0].server_close.assert_called_once()
+            self.assertIn('cancelled_at', json.loads((directory / 'run/report.json').read_text()))
+
+    def test_independent_pagination_checks_reject_wrong_types_and_mutation(self):
+        from evals.baseline import PAGINATION_CHECKS
+        source = ('def paginate(items, page, size):\n'
+                  ' if type(page) is not int or type(size) is not int or page <= 0 or size <= 0: raise ValueError()\n'
+                  ' return list(items[(page-1)*size:page*size])\n')
+        namespace = {}
+        exec(source, namespace)
+        exec(PAGINATION_CHECKS, {'ns': namespace})
+        buggy = source.replace('type(page) is not int or type(size) is not int or ', '')
+        namespace = {}
+        exec(buggy, namespace)
+        with self.assertRaises((AssertionError, TypeError)):
+            exec(PAGINATION_CHECKS, {'ns': namespace})
+
+    def test_cli_defaults_come_from_json_and_explicit_overrides_are_frozen(self):
+        from evals.baseline import main
+
+        settings = unified_settings()
+        settings['variants'][0]['model'] = 'cloud/from-config'
+        settings['repetitions'] = 3
         for flags, model, repetitions in [([], 'cloud/from-config', 3),
                                           (['--model', 'cloud/from-cli', '--repetitions', '1'],
-                                           'cloud/from-cli', 1)]:
+                                           'cloud/from-cli', 1),
+                                          (['--parameters', '{"max_tokens":2000}'], 'cloud/from-config', 3)]:
             with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmp, \
                     patch('evals.baseline.SETTINGS', settings), \
                     patch('evals.baseline.start_server') as start, \
                     patch('evals.baseline.call', side_effect=KeyboardInterrupt):
                 output = Path(tmp) / 'run'
-                start.return_value = (Mock(), Mock(), Mock(), {'baseline': {}})
+                start.return_value = (Mock(), Mock(), Mock(), {'evals': {}})
                 with patch('sys.argv', ['baseline', '--output', str(output), *flags]), \
                         patch('builtins.print'), self.assertRaises(KeyboardInterrupt):
                     main()
-                start.assert_called_once_with(output, model)
+                parameters = {'max_tokens': 2000} if '--parameters' in flags else settings['variants'][0]['parameters']
+                start.assert_called_once_with(output, model, parameters=parameters)
                 frozen = json.loads((output / 'config.json').read_text())
-                self.assertEqual(frozen['baseline']['repetitions'], repetitions)
+                self.assertEqual(frozen['evals']['repetitions'], repetitions)
 
     def test_eval_config_validates_model_repetitions_and_workflow_before_startup(self):
-        from evals.baseline import ROOT, load_config
+        from evals.baseline import load_config
 
-        config = json.loads((ROOT / 'evals/config.json').read_text())
-        settings = config['x-baseline']
-        settings.update(model='cloud/another-model', repetitions=3)
+        config = {'x-evals': unified_settings()}
+        settings = config['x-evals']
+        settings['variants'][0]['model'] = 'cloud/another-model'
+        settings['repetitions'] = 3
         settings['workflow'].update(total_seconds=400, turn_seconds=200)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'config.json'
             path.write_text(json.dumps(config))
             self.assertEqual(load_config(path), settings)
-            for key, value in [('model', ''), ('repetitions', True), ('repetitions', 0),
+            for key, value in [('baseline', ''), ('repetitions', True), ('repetitions', 0),
                                ('request_timeout_seconds', 100), ('inspection_timeout_seconds', -1)]:
                 with self.subTest(key=key, value=value):
-                    changed = {**config, 'x-baseline': {**settings, key: value}}
+                    changed = {**config, 'x-evals': {**settings, key: value}}
                     path.write_text(json.dumps(changed))
                     with self.assertRaises(ValueError):
                         load_config(path)
@@ -102,14 +150,31 @@ class BaselineTests(unittest.TestCase):
                     self.assertEqual(memory.context(10), '')
                     memory.finish_session(True)
             self.assertEqual(config['memory_mode'], 'disabled')
-            self.assertEqual(config['baseline']['model'], 'cloud/fixed')
-            self.assertEqual(config['baseline']['workflow'], settings['workflow'])
+            self.assertEqual(config['primary_model'], 'cloud/fixed')
+            self.assertEqual(config['evals']['workflow'], settings['workflow'])
             self.assertIn('evals/config.json', config['source_sha256'])
             for role in config['roles'].values():
                 self.assertEqual(role['coordination'], {key: value for key, value
                                  in settings['workflow'].items() if key != 'max_concurrent'})
             self.assertEqual(memory_client.mock_calls, [])
         self.assertEqual(originals, {p: p.read_bytes() for p in originals})
+
+    def test_explicit_model_parameters_apply_to_all_eval_roles_and_are_frozen(self):
+        from evals.baseline import ROOT, start_server
+        params = {'max_tokens': 4000, 'reasoning_effort': 'low'}
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            image = Path(tmp) / 'worker-image'
+            image.write_text('worker@sha256:test')
+            stack.enter_context(patch.dict('os.environ', {'AX_LOCAL_WORKER_IMAGE_FILE': str(image)}))
+            for target in ('ax_local.api.server.configure_ax_server_tunnel',
+                           'ax_local.api.server.configure_delegation', 'ax_local.api.server.kind_control_plane_host',
+                           'ax_local.api.provider_proxy.network_address_toward', 'ax_local.api.provider_proxy.resolve_provider',
+                           'ax_local.api.provider_proxy.start_proxy', 'ax_local.api.worker_pool.KubernetesWorkerPool',
+                           'ax_local.api.worker_pool.WorkerPoolController', 'ax_local.api.ax_runner.AxAgentRunner',
+                           'ax_local.api.delegation.start_a2a_server', 'popot_agents.orchestrator.main.create_server'):
+                stack.enter_context(patch(target))
+            _, _, _, frozen = start_server(Path(tmp), 'cloud/model', parameters=params)
+            self.assertTrue(all(p['model_parameters'] == params for p in frozen['profiles'].values()))
 
     def test_failed_model_attempt_keeps_known_usage_without_claiming_complete_total(self):
         from evals.report import enrich
@@ -157,7 +222,7 @@ class BaselineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / 'run'
             with patch('sys.argv', ['baseline', '--output', str(output), '--case', 'honest_blocker']), \
-                    patch('evals.baseline.start_server', return_value=(Mock(), Mock(), Mock(), {'baseline': {}})), \
+                    patch('evals.baseline.start_server', return_value=(Mock(), Mock(), Mock(), {'evals': {}})), \
                     patch('evals.baseline.call', side_effect=OSError('stream lost')), \
                     self.assertRaisesRegex(RuntimeError, 'Baseline capture failed'):
                 main()

@@ -333,8 +333,11 @@ class HttpHarnessTests(unittest.TestCase):
         events = [json.loads(line) for line in output.getvalue().splitlines()
                   if line.startswith("{")]
         self.assertEqual([event["event"] for event in events], [
+            "harness_started",
             "model_request", "model_response", "assistant_message", "tool_call",
             "tool_result", "model_request", "model_response", "assistant_answer"])
+        started = events.pop(0)
+        self.assertRegex(started['harness_sha256'], r'^[0-9a-f]{64}$')
         self.assertEqual(events[0]["available_tools"], ["calculate"])
         self.assertEqual(events[1]["tool_calls"], 1)
         self.assertEqual(events[2]["content"], "Проверю выражение.")
@@ -346,7 +349,7 @@ class HttpHarnessTests(unittest.TestCase):
 
     @patch("popot_agents.worker.http_harness.request.urlopen")
     @patch("popot_agents.worker.http_harness.execute_tool", return_value="private-output")
-    def test_tool_trace_omits_shell_command_and_output(self, execute, urlopen):
+    def test_tool_trace_captures_shell_command_and_output(self, execute, urlopen):
         from popot_agents.worker.http_harness import run_http
 
         first = {"choices": [{"message": {"content": None, "tool_calls": [{
@@ -366,8 +369,10 @@ class HttpHarnessTests(unittest.TestCase):
         self.assertEqual(call["name"], "bash")
         self.assertIn("command_chars", call["arguments"])
         self.assertIn("output_chars", result)
-        self.assertNotIn("private-command", output.getvalue())
-        self.assertNotIn("private-output", output.getvalue())
+        self.assertEqual(call['input'], {'command': 'echo private-command'})
+        self.assertEqual(result['output'], 'private-output')
+        self.assertFalse(call['input_truncated'])
+        self.assertFalse(result['output_truncated'])
 
     @patch("popot_agents.worker.http_harness.request.urlopen")
     def test_tool_trace_omits_unexpected_secret_argument(self, urlopen):
@@ -384,6 +389,23 @@ class HttpHarnessTests(unittest.TestCase):
             answer = run_http("calculate", {"tools": ["calculate"], "max_tool_rounds": 2})
             self.assertIn('Tool input requires reconciliation', answer)
         self.assertNotIn("private-token", output.getvalue())
+
+    def test_compaction_emits_the_observed_context_size_change(self):
+        from popot_agents.worker import http_harness as harness
+        from popot_agents.progress import observe_progress
+        events = []
+        def compact(messages, *args, **kwargs):
+            messages[-1]['content'] = 'short fixture receipt'
+            return 1
+        body = io.BytesIO(b'{"choices":[{"message":{"content":"ok"}}]}')
+        with patch.dict(os.environ, {'HARNESS_BASE_URL': 'http://example.test/v1', 'HARNESS_MODEL': 'test'}), \
+                patch.object(harness, 'compact_tool_results', side_effect=compact), \
+                patch.object(harness.request, 'urlopen', return_value=body), \
+                observe_progress(lambda message: events.append(json.loads(message))):
+            self.assertEqual(harness.run_http('large prior output ' * 100), 'ok')
+        event = next(item for item in events if item['event'] == 'context_compacted')
+        self.assertEqual(event['tool_results'], 1)
+        self.assertLess(event['after_chars'], event['before_chars'])
 
     @patch("popot_agents.worker.http_harness.request.urlopen")
     def test_logs_provider_progress_without_prompt_or_key(self, urlopen):

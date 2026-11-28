@@ -8,6 +8,7 @@ from statistics import median
 
 from evals import save
 from evals.baseline import evaluate, summarize
+from evals.metrics import measure, publish_report
 from popot_agents.artifacts import validate_artifacts
 
 
@@ -40,13 +41,23 @@ def enrich(report, calls, directory, config):
         row['usage_complete'] = (bool(own) and all(c['tokens'] is not None for c in own)
                                  and len(own) == counts.get('model_request', 0) == counts.get('model_response', 0)
                                  and not any(counts.get(k) for k in ('model_http_error', 'model_timeout', 'model_transport_error')))
+        requests = [e for e in events if e.get('event') == 'model_request']
+        requests_matched = len(own) == len(requests)
+        if requests and all(e.get('request_id') for e in requests):
+            expected = {(e.get('agent_session_id'), e['request_id']) for e in requests}
+            captured = {(c.get('session_id'), c.get('request_id')) for c in own}
+            requests_matched = expected == captured
+            row['usage_complete'] = bool(own) and requests_matched and all(c['tokens'] is not None for c in own)
+            row['usage_audit'] = {'method': 'request_id', 'expected_requests': len(expected),
+                                 'captured_requests': len(captured), 'missing_requests': len(expected - captured)}
         row['tokens'] = row['tokens_known'] if row['usage_complete'] else None
         model = config['primary_model']
         provider, _, short_model = model.partition('/')
-        row['model_pin_verified'] = bool(own) and all(
+        row['model_pin_verified'] = bool(own) and requests_matched and all(
             c.get('requested_model') == model and c.get('provider') == provider and
             (c.get('model') == short_model or c.get('error')) for c in own)
         row.update(evaluate(row['case_id'], row['outcome'], events, row['observed']))
+        row['metrics'] = measure(row, events)
         save(directory / (Path(row['trace_file']).stem + '.json'), row)
     report['results'] = measured
     report['summary'] = summarize(measured)
@@ -116,3 +127,6 @@ if __name__ == '__main__':
                     json.loads(args.gateway.read_text()), args.directory, config)
     save(args.directory / 'report.json', report)
     (args.directory / 'summary.md').write_text(render(report, config))
+    if config.get('monitoring_enabled'):
+        report['monitoring'] = publish_report(report, config)
+        save(args.directory / 'report.json', report)

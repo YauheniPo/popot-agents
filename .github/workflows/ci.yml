@@ -17,7 +17,7 @@ jobs:
   tests:
     name: Python, AX and graph tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     outputs:
       reports_artifact_id: ${{ steps.upload-reports.outputs.artifact-id }}
     services:
@@ -68,6 +68,14 @@ jobs:
             --test-reporter=spec --test-reporter-destination=stdout \
             --test-reporter=junit --test-reporter-destination=reports/node.xml \
             --test-reporter=lcov --test-reporter-destination=reports/graph.lcov tests/*.mjs
+      - name: Test template cleanup against pinned Substrate
+        run: |
+          pin=$(python -c 'from ax_local.cluster.substrate_api import PIN; print(PIN)')
+          checkout="$RUNNER_TEMP/substrate"
+          git init --quiet "$checkout"
+          git -C "$checkout" fetch --depth=1 https://github.com/agent-substrate/substrate.git "$pin"
+          git -C "$checkout" checkout --quiet --detach FETCH_HEAD
+          bash .github/scripts/template-coverage.sh "$checkout"
       - name: Coverage reports
         if: ${{ !cancelled() && steps.python-tests.outcome != 'skipped' }}
         run: |
@@ -114,7 +122,7 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           use_oidc: true
-          files: reports/coverage.xml,reports/graph.lcov
+          files: reports/coverage.xml,reports/graph.lcov,reports/template-coverage.out
           disable_search: true
           disable_telem: true
           fail_ci_if_error: true

@@ -10,6 +10,7 @@ import shutil
 import time
 import uuid
 from copy import deepcopy
+from pathlib import Path
 from urllib import error, request
 from urllib.parse import urlsplit
 
@@ -17,6 +18,7 @@ from popot_agents.prompts import render_prompt
 from popot_agents.runtime_config import MEMORY, RUNTIME, validate_model_parameters
 from popot_agents.progress import trace_event, trace_output, redact_text
 from popot_agents.skills import prepare_role_config
+from popot_agents.telemetry import payload_attributes, safe_value, sensitive_values, VERSION
 from popot_agents.tools import TOOL_SCHEMAS, ToolExecutionError, ToolInputError, execute_tool, save_tool_output, safe_tool_env, export_artifacts, read_repository_context
 from popot_agents.artifacts import ArtifactError, MAX_ARTIFACTS, validate_artifacts
 from popot_agents.work_evidence import observe_tool_result, retain_evidence, reusable_checks
@@ -61,6 +63,13 @@ def _mentions_github_url(messages) -> bool:
 
 def _trace(event: str, **fields) -> None:
     trace_event(event, **fields)
+
+
+def _trace_payload(side, value, extra_secrets=()):
+    attrs = payload_attributes(side, value, extra_secrets=extra_secrets)
+    return {side: json.loads(attrs[side + '.value']),
+            **{key.removeprefix('popot.').replace('.', '_'): value
+               for key, value in attrs.items() if key.startswith('popot.' + side + '.')}}
 
 
 def _pending_interventions() -> list[dict]:
@@ -128,7 +137,13 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
         if request_timeout < RUNTIME['timeouts']['min_turn_seconds']:
             raise _ModelRequestError('Insufficient model request budget', retryable=True)
         started_at = time.monotonic()
+        request_id = uuid.uuid4().hex
+        # Correlation must survive the same redaction applied to trace events.
+        while redact_text(request_id) != request_id:
+            request_id = uuid.uuid4().hex
+        call.add_header('X-Popot-Request-Id', request_id)
         _trace("model_request", round=round_number, attempt=attempt, message_count=len(messages),
+               request_id=request_id,
                timeout_seconds=round(request_timeout, 3),
                available_tools=[schema["function"]["name"] for schema in schemas])
         trace_output(f"LLM request started round={round_number} attempt={attempt}")
@@ -141,26 +156,32 @@ def _model_request(call, *, round_number, messages, schemas, remaining_seconds, 
             exc.close()
             failure = f"model endpoint returned HTTP {code}"
             retryable = code in {502, 503, 504}
-            _trace("model_http_error", round=round_number, attempt=attempt, status=code)
+            _trace("model_http_error", round=round_number, attempt=attempt, status=code, request_id=request_id)
         except ConnectionResetError:
             failure = "model connection reset before a complete response"
             retryable = reset = True
             _trace("model_transport_error", round=round_number, attempt=attempt,
-                   error_type="ConnectionResetError")
+                   error_type="ConnectionResetError", request_id=request_id)
         except (TimeoutError, error.URLError, ConnectionError) as exc:
             if isinstance(exc, TimeoutError) or isinstance(getattr(exc, 'reason', None), TimeoutError):
                 elapsed = time.monotonic() - started_at
                 _trace("model_timeout", round=round_number, attempt=attempt,
-                       elapsed_seconds=round(elapsed, 1), timeout_seconds=round(request_timeout, 3))
+                       elapsed_seconds=round(elapsed, 1), timeout_seconds=round(request_timeout, 3), request_id=request_id)
                 failure = (f"model request timed out (round={round_number}, "
                            f"socket timeout={request_timeout:.1f}s, elapsed={elapsed:.1f}s, "
                            f"attempt={attempt}/{configured_attempts})")
                 retryable = True
             else:
+                _trace('model_transport_error', round=round_number, attempt=attempt,
+                       request_id=request_id, error_type=type(exc).__name__)
                 failure = "model endpoint is unreachable"
                 retryable = not isinstance(getattr(exc, 'reason', exc), ssl.SSLError)
         else:
             trace_output(f"LLM response received after {time.monotonic() - started_at:.1f}s")
+            choices = result.get('choices') or []
+            message = (choices[0].get('message') or {}) if choices else {}
+            _trace('model_response', round=round_number, attempt=attempt, request_id=request_id,
+                   tool_calls=len(message.get('tool_calls') or []))
             return result
         if retryable and not final:
             remaining_seconds()  # Preserve the reserved final-answer budget, even on the last attempt.
@@ -256,6 +277,17 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         raise ValueError("HARNESS_TURN_TIMEOUT_SECONDS must be positive")
     if deadline is None:
         deadline = time.monotonic() + turn_timeout
+    _trace('harness_started', telemetry_version=VERSION,
+           harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+           input_sha256=payload_attributes('input', task)['popot.input.sha256'],
+           role_sha256=payload_attributes('role', role_config or {})['popot.role.sha256'],
+           config=safe_value({
+               'role': (role_config or {}).get('_ax_role'),
+               'tools': (role_config or {}).get('tools', []),
+               'permissions': (role_config or {}).get('permissions', {}),
+               'coordination': (role_config or {}).get('coordination', {}),
+               'turn_timeout_seconds': turn_timeout, 'runtime': RUNTIME,
+               'resuming': bool(state), 'run_id': (run_context or {}).get('run_id')}))
 
     def remaining_seconds() -> float:
         remaining = deadline - time.monotonic()
@@ -803,11 +835,14 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 user_updates[item['id']] = item['message']
                 included_intervention_ids.add(item['id'])
                 _trace('intervention_included', intervention_id=item['id'])
+        before_chars = len(json.dumps(messages, ensure_ascii=False))
         changed = compact_tool_results(messages, save_tool_output,
             budget_chars=RUNTIME['model']['context_tool_budget_chars'],
             recent_results=RUNTIME['model']['context_recent_tool_results'], receipts=tool_evidence)
         if changed:
-            _trace('context_compacted', tool_results=changed)
+            _trace('context_compacted', tool_results=changed, before_chars=before_chars,
+                   after_chars=len(json.dumps(messages, ensure_ascii=False)),
+                   budget_chars=RUNTIME['model']['context_tool_budget_chars'])
         request_messages = messages
         if review_progress and review_progress.snapshot and not final:
             request_messages = [*messages, {'role': 'system', 'content': review_progress.focus()}]
@@ -894,7 +929,6 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError("model endpoint returned no answer") from exc
         calls = message.get("tool_calls") or []
-        _trace("model_response", round=round_number, tool_calls=len(calls))
         reasoning_fields = {name: message[name] for name in
                             ('reasoning', 'reasoning_content', 'reasoning_details') if message.get(name)}
         if reasoning_fields:
@@ -951,7 +985,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                         raise ToolInputError('Tool not executed: time reserved for the final answer.')
                     _trace("tool_call", round=round_number, name=name,
                            call_id=tool_call["id"],
-                           arguments=_trace_arguments(name, arguments))
+                           arguments=_trace_arguments(name, arguments),
+                           **_trace_payload('input', arguments))
                     if name in extra_tools:
                         if name == 'await_tasks':
                             if requested_wait:
@@ -1145,10 +1180,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                 except (ToolInputError, ToolExecutionError, mcp_client.MCPToolError) as exc:
                     _trace("tool_error", round=round_number, name=name, call_id=call_id,
                            error_type=type(exc).__name__,
+                           **_trace_payload('input', arguments),
                            arguments=(_trace_arguments(name, arguments) if isinstance(arguments, dict)
                                       else {'argument_type': type(arguments).__name__}),
                            error=('bash execution failed; details retained in tool result'
-                                  if name == 'bash' and isinstance(exc, ToolExecutionError) else str(exc)),
+                                  if name == 'bash' and isinstance(exc, ToolExecutionError)
+                                  else safe_value(str(exc), sensitive_values(arguments))),
                            recoverable=True)
                     output = json.dumps({
                         "isError": True, "error": str(exc),
@@ -1167,10 +1204,12 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                             structural_blocker = str(exc)
                 except (KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
                     _trace("tool_error", round=round_number, name=name,
+                           call_id=call_id,
                            error_type=type(exc).__name__)
                     raise RuntimeError(f"invalid tool call: {exc}") from exc
                 except Exception as exc:
                     _trace("tool_error", round=round_number, name=name,
+                           call_id=call_id,
                            error_type=type(exc).__name__)
                     raise
                 if delegation_key is not None:
@@ -1191,10 +1230,8 @@ def _run_http(task: str | list[dict[str, str]], role_config: dict | None = None,
                                 for item in completed_child['outcome']['evidence'])):
                     delegated_work_finished = True
                     _trace('delegated_work_completed', session_id=completed_child['sessionId'])
-                result_fields = ({"output": output} if name in {"calculate", "utc_time"}
-                                 else {"output_chars": len(output)})
-                if role_config.get('_ax_harness2_probe'):
-                    result_fields = {'output': output[:4000], 'output_chars': len(output)}
+                result_fields = {**_trace_payload('output', output, sensitive_values(arguments)),
+                                 'output_chars': len(output)}
                 _trace("tool_result", round=round_number, name=name, call_id=call_id,
                        elapsed_seconds=round(time.monotonic() - tool_started_at, 1),
                        **result_fields)

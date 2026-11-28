@@ -11,6 +11,79 @@ from ax_local.cluster.resource_dashboard import dashboard
 
 
 class ResourceMonitoringTests(unittest.TestCase):
+    def test_full_install_provisions_grafana_and_checks_prometheus(self):
+        for manage_collector in (True, False):
+            with self.subTest(manage_collector=manage_collector):
+                self.check_full_install(manage_collector)
+
+    def check_full_install(self, manage_collector):
+        cluster = MagicMock(context='kind-test')
+        node = {'metadata': {'name': 'test-control-plane'}, 'status': {'addresses': [{'type': 'InternalIP', 'address': '10.0.0.2'}]}}
+        cluster.run.side_effect = lambda *args, **kwargs: json.dumps({'items': [node]}) if args[0] == 'get' else 'ok'
+        spec = {'containers': [{'args': [], 'volumeMounts': []}], 'volumes': []}
+        cluster.get.side_effect = [{'data': {'prometheus.yml': 'scrape_configs: []'}}, {'spec': {'template': {'spec': spec}}}]
+        settings = monitoring.load_monitoring(monitoring.ROOT)
+        if not manage_collector:
+            settings['opentelemetry-collector'].pop('resources')
+        with patch.object(monitoring, 'load_monitoring', return_value=settings), \
+                patch.object(monitoring, 'Cluster', return_value=cluster), \
+                patch.object(monitoring.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'certificate')), \
+                patch.object(monitoring, 'configure_collector') as collector, patch.object(monitoring, 'ensure_forward') as forward:
+            monitoring.install()
+        manifests = [obj for call in cluster.apply.call_args_list for obj in call.args[0]]
+        grafana = next(obj for obj in manifests if obj['metadata']['name'] == 'popot-grafana-config')
+        self.assertEqual(json.loads(grafana['data']['evals.json'])['uid'], 'popot-evals')
+        self.assertEqual(collector.call_count, int(manage_collector))
+        forward.assert_called_once_with()
+        cluster.run.assert_any_call('-n', monitoring.NS, 'exec', 'deployment/prometheus', '--', 'promtool',
+                                    'check', 'config', '/etc/prometheus/prometheus.yml')
+
+    def test_cli_install_evals_returns_failure_if_kubectl_cannot_apply(self):
+        import runpy
+        import sys
+        script = Path(monitoring.__file__)
+        script_name = str(script)
+        failed = subprocess.CalledProcessError(1, 'kubectl', stderr='fixture apply failed')
+        with patch.object(sys, 'argv', [str(script), 'install-evals']), \
+                patch.object(sys, 'path', [str(script.parent), *sys.path]), \
+                patch('subprocess.run', side_effect=failed) as run, self.assertRaises(SystemExit) as caught:
+            runpy.run_path(script_name, run_name='__main__')
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn('apply', run.call_args.args[0])
+
+    def test_prometheus_deploy_has_headroom_above_observed_512_mib_oom(self):
+        from ax_local.resource_config import load_monitoring, memory_mib
+        resources = load_monitoring(monitoring.ROOT)['prometheus']['resources']
+        self.assertGreaterEqual(memory_mib(resources['requests']['memory']), 512)
+        self.assertGreaterEqual(memory_mib(resources['limits']['memory']), 2048)
+
+    def test_grafana_provisions_both_dashboards_without_replacing_storage(self):
+        from ax_local.resource_config import load_monitoring
+        cluster = MagicMock()
+        monitoring.configure_grafana(cluster, load_monitoring(monitoring.ROOT))
+        objects = cluster.apply.call_args.args[0]
+        config = next(o for o in objects if o['kind'] == 'ConfigMap')
+        self.assertEqual(json.loads(config['data']['evals.json'])['uid'], 'popot-evals')
+        self.assertIn('resources.json', config['data'])
+        grafana = next(o for o in objects if o['kind'] == 'Deployment')
+        spec = grafana['spec']['template']['spec']
+        self.assertIn({'name': 'data', 'persistentVolumeClaim': {'claimName': 'grafana-resource-data'}}, spec['volumes'])
+        self.assertTrue(any(m.get('subPath') == 'evals.json' for m in spec['containers'][0]['volumeMounts']))
+
+    def test_evals_only_install_waits_for_grafana_before_forwarding(self):
+        with patch.object(monitoring, 'Cluster') as cluster_type, patch.object(monitoring, 'ensure_forward') as forward:
+            cluster = cluster_type.return_value
+            monitoring.install_evals()
+            manifests = cluster.apply.call_args.args[0]
+            self.assertEqual([item['metadata']['name'] for item in manifests], ['popot-grafana-config', 'grafana', 'grafana'])
+            cluster.run.assert_called_once_with('-n', monitoring.NS, 'rollout', 'status', 'deployment/grafana', '--timeout=120s')
+            forward.assert_called_once_with()
+            forward.reset_mock()
+            cluster.run.side_effect = subprocess.CalledProcessError(1, 'kubectl')
+            with self.assertRaises(subprocess.CalledProcessError):
+                monitoring.install_evals()
+            forward.assert_not_called()
+
     def test_collector_debug_removal_preserves_metrics_traces_and_is_idempotent(self):
         original = ('receivers:\n  otlp: {}\nexporters:\n  debug:\n    verbosity: detailed\n'
                     '  prometheus:\n    endpoint: 0.0.0.0:8889\n  otlp/jaeger: {}\n'

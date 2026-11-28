@@ -166,6 +166,37 @@ def provision(settings, environ, api):
     return result
 
 
+def _operator_user(email, api):
+    after, cursors = None, set()
+    while True:
+        page = api.query('''query($after:String){users(first:100,after:$after){
+            edges{node{id email role{name}}}pageInfo{hasNextPage endCursor}}}''', {'after': after})['users']
+        user = next((e['node'] for e in page['edges'] if e['node']['email'] == email), None)
+        if user or not page['pageInfo']['hasNextPage']:
+            return user
+        after = page['pageInfo']['endCursor']
+        if not after or after in cursors:
+            raise RuntimeError('Phoenix user API repeated a pagination cursor')
+        cursors.add(after)
+
+
+def provision_operator(settings, api):
+    """Maintain the selected existing service identity, without changing its key."""
+    if set(settings) != {'email', 'role'} or settings['role'] != 'MEMBER' or not settings['email']:
+        raise ValueError('Phoenix operator requires an email and MEMBER role')
+    user = _operator_user(settings['email'], api)
+    if not user:
+        return {'status': 'missing_user', 'email': settings['email'],
+                'note': 'Create this Phoenix user and save its user API key as PHOENIX_API_KEY'}
+    if user['role']['name'] != settings['role']:
+        api.query('mutation($input:PatchUserInput!){patchUser(input:$input){user{id role{name}}}}',
+                  {'input': {'userId': user['id'], 'newRole': settings['role']}})
+        user = _operator_user(settings['email'], api)
+        if not user or user['role']['name'] != settings['role']:
+            raise RuntimeError('Phoenix operator role verification failed')
+    return {'status': 'configured', 'email': settings['email'], 'role': user['role']['name']}
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', default='http://phoenix:6006')
@@ -175,6 +206,11 @@ if __name__ == '__main__':
         key = os.environ.get('PHOENIX_ADMIN_SECRET')
         if not key:
             raise RuntimeError('PHOENIX_ADMIN_SECRET is required for provider setup')
-        print(json.dumps(provision(settings, os.environ, API(args.url, key))))
+        api = API(args.url, key)
+        result = provision(settings, os.environ, api)
+        operator = json.loads(Path(__file__).with_name('config.json').read_text()).get('x-operator')
+        if operator:
+            result.append({'name': 'project_operator', **provision_operator(operator, api)})
+        print(json.dumps(result))
     except (RuntimeError, ValueError) as exc:
         parser.exit(1, str(exc) + '\n')

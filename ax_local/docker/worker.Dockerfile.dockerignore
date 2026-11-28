@@ -8,6 +8,7 @@
 !popot_agents/skills.py
 !popot_agents/prompts.py
 !popot_agents/progress.py
+!popot_agents/telemetry.py
 !skills/
 !skills/**
 !popot_agents/worker/
@@ -18,6 +19,11 @@
 !memory/config.json
 !config/prompts/
 !config/prompts/**
+!evals/
+!evals/__init__.py
+!evals/runtime.py
+!evals/operator_tools.py
+!evals/config.json
 !ax_local/
 !ax_local/__init__.py
 !ax_local/cluster/

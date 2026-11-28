@@ -16,34 +16,62 @@ import time
 from urllib import request
 
 from evals import save
+from evals.settings import load_config
 from popot_agents.artifacts import validate_artifacts
+from ax_local.api.phoenix import Span
+from popot_agents.telemetry import VERSION, PAYLOAD_LIMIT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get('POPOT_EVAL_SOURCE_ROOT', Path(__file__).resolve().parents[1]))
 
 
-def load_config(path=None):
-    from popot_agents.runtime_config import RUNTIME, validate_workflow_policy
+class ModelCapture:
+    """Record the proxy's redacted spans without network I/O on model calls."""
 
-    config = json.loads(Path(path or ROOT / 'evals/config.json').read_text())
-    settings = config.get('x-baseline') if isinstance(config, dict) else None
-    if not isinstance(settings, dict) or set(settings) != {
-            'model', 'repetitions', 'workflow', 'request_timeout_seconds', 'inspection_timeout_seconds'}:
-        raise ValueError('evals config has invalid x-baseline fields')
-    if not isinstance(settings['model'], str) or not settings['model'].strip():
-        raise ValueError('evals config model must be non-empty')
-    if type(settings['repetitions']) is not int or not 1 <= settings['repetitions'] <= 3:
-        raise ValueError('evals config repetitions must be between 1 and 3')
-    validate_workflow_policy(settings['workflow'], RUNTIME['timeouts']['max_turn_seconds'])
-    for key in ('request_timeout_seconds', 'inspection_timeout_seconds'):
-        if type(settings[key]) is not int or settings[key] <= 0:
-            raise ValueError(f'evals config {key} must be positive')
-    if settings['request_timeout_seconds'] <= settings['workflow']['total_seconds']:
-        raise ValueError('evals config request_timeout_seconds must exceed workflow.total_seconds')
-    return settings
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lock = threading.Lock()
+        self.errors = 0
+
+    def model_span(self, session_id, model):
+        return Span(self, model, 'LLM', attributes={
+            'popot.agent_session_id': session_id or 'unknown',
+            'llm.model_name': model, 'popot.requested_model': model})
+
+    def submit(self, span):
+        try:
+            with self.lock:
+                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, 'a') as output:
+                    output.write(json.dumps(span, ensure_ascii=False) + '\n')
+        except OSError:
+            self.errors += 1
+            print(json.dumps({'event': 'model_capture_failed', 'errors': self.errors}), file=os.sys.stderr)
 
 
 SETTINGS = load_config()
+
+
+PAGINATION_CHECKS = '''f=ns['paginate']
+items=list(range(11))
+assert f(items,1,4)==[0,1,2,3]
+assert f(items,2,4)==[4,5,6,7]
+assert f(items,3,4)==[8,9,10]
+assert f(items,4,4)==[]
+assert f(items,12,1)==[]
+assert f([],1,4)==[]
+assert f(tuple(items),2,4)==[4,5,6,7]
+copy=f(items,1,99)
+assert type(copy) is list and copy is not items
+copy.append('changed')
+assert items==list(range(11))
+for bad in [0,-1,True,False,1.5,'1',None]:
+ for page,size in [(bad,4),(1,bad)]:
+  try: f(items,page,size)
+  except ValueError: pass
+  else: raise AssertionError('invalid input accepted')
+print('INDEPENDENT_PAGINATION_OK')
+'''
 
 
 def _failed_read(events, path):
@@ -110,24 +138,28 @@ def summarize(results):
 
 
 def frozen_config(roles, profiles, model, image):
-    paths = [ROOT / 'pyproject.toml', ROOT / 'ax_local/config.json', ROOT / 'evals/config.json',
+    paths = [ROOT / 'pyproject.toml', ROOT / 'ax_local/config.json',
              ROOT / 'memory/config.json',
              *sorted((ROOT / 'config').rglob('*.json')),
              *sorted((ROOT / 'config/prompts').rglob('*.md')),
              *sorted((ROOT / 'popot_agents').rglob('*.py')),
              *sorted((ROOT / 'ax_local/api').glob('*.py')),
              *sorted((ROOT / 'ax_local/worker').glob('*.py')),
-             *sorted((ROOT / 'skills').rglob('*.md')), Path(__file__), ROOT / 'evals/cases.json']
+             *sorted((ROOT / 'skills').rglob('*.md'))]
     hashes = {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    evaluator = Path(__file__).parent
+    for path in [*sorted(evaluator.glob('*.py')), evaluator / 'config.json', evaluator / 'cases.json']:
+        hashes['evals/' + path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return {'harness': 'popot-http', 'worker_image': image, 'primary_model': model, 'memory_mode': 'disabled',
-            'baseline': {**SETTINGS, 'model': model},
+            'telemetry_version': VERSION, 'payload_limit_bytes': PAYLOAD_LIMIT,
+            'evals': SETTINGS,
             'profiles': {k: {'model_parameters': v.get('model_parameters', {})} for k, v in profiles.items()},
             'roles': roles, 'source_sha256': hashes, 'python': os.sys.version,
-            'method': 'Controlled local-toolset baseline without project memory. Fixed direct model; Harness2 disabled; all MCP except local git removed from evaluation role snapshots. Cognee credentials removed from all role snapshots; automatic recall, capture and session journal disabled. Native role tools and delegation remain. Sequential runs; '
+            'method': 'Controlled local-toolset baseline without project memory. Fixed direct model; Harness2 disabled; all MCP except local git removed from evaluation role snapshots. Cognee credentials removed from all role snapshots; automatic recall, capture and session journal disabled. Native role tools and delegation remain. Sequential cases within each model; '
                       f"{SETTINGS['workflow']['total_seconds']}s workflow, {SETTINGS['workflow']['turn_seconds']}s turn. Production configuration unchanged."}
 
 
-def start_server(directory, model):
+def start_server(directory, model, *, parameters=None):
     from ax_local.config import AX_CONFIG
     from ax_local.api.ax_runner import AxAgentRunner
     from ax_local.api.delegation import start_a2a_server
@@ -143,6 +175,10 @@ def start_server(directory, model):
     configure_ax_server_tunnel(AX_CONFIG['context'], AX_CONFIG['atespace'])
     host = network_address_toward(kind_control_plane_host(AX_CONFIG['context']), 6443)
     profiles = json.loads((ROOT / 'config/agents.json').read_text())
+    if parameters is not None:
+        from popot_agents.runtime_config import validate_model_parameters
+        checked = validate_model_parameters(parameters)
+        profiles = {name: {**profile, 'model_parameters': checked} for name, profile in profiles.items()}
     roles = load_roles(ROOT / 'config/roles', {k: AgentProfile(**v) for k, v in profiles.items()})
     image = Path(os.getenv('AX_LOCAL_WORKER_IMAGE_FILE', str(ROOT / 'ax_local/.local/worker-image'))).read_text().strip()
     routes, runners = {}, {}
@@ -160,7 +196,7 @@ def start_server(directory, model):
             context=AX_CONFIG['context'], proxy_token=token, model_parameters=profiles[name].get('model_parameters'),
             upstream_host='ollama.com', worker_queue=queue)
         runners[name].worker_pool = pool
-    proxy = start_proxy(routes, host=host, port=0)
+    proxy = start_proxy(routes, host=host, port=0, tracer=ModelCapture(directory / 'model-spans.jsonl'))
     for runner in runners.values():
         runner.base_url = f'http://{host}:{proxy.server_port}/v1'
     for name, role in roles.items():
@@ -238,13 +274,7 @@ def observe(server, sid, case_id, outcome):
         if source:
             validate_artifacts([source])
             code = ("import base64\nns={}\nexec(base64.b64decode(" + repr(base64.b64encode(source['content'].encode()).decode()) + "),ns)\n"
-                    "f=ns['paginate']\nitems=list(range(11))\n"
-                    "assert f(items,1,4)==[0,1,2,3]\nassert f(items,2,4)==[4,5,6,7]\n"
-                    "assert f(items,3,4)==[8,9,10]\nassert f(items,4,4)==[]\nassert f([],1,4)==[]\n"
-                    "assert items==list(range(11))\n"
-                    "for page,size in [(0,4),(-1,4),(1,0),(1,-2)]:\n"
-                    " try: f(items,page,size)\n except ValueError: pass\n else: raise AssertionError('invalid input accepted')\n"
-                    "print('INDEPENDENT_PAGINATION_OK')\n")
+                    + PAGINATION_CHECKS)
             worker = server.live[sid].worker
             worker.resume()
             checked = worker.runner._run('ssh', worker.container_name, '--', 'python', '-I', '-c', code, allow_failure=True)
@@ -260,30 +290,60 @@ def observe(server, sid, case_id, outcome):
 
 
 def main():
+    baseline = next(v for v in SETTINGS['variants'] if v['name'] == SETTINGS['baseline'])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--model', default=SETTINGS['model'])
+    parser.add_argument('--model', default=baseline['model'])
     parser.add_argument('--repetitions', type=int, default=SETTINGS['repetitions'], choices=range(1, 4))
     parser.add_argument('--repetition-start', type=int, default=1, choices=range(1, 4))
     parser.add_argument('--case', action='append')
     parser.add_argument('--source-revision', default='unknown')
+    parser.add_argument('--parameters', type=json.loads, default=baseline['parameters'],
+                        help='Exact model parameters for every evaluation role; defaults to the baseline variant')
+    parser.add_argument('--experiment', help='Unique experiment label')
+    parser.add_argument('--run-id', help='Shared execution identifier across model variants')
+    parser.add_argument('--monitor', action='store_true', help='Publish progress and metrics through the existing collector')
+    parser.add_argument('--matrix-parallelism', type=int, default=1, choices=range(1, 6))
+    parser.add_argument('--cancel-file', type=Path, help='Stop after the current case when this marker exists')
     args = parser.parse_args()
+    from popot_agents.runtime_config import validate_model_parameters
+    args.parameters = validate_model_parameters(args.parameters)
     args.output.mkdir(parents=True, exist_ok=False)
-    cases = json.loads((ROOT / 'evals/cases.json').read_text())
+    cases = json.loads(Path(__file__).with_name('cases.json').read_text())
     if args.case:
         cases = [c for c in cases if c['id'] in args.case]
         if len(cases) != len(set(args.case)):
             raise ValueError('Unknown case')
-    server, proxy, a2a, config = start_server(args.output, args.model)
+    server, proxy, a2a, config = start_server(args.output, args.model, parameters=args.parameters)
+    from evals import scoring
+    from evals.metrics import measure, publish_report
+    grading = scoring.settings()
+    cases = [{**c, 'task': c['task'] + (scoring.SELF_INSTRUCTION if grading['self_assessment'] else '')} for c in cases]
+    config['cases'] = cases
+    config['suite_sha256'] = hashlib.sha256(json.dumps(cases, sort_keys=True).encode()).hexdigest()
+    config['judge_fingerprint'] = scoring.fingerprint(grading)
+    config['scoring'] = grading
+    from evals.names import experiment_name
+    config['run_id'] = args.run_id or args.output.name
+    config['experiment_name'] = args.experiment or experiment_name(
+        args.model, args.parameters, 'evals', config['run_id'])
+    config['monitoring_enabled'] = args.monitor
     config['source_revision'] = args.source_revision
-    config['baseline']['repetitions'] = args.repetitions
+    config['evals'] = {**config['evals'], 'repetitions': args.repetitions,
+                       'parallel_models': args.matrix_parallelism}
     save(args.output / 'config.json', config)
     report = {'started_at': datetime.now(timezone.utc).isoformat(), 'config': 'config.json', 'results': [],
               'planned_runs': len(cases) * args.repetitions,
               'planned_repetitions': args.repetition_start + args.repetitions - 1}
     try:
+        if args.monitor:
+            report['monitoring'] = publish_report(report, config)
         for repetition in range(args.repetition_start - 1, args.repetition_start - 1 + args.repetitions):
             for case in cases:
+                if args.cancel_file and args.cancel_file.exists():
+                    report['cancelled_at'] = datetime.now(timezone.utc).isoformat()
+                    save(args.output / 'report.json', report)
+                    raise InterruptedError('Evaluation cancelled between cases; partial capture retained')
                 name = f"{case['id']}-{repetition + 1}"
                 print('BASELINE_START', name, flush=True)
                 events, result, observed = [], {}, {}
@@ -314,12 +374,16 @@ def main():
                        'elapsed_seconds': (finished - start) / 1e9, 'tokens': None,
                        'outcome': outcome, 'observed': observed, 'result': result,
                        'trace_file': name + '.jsonl', **scored}
+                scoring.evaluate(row, case, grading)
+                row['metrics'] = measure(row, events)
                 save(args.output / (name + '.json'), row)
                 if result.get('runner_error'):
                     report.setdefault('incomplete', []).append(row)
                 else:
                     report['results'].append(row)
                 report['summary'] = summarize(report['results'])
+                if args.monitor:
+                    report['monitoring'] = publish_report(report, config)
                 save(args.output / 'report.json', report)
                 print('BASELINE_RESULT', name, json.dumps({'passed': row['passed'], 'status': outcome.get('status'), 'checks': row['checks']}), flush=True)
                 # Close only this evaluation's root; child reports remain in its store.
@@ -328,6 +392,8 @@ def main():
                 if result.get('runner_error'):
                     raise RuntimeError('Baseline capture failed; report retained and remaining cases not submitted')
         report['finished_at'] = datetime.now(timezone.utc).isoformat()
+        if args.monitor:
+            report['monitoring'] = publish_report(report, config)
         save(args.output / 'report.json', report)
     finally:
         server.delegation.close()

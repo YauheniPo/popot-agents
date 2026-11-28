@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.request import Request
 
 from popot_agents import tools
 from popot_agents.orchestrator.main import load_agents, load_roles
@@ -35,7 +36,7 @@ class AgentCapacityTests(unittest.TestCase):
                 with patch.dict(RUNTIME['model'], {'request_retries': 0}), \
                      patch('popot_agents.worker.http_harness.request.urlopen', side_effect=respond):
                     with self.assertRaisesRegex(RuntimeError, 'model request timed out'):
-                        _model_request(object(), round_number=1, messages=[], schemas=[],
+                        _model_request(Request('http://model.invalid'), round_number=1, messages=[], schemas=[],
                                        remaining_seconds=lambda: remaining)
                 self.assertEqual(timeouts, [expected])
 

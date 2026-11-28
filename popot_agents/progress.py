@@ -105,10 +105,13 @@ def redact_text(text):
     text = re.sub(r'\bgh[pousr]_\w{20,}', _REDACTED, text)
     text = re.sub(r'\bgithub_pat_\w+', _REDACTED, text)
     text = re.sub(r'\bsk-[\w-]{20,}', _REDACTED, text)
-    label = r'(?i)(\b(?:password|passwd|pasw|token|api[_-]?key|secret|пароль)\b\s*[:=]\s*)'
+    label = (r'(?i)(\b(?:[a-z0-9_]{1,128}[_-])?'
+             r'(?:password|passwd|pasw|token|api[_-]?key|secret(?:[_-]access[_-]key)?|пароль)\b[ \t]*[:=][ \t]*)')
     value = r"""(?:"[^"]*"|'[^']*'|[^\s,;]+)"""
     text = re.sub(label + value, r'\1' + _REDACTED, text)
-    text = re.sub(r'(?i)(authorization\s*:\s*bearer\s+)\S+', r'\1' + _REDACTED, text)
+    text = re.sub(r'(?i)(authorization[ \t]*:[ \t]*(?:bearer|basic)[ \t]+)\S+', r'\1' + _REDACTED, text)
+    text = re.sub(r'(?im)(\b(?:set-cookie|cookie|mcp-session-id)[ \t]*:[ \t]*)[^\r\n]+',
+                  r'\1' + _REDACTED, text)
     return re.sub(r'(https?://)([^\s/@]+)@',
                   lambda m: m[1] + _REDACTED + '@' if ':' in m[2] else m[0], text)
 

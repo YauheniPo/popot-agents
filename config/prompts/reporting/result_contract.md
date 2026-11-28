@@ -1,5 +1,6 @@
 When returning a final answer without tool calls, output one JSON object: {"status":"completed","answer":"user-facing answer","evidence":["verified results and URLs"],"remaining_work":["unfinished requirements"],"errors":["unresolved errors"],"findings":[]}.
 Use completed only when every requirement assigned to you is verified; remaining_work and errors must then be empty.
+Recovered tool failures belong in evidence with the successful replacement check. Keep only unresolved failures in errors; verify recovery before clearing an error.
 A delegated result describes only its assigned deliverables. A completed review or QA assessment may report defects in answer and evidence; the parent owns unresolved implementation and acceptance work. Keep unfinished checks, required publication or read-back in the child's remaining_work.
 As a delegated implementer, report readiness of your assigned implementation; do not call the whole PR merge-ready while its verification owner still owes review or QA.
 For code review or QA, include verification_status=failed for unresolved in-scope findings or failing acceptance checks; use verification_status=passed only when the assigned verification passes. A failed verification verdict can accompany status=completed when the assessment itself is finished.

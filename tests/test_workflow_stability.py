@@ -8,6 +8,18 @@ from tests import test_agent_reliability as reliability
 
 
 class WorkflowStabilityTests(unittest.TestCase):
+    def test_first_partial_with_new_evidence_is_not_no_progress(self):
+        policy = {**POLICY, 'max_no_progress': 1, 'max_turns': 3}
+        run = WorkflowRun(policy, 'finish verified artifact')
+        result = {'answer': 'Artifact created', 'outcome': {'status': 'partial',
+                  'evidence': ['artifact verified'], 'errors': [], 'remaining_work': ['final assessment']}}
+        checkpoint = {'messages': [{'role': 'tool', 'content': 'exit_code=0\nartifact verified'}]}
+        run.begin()
+        self.assertIsNone(run.record(result, checkpoint))
+        self.assertEqual(run.meta['no_progress'], 0)
+        run.begin()
+        self.assertEqual(run.record(result, checkpoint)['outcome']['reason'], 'workflow_no_progress')
+
     def test_pr_metadata_implementer_cannot_finish_without_observed_revision(self):
         helper = reliability.AgentReliabilityTests()
         answer, state, _ = helper.run_sequence([helper.result(answer='PR ready to merge')],
@@ -183,7 +195,7 @@ class WorkflowStabilityTests(unittest.TestCase):
         run = WorkflowRun(POLICY, 'fix')
         result = {'answer':'still blocked','outcome':{'status':'partial','evidence':[],
             'errors':['same input error'],'remaining_work':['correct input']}}
-        for count in (1,2):
+        for count in (1,2,3):
             run.begin()
             terminal = run.record(result, {'messages':[{'role':'tool','tool_call_id':str(i),
                 'content':json.dumps({'isError':True,'error':'same input error'})} for i in range(count)]})
@@ -202,7 +214,7 @@ class WorkflowStabilityTests(unittest.TestCase):
     def test_repeated_failed_check_with_new_call_id_is_not_progress(self):
         run = WorkflowRun(POLICY, 'fix')
         checkpoint = {'messages': []}
-        for call_id in ('first', 'retry'):
+        for call_id in ('first', 'retry', 'retry-again'):
             checkpoint['messages'].append({'role': 'tool', 'tool_call_id': call_id,
                                           'content': 'exit_code=1\nFAILED test_a: wrong default'})
             run.begin()
@@ -215,7 +227,7 @@ class WorkflowStabilityTests(unittest.TestCase):
         result = {'answer': 'No new result', 'outcome': {'status': 'partial',
             'evidence': ['commit was pushed'], 'errors': [],
             'remaining_work': ['verify review threads']}}
-        for _ in range(2):
+        for _ in range(3):
             run.begin()
             terminal = run.record(result, {'messages': []})
         self.assertEqual(terminal['outcome']['reason'], 'workflow_no_progress')
@@ -227,7 +239,7 @@ class WorkflowStabilityTests(unittest.TestCase):
         run = WorkflowRun(POLICY, 'fix and verify PR')
         checkpoint = {'messages': [{'role': 'tool', 'tool_call_id': 'review',
                                    'content': 'F1 requires an implementation fix'}]}
-        for phrasing in ('Fix F1 and run QA', 'QA and the F1 correction remain'):
+        for phrasing in ('Fix F1 and run QA', 'QA and the F1 correction remain', 'Finish QA and fix F1'):
             run.begin()
             terminal = run.record({'answer': phrasing, 'outcome': {'status': 'partial',
                 'evidence': [phrasing], 'errors': [], 'remaining_work': [phrasing]}}, checkpoint)

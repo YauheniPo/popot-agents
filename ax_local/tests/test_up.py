@@ -93,6 +93,10 @@ class UpScriptTests(unittest.TestCase):
             "import os\nfrom pathlib import Path\n"
             "with Path(os.environ['CALLS']).open('a') as f: f.write('worker-health\\n')\n"
             "raise SystemExit(int(os.environ.get('HEALTH_FAIL', '0')))\n")
+        (cluster / 'substrate_api.py').write_text(
+            "import os\nfrom pathlib import Path\n"
+            "with Path(os.environ['CALLS']).open('a') as f: f.write('substrate-api\\n')\n"
+            "raise SystemExit(int(os.environ.get('SUBSTRATE_API_FAIL', '0')))\n")
         (cluster / 'gvisor_runtime.py').write_text(
             "import os\nfrom pathlib import Path\n"
             "with Path(os.environ['CALLS']).open('a') as f: f.write('gvisor-runtime\\n')\n"
@@ -280,9 +284,18 @@ class UpScriptTests(unittest.TestCase):
         calls = self.calls.read_text().splitlines()
         self.assertIn("worker-health", calls)
         self.assertLess(calls.index('gvisor-runtime'), calls.index('worker-health'))
+        self.assertLess(calls.index('worker-health'), calls.index('substrate-api'))
+        self.assertLess(calls.index('substrate-api'), next(i for i, call in enumerate(calls) if call.startswith('docker build')))
         self.assertIn("up --build --force-recreate -d --wait --wait-timeout 300 api mcp-server", calls[-4])
         self.assertIn('compose.omniroute.yaml --profile omniroute', calls[-4])
         self.assertEqual(calls[-3:], ['grafana-forward-check', 'deployment-cleanup', 'resource-monitoring'])
+        self.calls.write_text('')
+        self.env['SUBSTRATE_API_FAIL'] = '1'
+        result = subprocess.run(['bash', str(self.ax / 'rebuild-worker.sh')], env=self.env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls.read_text().splitlines(), ['gvisor-runtime', 'worker-health', 'substrate-api'])
+        self.env.pop('SUBSTRATE_API_FAIL')
         self.calls.write_text("")
         self.env["MONITORING_FAIL"] = "1"
         result = subprocess.run(["bash", str(self.ax / "rebuild-worker.sh")], env=self.env,

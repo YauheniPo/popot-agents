@@ -1,15 +1,18 @@
 {
-  "x-tracing": {
-    "enabled": true,
-    "project": "popot-runtime",
-    "endpoint": "http://host.docker.internal:6006",
-    "api_key_env": "PHOENIX_ADMIN_SECRET",
-    "outbox_directory": "/var/lib/popot-traces",
-    "request_timeout_seconds": 3,
-    "retry_seconds": 5
+  "x-scoring": {
+    "self_assessment": true,
+    "judge": {"enabled": true, "provider": "Ollama Cloud", "model": "deepseek-v4.1-flash:1017"}
   },
-  "x-baseline": {
-    "model": "ollama-cloud/deepseek-v4.1-flash:1017",
+  "x-evals": {
+    "baseline": "flash-max",
+    "parallel_models": 3,
+    "variants": [
+      {"name": "flash-max", "model": "ollama-cloud/deepseek-v4.1-flash:1017", "parameters": {"max_tokens": 65536, "reasoning_effort": "max"}},
+      {"name": "glm-max", "model": "ollama-cloud/glm-5.3-flash", "parameters": {"max_tokens": 65536, "reasoning_effort": "max"}},
+      {"name": "mistral-max", "model": "ollama-cloud/mistral-large-4", "parameters": {"max_tokens": 65536, "reasoning_effort": "max"}},
+      {"name": "minimax-max", "model": "ollama-cloud/minimax-m3.1-flash", "parameters": {"max_tokens": 65536, "reasoning_effort": "max"}},
+      {"name": "nemotron-free", "model": "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b", "parameters": {"max_tokens": 64000}}
+    ],
     "repetitions": 2,
     "workflow": {
       "total_seconds": 600,
@@ -22,6 +25,19 @@
     },
     "request_timeout_seconds": 660,
     "inspection_timeout_seconds": 30
+  },
+  "x-operator": {
+    "email": "project-operator@popot.example.com",
+    "role": "MEMBER"
+  },
+  "x-tracing": {
+    "enabled": true,
+    "project": "popot-runtime",
+    "endpoint": "http://host.docker.internal:6006",
+    "api_key_env": "PHOENIX_ADMIN_SECRET",
+    "outbox_directory": "/var/lib/popot-traces",
+    "request_timeout_seconds": 3,
+    "retry_seconds": 5
   },
   "x-providers": [
     {
@@ -37,7 +53,7 @@
     {
       "name": "Ollama Cloud", "provider": "ollama",
       "base_url": "https://ollama.com/v1", "api_key_env": "OLLAMA_API_KEY",
-      "models": ["deepseek-v4.1-flash:1017", "glm-5.3-flash", "deepseek-v4-pro:0813"]
+      "models": ["deepseek-v4.1-flash:1017", "glm-5.3-flash", "deepseek-v4-pro:0813", "mimo-v2.6-pro", "minimax-m3.1-flash", "mistral-large-4"]
     },
     {
       "name": "Nous Research", "provider": "nous",

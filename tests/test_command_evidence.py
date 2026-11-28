@@ -74,7 +74,7 @@ class CommandEvidenceTests(unittest.TestCase):
             page = tools.execute_tool('read_tool_output', {'path': path, 'offset': 3}, ['read_tool_output'])
             self.assertEqual(page, 'b\r\nc')
 
-    def test_timeout_output_reaches_model_but_not_progress_trace(self):
+    def test_timeout_output_reaches_model_and_redacted_trace(self):
         from tests.test_agent_reliability import AgentReliabilityTests
         helper = AgentReliabilityTests()
         failure = tools.ToolExecutionError('command timed out; partial output: private-output')
@@ -85,7 +85,9 @@ class CommandEvidenceTests(unittest.TestCase):
                     'arguments': json.dumps({'command': 'run-check'})}}]}, helper.result()],
                 role={'tools': ['bash']})
         self.assertIn('private-output', str(bodies[1]['messages']))
-        self.assertNotIn('private-output', str(trace.call_args_list))
+        results = [call.kwargs for call in trace.call_args_list if call.args[0] == 'tool_result']
+        self.assertIn('private-output', results[0]['output'])
+        self.assertFalse(results[0]['output_truncated'])
 
     def test_trace_identifies_repeated_commands_without_logging_content(self):
         first = _trace_arguments('bash', {'command': 'echo private-token'})

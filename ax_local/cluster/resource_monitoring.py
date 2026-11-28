@@ -264,28 +264,7 @@ def install():
     cluster.patch('deployment', 'prometheus', {'spec': {'strategy': {'type': 'Recreate', 'rollingUpdate': None},
         'template': {'metadata': {'annotations': {'popot.dev/resource-config': digest}}, 'spec': spec}}})
 
-    provision = settings['grafana']['datasources']
-    providers = settings['grafana']['dashboard_providers']
-    data = {'datasources.yaml': json.dumps(provision), 'dashboards.yaml': json.dumps(providers),
-            'resources.json': json.dumps(dashboard())}
-    grafana = deployment('grafana', 'grafana/grafana:' + BUILD_VERSIONS['GRAFANA_VERSION'], uid=472,
-        resources=overrides['grafana'],
-        ports=[{'name': 'web', 'containerPort': 3000}],
-        env=[{'name': k, 'value': v} for k, v in settings['grafana']['environment'].items()],
-        volumes=[{'name': 'data', 'persistentVolumeClaim': {'claimName': 'grafana-resource-data'}},
-                 {'name': 'config', 'configMap': {'name': 'popot-grafana-config'}}],
-        mounts=[{'name': 'data', 'mountPath': '/var/lib/grafana'},
-                *[{'name': 'config', 'mountPath': path, 'subPath': key, 'readOnly': True} for key, path in [
-                  ('datasources.yaml', '/etc/grafana/provisioning/datasources/prometheus.yaml'),
-                  ('dashboards.yaml', '/etc/grafana/provisioning/dashboards/popot.yaml'),
-                  ('resources.json', '/var/lib/grafana/dashboards/resources.json')]]])
-    grafana['spec']['template']['metadata']['annotations'] = {
-        'popot.dev/resource-config': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()}
-    grafana['spec']['template']['spec']['containers'][0]['readinessProbe'] = {
-        'httpGet': {'path': '/api/health', 'port': 3000}, 'initialDelaySeconds': 10}
-    cluster.apply([obj('ConfigMap', 'popot-grafana-config', data=data), grafana,
-                   obj('Service', 'grafana', spec={'selector': {'app': 'grafana'},
-                       'ports': [{'port': 3000, 'targetPort': 3000}]})])
+    configure_grafana(cluster, settings)
     if 'opentelemetry-collector' in overrides:
         configure_collector(cluster, overrides['opentelemetry-collector'])
     for name in ['prometheus', 'kube-state-metrics', 'grafana', 'opentelemetry-collector']:
@@ -294,6 +273,42 @@ def install():
                 '/etc/prometheus/prometheus.yml')
     ensure_forward()
     print('Resource dashboard: http://127.0.0.1:3002/d/popot-resources')
+
+
+def configure_grafana(cluster, settings):
+    from ax_local.cluster.eval_dashboard import dashboard as eval_dashboard
+
+    provision = settings['grafana']['datasources']
+    providers = settings['grafana']['dashboard_providers']
+    data = {'datasources.yaml': json.dumps(provision), 'dashboards.yaml': json.dumps(providers),
+            'resources.json': json.dumps(dashboard()), 'evals.json': json.dumps(eval_dashboard())}
+    grafana = deployment('grafana', 'grafana/grafana:' + BUILD_VERSIONS['GRAFANA_VERSION'], uid=472,
+        resources=settings['grafana']['resources'],
+        ports=[{'name': 'web', 'containerPort': 3000}],
+        env=[{'name': k, 'value': v} for k, v in settings['grafana']['environment'].items()],
+        volumes=[{'name': 'data', 'persistentVolumeClaim': {'claimName': 'grafana-resource-data'}},
+                 {'name': 'config', 'configMap': {'name': 'popot-grafana-config'}}],
+        mounts=[{'name': 'data', 'mountPath': '/var/lib/grafana'},
+                *[{'name': 'config', 'mountPath': path, 'subPath': key, 'readOnly': True} for key, path in [
+                  ('datasources.yaml', '/etc/grafana/provisioning/datasources/prometheus.yaml'),
+                  ('dashboards.yaml', '/etc/grafana/provisioning/dashboards/popot.yaml'),
+                  ('resources.json', '/var/lib/grafana/dashboards/resources.json'),
+                  ('evals.json', '/var/lib/grafana/dashboards/evals.json')]]])
+    grafana['spec']['template']['metadata']['annotations'] = {
+        'popot.dev/resource-config': hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()}
+    grafana['spec']['template']['spec']['containers'][0]['readinessProbe'] = {
+        'httpGet': {'path': '/api/health', 'port': 3000}, 'initialDelaySeconds': 10}
+    cluster.apply([obj('ConfigMap', 'popot-grafana-config', data=data), grafana,
+                   obj('Service', 'grafana', spec={'selector': {'app': 'grafana'},
+                       'ports': [{'port': 3000, 'targetPort': 3000}]})])
+
+
+def install_evals():
+    cluster = Cluster()
+    configure_grafana(cluster, load_monitoring(ROOT))
+    print(cluster.run('-n', NS, 'rollout', 'status', 'deployment/grafana', '--timeout=120s').strip())
+    ensure_forward()
+    print('Eval dashboard: http://127.0.0.1:3002/d/popot-evals')
 
 
 def grafana_healthy():
@@ -374,10 +389,10 @@ def forward():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['install', 'forward', 'ensure-forward'])
+    parser.add_argument('command', choices=['install', 'install-evals', 'forward', 'ensure-forward'])
     command = parser.parse_args().command
     try:
-        {'install': install, 'forward': forward, 'ensure-forward': ensure_forward}[command]()
+        {'install': install, 'install-evals': install_evals, 'forward': forward, 'ensure-forward': ensure_forward}[command]()
     except (subprocess.CalledProcessError, RuntimeError) as error:
         print(getattr(error, 'stderr', None) or str(error), file=sys.stderr)
         raise SystemExit(1)

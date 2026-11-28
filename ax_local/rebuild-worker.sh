@@ -19,6 +19,7 @@ if [[ ! -f "$IMAGE_FILE" ]]; then
 fi
 python3 "$ROOT/ax_local/cluster/gvisor_runtime.py"
 python3 "$ROOT/ax_local/cluster/worker_health.py"
+python3 "$ROOT/ax_local/cluster/substrate_api.py"
 bash "$ROOT/ax_local/cluster/controller_tools.sh"
 
 docker build --platform "linux/$(go env GOARCH)" \

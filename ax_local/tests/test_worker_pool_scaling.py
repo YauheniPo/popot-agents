@@ -63,6 +63,9 @@ class WorkerPoolScalingTests(unittest.TestCase):
         time.sleep(.05)
         self.assertEqual(self.backend.scaled, [])
         self.backend.busy.clear()
+        time.sleep(.05)
+        self.assertEqual(self.backend.desired, 5, 'external activity must reset the idle timer')
+        self.now[0] = 161
         wait_for(lambda: self.backend.desired == 3)
 
     def test_failed_inspection_never_shrinks_or_admits_using_stale_capacity(self):

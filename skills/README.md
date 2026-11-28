@@ -41,6 +41,11 @@
 
 Для `chat` и `cron_demo` специальные навыки из этого набора не нужны.
 
+Локальный [operations/runtime-evals](operations/runtime-evals/SKILL.md) выбран
+для `project_operator`: запуск оценщика, публикация CODE-аннотаций с ключом роли,
+чтение отчётов, проверка полноты traces и границы сравнения harness. Он не входит
+в upstream-манифест и не предоставляет права запуска host benchmark.
+
 Для `security_engineer` добавлен локальный навык
 [`engineering/security-review`](engineering/security-review/SKILL.md): модель угроз,
 проверка достижимости уязвимостей, безопасное воспроизведение и проверка исправленного SHA.

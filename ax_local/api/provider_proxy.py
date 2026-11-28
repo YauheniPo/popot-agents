@@ -43,7 +43,17 @@ def resolve_provider(name: str, model: str, profiles: dict, environ: dict) -> Pr
     return Provider(name, model.strip(), base_url.rstrip("/"), api_key)
 
 
-CORRELATION_HEADERS = {'X-Popot-Session-Id':16, 'X-Popot-Run-Id':32, 'X-Popot-Root-Session-Id':16}
+CORRELATION_HEADERS = {'X-Popot-Session-Id':16, 'X-Popot-Run-Id':32,
+                       'X-Popot-Root-Session-Id':16, 'X-Popot-Request-Id':32}
+
+
+def observe(method, *args, **kwargs):
+    """Trace failures must not replace a provider response or execute a retry."""
+    try:
+        return method(*args, **kwargs)
+    except Exception as exc:
+        print(json.dumps({'event': 'model_capture_failed', 'error_type': type(exc).__name__}),
+              file=sys.stderr, flush=True)
 
 
 def make_upstream_request(selected: Provider, body: bytes, *, correlation=None) -> request.Request:
@@ -78,8 +88,18 @@ def authorized_provider(routes: dict[str, Provider], authorization: str) -> Prov
     return None
 
 
+def _observe_http_error(error_observer, exc):
+    if error_observer:
+        try:
+            captured = exc.read(65537)
+            observe(error_observer, {'status': exc.code, 'body': captured[:65536].decode('utf-8', errors='replace'),
+                                     'truncated': len(captured) > 65536})
+        except OSError as failure:
+            observe(error_observer, {'status': exc.code, 'error_type': type(failure).__name__})
+
+
 def dispatch_request(routes: dict[str, Provider], path: str,
-                     authorization: str, body: bytes, *, correlation=None) -> tuple[int, bytes]:
+                     authorization: str, body: bytes, *, correlation=None, error_observer=None) -> tuple[int, bytes]:
     if path != "/v1/chat/completions":
         return 404, b'{}'
     selected = authorized_provider(routes, authorization)
@@ -103,17 +123,25 @@ def dispatch_request(routes: dict[str, Provider], path: str,
                 return 502, b'{}'
             return response.status, answer
     except error.HTTPError as exc:
+        _observe_http_error(error_observer, exc)
+        exc.close()
         return exc.code, b'{}'
     except (error.URLError, TimeoutError, OSError) as exc:
-        timed_out = isinstance(exc, TimeoutError) or (
-            isinstance(exc, error.URLError) and isinstance(exc.reason, TimeoutError))
-        print(json.dumps({
-            "event": "model_upstream_timeout" if timed_out else "model_upstream_error",
-            "provider": selected.name, "model": selected.model,
-            "elapsed_seconds": round(time.monotonic() - started_at, 1),
-            "timeout_seconds": timeout,
-        }), file=sys.stderr, flush=True)
-        return (504 if timed_out else 502), b'{}'
+        return _transport_failure(selected, exc, timeout, started_at, error_observer)
+
+
+def _transport_failure(selected, exc, timeout, started_at, error_observer):
+    if error_observer:
+        observe(error_observer, {'error_type': type(exc).__name__, 'reason': str(exc)})
+    timed_out = isinstance(exc, TimeoutError) or (
+        isinstance(exc, error.URLError) and isinstance(exc.reason, TimeoutError))
+    print(json.dumps({
+        "event": "model_upstream_timeout" if timed_out else "model_upstream_error",
+        "provider": selected.name, "model": selected.model,
+        "elapsed_seconds": round(time.monotonic() - started_at, 1),
+        "timeout_seconds": timeout,
+    }), file=sys.stderr, flush=True)
+    return (504 if timed_out else 502), b'{}'
 
 
 def start_proxy(routes: dict[str, Provider], host: str = "0.0.0.0",
@@ -145,18 +173,21 @@ def start_proxy(routes: dict[str, Provider], host: str = "0.0.0.0",
                 self._reply(413, b'{}')
                 return
             body = self.rfile.read(size)
-            span = (tracer.model_span(self.headers.get('X-Popot-Session-Id'),
+            span = (observe(tracer.model_span, self.headers.get('X-Popot-Session-Id'),
                     authorized_provider(routes, authorization).model) if tracer else None)
+            if span:
+                observe(span.model_input, body, request_id=self.headers.get('X-Popot-Request-Id'))
             try:
                 status, answer = dispatch_request(routes, self.path,
                                                   authorization, body, correlation={
-                                                      name:self.headers.get(name) for name in CORRELATION_HEADERS})
+                                                      name:self.headers.get(name) for name in CORRELATION_HEADERS},
+                                                  error_observer=(lambda value: observe(span.upstream_error, value)) if span else None)
             except BaseException:
                 if span:
-                    span.model_result(502, b'{}')
+                    observe(span.model_result, 502, b'{}')
                 raise
             if span:
-                span.model_result(status, answer)
+                observe(span.model_result, status, answer)
             self._reply(status, answer)
 
         def log_message(self, _format: str, *_args) -> None:
